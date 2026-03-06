@@ -25,7 +25,13 @@ void(*drawsync_callback)(void) = NULL;
 
 int ClearImage(RECT16* rect, u_char r, u_char g, u_char b)
 {
+#ifdef PSYX_SKIP_FRAMEBUFFER_STORE
+	/* When framebuffer store is skipped (on-screen rendering mode), don't
+	 * clear VRAM - it would destroy texture and CLUT data. The on-screen
+	 * framebuffer is cleared separately via GR_Clear in BeginScene. */
+#else
 	GR_ClearVRAM(rect->x, rect->y, rect->w, rect->h, r, g, b);
+#endif
 
 	// TODO: clear all affected backbuffers
 	GR_Clear(rect->x, rect->y, rect->w, rect->h, r, g, b);
@@ -34,7 +40,11 @@ int ClearImage(RECT16* rect, u_char r, u_char g, u_char b)
 
 int ClearImage2(RECT16* rect, u_char r, u_char g, u_char b)
 {
+#ifdef PSYX_SKIP_FRAMEBUFFER_STORE
+	/* Same as ClearImage - skip VRAM clear to protect textures/CLUTs. */
+#else
 	GR_ClearVRAM(rect->x, rect->y, rect->w, rect->h, r, g, b);
+#endif
 
 	// TODO: clear all affected backbuffers
 	GR_Clear(rect->x, rect->y, rect->w, rect->h, r, g, b);
