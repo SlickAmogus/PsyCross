@@ -512,7 +512,7 @@ void FntLoad(int x, int y)
 	GetTimInfo((u_long*)dbugfont, &tim);
 
 	// Load font image
-	pos = *tim.pRECT16;
+	pos = *tim.prect;
 	pos.x = x;
 	pos.y = y;
 
@@ -522,9 +522,9 @@ void FntLoad(int x, int y)
 	DrawSync(0);
 
 	// Load font clut
-	pos = *tim.cRECT16;
+	pos = *tim.crect;
 	pos.x = x;
-	pos.y = y + tim.pRECT16->h;
+	pos.y = y + tim.prect->h;
 
 	_font_clut = getClut(pos.x, pos.y);
 
@@ -561,7 +561,7 @@ void CatPrim(void* p0, void* p1)
 	catPrim(p0, p1);
 }
 
-u_short LoadTPage(u_int* pix, int tp, int abr, int x, int y, int w, int h)
+u_short LoadTPage(u_long* pix, int tp, int abr, int x, int y, int w, int h)
 {
 	RECT16 imageArea;
 	imageArea.x = x;

@@ -325,6 +325,12 @@ typedef struct _RECT16 {
 	short w, h;		/* width and height */
 } RECT16;
 
+/* PSY-Q compatibility - RECT as macro, skip if Windows RECT already defined */
+#ifndef _WINDEF_
+#define RECT RECT16
+#endif
+typedef RECT16 RECT32;
+
 // Psy-X custom struct to handle polygons
 
 #if USE_EXTENDED_PRIM_POINTERS
@@ -773,9 +779,9 @@ typedef struct {
  */
 typedef struct {
 	u_int	mode;		/* pixel mode */
-	RECT16	*cRECT16;		/* CLUT RECT16angle on frame buffer */
+	RECT16	*crect;		/* CLUT rectangle on frame buffer */
 	u_int*	caddr;		/* CLUT address on main memory */
-	RECT16	*pRECT16;		/* texture image RECT16angle on frame buffer */
+	RECT16	*prect;		/* texture image rectangle on frame buffer */
 	u_int*	paddr;		/* texture image address on main memory */
 } TIM_IMAGE;
 

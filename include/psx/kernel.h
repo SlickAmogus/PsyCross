@@ -108,17 +108,15 @@ struct EvCB {
 	int system[2];			/* reserved by system */
 };
 
-//#if !defined(D3D9)
-#if 0///@FIXME Really not defined D3D9 :/
-struct EXEC {                   
-        unsigned int pc0;      
-        unsigned int gp0;      
-        unsigned int t_addr;   
-        unsigned int t_size;   
-        unsigned int d_addr;   
-        unsigned int d_size;   
-        unsigned int b_addr;   
-        unsigned int b_size;   
+struct EXEC {
+        unsigned int pc0;
+        unsigned int gp0;
+        unsigned int t_addr;
+        unsigned int t_size;
+        unsigned int d_addr;
+        unsigned int d_size;
+        unsigned int b_addr;
+        unsigned int b_size;
 	unsigned int s_addr;
 	unsigned int s_size;
 	unsigned int sp,fp,gp,ret,base;
@@ -132,7 +130,6 @@ struct XF_HDR {
 	struct EXEC exec;
 	char title[60];		/* "PlayStation(tm) Executable A1" */
 };
-#endif
 
 struct DIRENTRY {
 	char name[20];

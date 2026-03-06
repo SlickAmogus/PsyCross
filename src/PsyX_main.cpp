@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#include <windows.h>
+#endif // _WIN32
+
 #include "PsyX_main.h"
 
 #include "PsyX/PsyX_version.h"
@@ -23,10 +27,6 @@
 #include <SDL.h>
 
 #include "PsyX/PsyX_render.h"
-
-#ifdef _WIN32
-#include <pla.h>
-#endif // _WIN32
 
 #ifdef __EMSCRIPTEN__
 int strcasecmp(const char* _l, const char* _r)
@@ -831,8 +831,10 @@ void PsyX_EndScene()
 #endif
 
 	GR_EndScene();
-	
+
+#ifndef PSYX_SKIP_FRAMEBUFFER_STORE
 	GR_StoreFrameBuffer(activeDispEnv.disp.x, activeDispEnv.disp.y, activeDispEnv.disp.w, activeDispEnv.disp.h);
+#endif
 
 	GR_SwapWindow();
 }

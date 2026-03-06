@@ -278,7 +278,7 @@ extern int doCOP2(int op);
 
 #define gte_rtv2tr() doCOP2(0x0490012);
 
-#define gte_rtirtr() op2 0x0498012);
+#define gte_rtirtr() doCOP2(0x0498012);
 
 #define gte_rtv0bk() doCOP2(0x0482012);
 

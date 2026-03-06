@@ -8,6 +8,12 @@ file(GLOB_RECURSE PSYCROSS_SRCS_CPP
 
 set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES LANGUAGE C)
 set_source_files_properties( ${PSYCROSS_SRCS_CPP} PROPERTIES LANGUAGE CXX)
+
+# C11 uses _Static_assert, but PsyCross headers use C++ style static_assert
+# Add compatibility define for C compilation
+set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES
+    COMPILE_DEFINITIONS "static_assert=_Static_assert"
+)
 #set_source_files_properties( "src/gte/PsyX_GTE.cpp" PROPERTIES LANGUAGE C)
 
 add_library(psycross_static STATIC ${PSYCROSS_SRCS_C} ${PSYCROSS_SRCS_CPP})

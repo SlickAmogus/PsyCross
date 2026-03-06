@@ -18,7 +18,7 @@
 #define GET_CLUT_X(clut)        ((clut & 0x3F) << 4)
 #define GET_CLUT_Y(clut)        (clut >> 6)
 
-OT_TAG prim_terminator = { -1, 0 }; // P_TAG with zero primLength
+OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
 
 DISPENV currentDispEnv;
 DISPENV activeDispEnv;
@@ -726,6 +726,16 @@ static void AddSplit(bool semiTrans, bool textured)
 
 void DrawSplit(const GPUDrawSplit& split)
 {
+	{
+		static int splitLog = 0;
+		if (splitLog < 40 && split.numVerts > 0) {
+			eprintf("[DBG] DrawSplit: fmt=%d blend=%d verts=%d dfe=%d texId=%u clip=(%d,%d,%d,%d)\n",
+				split.texFormat, split.blendMode, split.numVerts, split.drawenv.dfe,
+				(unsigned)split.textureId, split.drawenv.clip.x, split.drawenv.clip.y,
+				split.drawenv.clip.w, split.drawenv.clip.h);
+			splitLog++;
+		}
+	}
 	if(split.debugText)
 		GR_PushDebugLabel(split.debugText);
 
@@ -1317,6 +1327,23 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
 		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		{
+			static int sprtLog = 0;
+			if (sprtLog < 80) {
+				int fmt = (activeDrawEnv.tpage >> 7) & 3;
+				int pageX = (activeDrawEnv.tpage & 0xF) * 64;
+				int pageY = ((activeDrawEnv.tpage >> 4) & 1) * 256;
+				int clutX = (poly->clut & 0x3F) * 16;
+				int clutY = poly->clut >> 6;
+				eprintf("[DBG] SPRT: tpage=0x%x fmt=%d pageXY=(%d,%d) uv=(%d,%d) wh=(%d,%d) clut=0x%x clutXY=(%d,%d) rgb=(%d,%d,%d) xy=(%d,%d)\n",
+					activeDrawEnv.tpage, fmt, pageX, pageY,
+					poly->u0, poly->v0, poly->w, poly->h,
+					poly->clut, clutX, clutY,
+					poly->r0, poly->g0, poly->b0,
+					poly->x0, poly->y0);
+				sprtLog++;
+			}
+		}
 
 		TriangulateQuad();
 
@@ -1447,7 +1474,7 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 			// DR_TPAGE
 			activeDrawEnv.tpage = (code & 0x1FF);
 			activeDrawEnv.dtd = (code >> 9) & 1;
-			activeDrawEnv.dfe = (code >> 10) & 1;
+			activeDrawEnv.dfe = 1; // Force dfe=1: PSX dfe only controls display-during-draw for interlace, not rendering target
 			break;
 		}
 		case 0x2:

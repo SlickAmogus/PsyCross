@@ -183,7 +183,7 @@ int GetTimInfo(u_long* tim, TIM_IMAGE* timimg)
 	// Clut present?
 	if (timimg->mode & 0x8) {
 
-		timimg->cRECT16 = (RECT16*)&rtim[1];
+		timimg->crect = (RECT16*)&rtim[1];
 		timimg->caddr = (u_int*)&rtim[3];
 
 		rtim += rtim[0] >> 2;
@@ -191,7 +191,7 @@ int GetTimInfo(u_long* tim, TIM_IMAGE* timimg)
 		timimg->caddr = 0;
 	}
 
-	timimg->pRECT16 = (RECT16*)&rtim[1];
+	timimg->prect = (RECT16*)&rtim[1];
 	timimg->paddr = (u_int*)&rtim[3];
 
 	return 0;
