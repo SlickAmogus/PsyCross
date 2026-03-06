@@ -336,20 +336,26 @@ int CdControl(u_char com, u_char * param, u_char * result)
 
 	switch (com)
 	{
+	case CdlNop:
+	case CdlStandby:
+	case CdlPause:
+		return 1;
+	case CdlSetmode:
+		return 1;
 	case CdlSetloc:
 		vfseek(&g_imageFile, CdPosToInt(cd)*g_cdSectorSize, SEEK_SET);
-		break;
+		return 1;
 	case CdlReadS:
 	{
 		unsigned int filePos = vftell(&g_imageFile);
-		
+
 		CdlLOC currentLoc;
 		CdIntToPos(filePos, &currentLoc);
-		
+
 		vfseek(&g_imageFile, CdPosToInt(cd) * g_cdSectorSize, SEEK_SET);
-		
+
 		g_cdCurrentSector = CdPosToInt(cd);
-		
+
 		if (cd->sector != currentLoc.sector)
 			return 1;
 
@@ -374,6 +380,11 @@ int CdControlB(u_char com, u_char* param, u_char* result)
 
 	switch (com)
 	{
+	case CdlNop:
+	case CdlStandby:
+	case CdlPause:
+		ret = 1;
+		break;
 	case CdlSetloc:
 	{
 		CdlLOC* cd = (CdlLOC*)param;
@@ -391,9 +402,6 @@ int CdControlB(u_char com, u_char* param, u_char* result)
 	case CdlSetmode:
 	{
 		// TODO: CdlModeSize0 and CdlModeSize1 can change things
-
-		eprinterr("Unimplemented 'CdlSetmode'!\n");
-
 		ret = 1;
 		break;
 	}
