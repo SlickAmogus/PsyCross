@@ -460,6 +460,9 @@ static int decodeSound(u_char* iData, int soundSize, short* oData, int* loopStar
 	int loopStrt = 0, loopEnd = 0;
 	int breakOn = -1;
 
+	/* Cap output to prevent buffer overflow — caller passes waveBuffer[SPU_REALMEMSIZE] */
+	const int maxOutputSamples = SPU_REALMEMSIZE - 2;
+
 	for (int i = 0; i < soundSize; i++)
 	{
 		if (i % 16 == 0)
@@ -468,6 +471,9 @@ static int decodeSound(u_char* iData, int soundSize, short* oData, int* loopStar
 			flag = iData[i+1];
 			i += 2;
 		}
+
+		if (k >= maxOutputSamples)
+			break;
 
 		sd = (int)iData[i] & 0xF;
 		oData[k++] = vagToPcm(sp, sd, &vagPrev1, &vagPrev2);
@@ -502,7 +508,7 @@ static int decodeSound(u_char* iData, int soundSize, short* oData, int* loopStar
 		}
 	}
 
-	return soundSize;
+	return k;
 }
 
 static void UpdateVoiceSample(SPUALVoice* voice)
@@ -530,36 +536,6 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 	if (count == 0)
 		return;
 
-#if 0	// sample test
-	{
-		ALuint aalSource;
-		ALuint aalBuffer;
-
-		alGenSources(1, &aalSource);
-		alGenBuffers(1, &aalBuffer);
-
-		// update AL buffer
-		alBufferData(aalBuffer, AL_FORMAT_MONO16, waveBuffer, count * sizeof(short), 11000);
-
-		// set the buffer
-		alSourcei(aalSource, AL_BUFFER, aalBuffer);
-		alSourcef(aalSource, AL_GAIN, 1.0f);// TODO: panning
-		alSourcef(aalSource, AL_PITCH, 1);
-
-		alSourcePlay(aalSource);
-		int status;
-		do
-		{
-			alGetSourcei(aalSource, AL_SOURCE_STATE, &status);
-		} while (status == AL_PLAYING);
-
-		alSourceStop(aalSource);
-
-		alDeleteSources(1, &aalSource);
-		alDeleteBuffers(1, &aalBuffer);
-	}
-#endif
-
 	alSourcei(alSource, AL_BUFFER, 0);
 	alBufferData(alBuffer, AL_FORMAT_MONO16, waveBuffer, count * sizeof(short), 44100);
 
@@ -577,8 +553,6 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 	}
 	else
 	{
-		//int sampleOffs[] = { 0, 0 };
-		//alBufferiv(alBuffer, AL_LOOP_POINTS_SOFT, sampleOffs);
 		alSourcei(alSource, AL_LOOPING, AL_FALSE);
 	}
 
