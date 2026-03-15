@@ -213,6 +213,11 @@ extern void			GR_DrawTriangles(int start_vertex, int triangles);
 extern void			GR_PushDebugLabel(const char* label);
 extern void			GR_PopDebugLabel();
 
+/* Per-frame fog color for shader-based fog blending.
+ * Set from game code; shader reads via u_fogColor uniform.
+ * Fog amount per-primitive comes from GrVertex._p0. */
+extern float		g_PsyX_FogColor[3];
+
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }
 #endif

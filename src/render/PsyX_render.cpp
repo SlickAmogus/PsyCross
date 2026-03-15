@@ -490,6 +490,7 @@ typedef struct
 	GLint projection3DLoc;
 	GLint bilinearFilterLoc;
 	GLint texelSizeLoc;
+	GLint fogColorLoc;
 #endif
 } GTEShader;
 
@@ -504,6 +505,9 @@ GLint u_projectionLoc;
 GLint u_projection3DLoc;
 GLint u_bilinearFilterLoc;
 GLint u_texelSizeLoc;
+GLint u_fogColorLoc;
+
+float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 
 #define GPU_PACK_RG\
 	"		float color_16 = (color_rg.y * 256.0 + color_rg.x) * 255.0;\n"
@@ -656,6 +660,7 @@ GLint u_texelSizeLoc;
 	"		v_page_clut.zw += c_UVFudge;\n"\
 	GTE_PERSPECTIVE_CORRECTION\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
+	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"	}\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
@@ -668,6 +673,7 @@ GLint u_texelSizeLoc;
 	GPU_BILINEAR_SAMPLE_FUNC\
 	GPU_NEAREST_SAMPLE_FUNC\
 	"	uniform int bilinearFilter;\n"\
+	"	uniform vec3 u_fogColor;\n"\
 	"	void main() {\n"\
 	"		if(bilinearFilter > 0)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
@@ -675,6 +681,7 @@ GLint u_texelSizeLoc;
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
 	"		\n"\
 	GPU_DITHERING\
+	"		fragColor.rgb = mix(fragColor.rgb, u_fogColor, v_fogAmount);\n"\
 	"	}\n"
 
 const char* gte_shader_4 =
@@ -682,6 +689,7 @@ const char* gte_shader_4 =
 	"varying vec4 v_color;\n"
 	"varying vec4 v_page_clut;\n"
 	"varying float v_z;\n"
+	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -693,6 +701,7 @@ const char* gte_shader_8 =
 	"varying vec4 v_color;\n"
 	"varying vec4 v_page_clut;\n"
 	"varying float v_z;\n"
+	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -704,6 +713,7 @@ const char* gte_shader_16 =
 	"varying vec4 v_color;\n"
 	"varying vec4 v_page_clut;\n"
 	"varying float v_z;\n"
+	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -715,6 +725,7 @@ const char* gte_shader_32_rgba =
 	"varying vec4 v_color;\n"
 	"varying vec4 v_page_clut;\n"
 	"varying float v_z;\n"
+	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -860,6 +871,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_position, "a_position");
 	glBindAttribLocation(program, a_texcoord, "a_texcoord");
 	glBindAttribLocation(program, a_color, "a_color");
+	glBindAttribLocation(program, a_extra, "a_extra");
 
 #if USE_PGXP
 	glBindAttribLocation(program, a_zw, "a_zw");
@@ -928,6 +940,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
+	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
 #if USE_PGXP
 	sh->projection3DLoc = glGetUniformLocation(sh->shader, "Projection3D");
 #endif
@@ -1228,6 +1241,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_4.projectionLoc;
 		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1235,6 +1249,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_8.projectionLoc;
 		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1242,6 +1257,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_16.projectionLoc;
 		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
 		u_texelSizeLoc = -1;
+		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1249,8 +1265,12 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projectionLoc = g_gte_shader_32_rgba.projectionLoc;
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
+		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
 		break;
 	}
+
+	if (u_fogColorLoc != -1)
+		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
 
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;

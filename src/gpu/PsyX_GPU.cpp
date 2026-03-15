@@ -304,33 +304,35 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv3);
 
 	const unsigned char bright = 2;
+	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
+	short pageCoord = page & 0x1F;
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = page;
+	vertex[0].page = pageCoord;
 	vertex[0].clut = clut;
 
 	vertex[1].u = uv1[0];
 	vertex[1].v = uv1[1];
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = page;
+	vertex[1].page = pageCoord;
 	vertex[1].clut = clut;
 
 	vertex[2].u = uv2[0];
 	vertex[2].v = uv2[1];
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = page;
+	vertex[2].page = pageCoord;
 	vertex[2].clut = clut;
 
 	vertex[3].u = uv3[0];
 	vertex[3].v = uv3[1];
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = page;
+	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
 	/*
 	if (g_cfg_bilinearFiltering)
@@ -356,26 +358,28 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv2);
 
 	const unsigned char bright = 2;
+	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
+	short pageCoord = page & 0x1F;
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = page;
+	vertex[0].page = pageCoord;
 	vertex[0].clut = clut;
 
 	vertex[1].u = uv1[0];
 	vertex[1].v = uv1[1];
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = page;
+	vertex[1].page = pageCoord;
 	vertex[1].clut = clut;
 
 	vertex[2].u = uv2[0];
 	vertex[2].v = uv2[1];
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = page;
+	vertex[2].page = pageCoord;
 	vertex[2].clut = clut;
 	/*
 	if (g_cfg_bilinearFiltering)
@@ -404,33 +408,35 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
+	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
+	short pageCoord = page & 0x1F;
 
 	vertex[0].u = uv[0];
 	vertex[0].v = uv[1];
 	vertex[0].bright = bright;
 	vertex[0].dither = dither;
-	vertex[0].page = page;
+	vertex[0].page = pageCoord;
 	vertex[0].clut = clut;
 
 	vertex[1].u = uv[0];
 	vertex[1].v = uv[1] + h;
 	vertex[1].bright = bright;
 	vertex[1].dither = dither;
-	vertex[1].page = page;
+	vertex[1].page = pageCoord;
 	vertex[1].clut = clut;
 
 	vertex[2].u = uv[0] + w;
 	vertex[2].v = uv[1] + h;
 	vertex[2].bright = bright;
 	vertex[2].dither = dither;
-	vertex[2].page = page;
+	vertex[2].page = pageCoord;
 	vertex[2].clut = clut;
 
 	vertex[3].u = uv[0] + w;
 	vertex[3].v = uv[1];
 	vertex[3].bright = bright;
 	vertex[3].dither = dither;
-	vertex[3].page = page;
+	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
 
 	if (g_cfg_bilinearFiltering)
@@ -550,6 +556,7 @@ void MakeColourNoShade(GrVertex* vertex, int n)
 		vertex[n].g = 128;
 		vertex[n].b = 128;
 		vertex[n].a = 255;
+		vertex[n]._p0 = 0;
 		--n;
 	}
 }
@@ -568,21 +575,25 @@ void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
 	vertex[0].a = 255;
+	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
 	vertex[1].a = 255;
+	vertex[1]._p0 = 0;
 
 	vertex[2].r = col1[0];
 	vertex[2].g = col1[1];
 	vertex[2].b = col1[2];
 	vertex[2].a = 255;
+	vertex[2]._p0 = 0;
 
 	vertex[3].r = col0[0];
 	vertex[3].g = col0[1];
 	vertex[3].b = col0[2];
 	vertex[3].a = 255;
+	vertex[3]._p0 = 0;
 }
 
 void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2)
@@ -601,16 +612,19 @@ void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, 
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
 	vertex[0].a = 255;
+	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
 	vertex[1].a = 255;
+	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
 	vertex[2].a = 255;
+	vertex[2]._p0 = 0;
 }
 
 void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
@@ -630,21 +644,25 @@ void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
 	vertex[0].a = 255;
+	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
 	vertex[1].a = 255;
+	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
 	vertex[2].a = 255;
+	vertex[2]._p0 = 0;
 
 	vertex[3].r = col3[0];
 	vertex[3].g = col3[1];
 	vertex[3].b = col3[2];
 	vertex[3].a = 255;
+	vertex[3]._p0 = 0;
 }
 
 void TriangulateQuad()
@@ -1231,6 +1249,11 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
 
+		// Copy per-primitive fog factor from pad byte
+		firstVertex[0]._p0 = poly->p1;
+		firstVertex[1]._p0 = poly->p1;
+		firstVertex[2]._p0 = poly->p1;
+
 		g_vertexIndex += 3;
 
 #if defined(DEBUG_POLY_COUNT)
@@ -1269,6 +1292,12 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
 		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+
+		// Copy per-primitive fog factor from pad byte
+		firstVertex[0]._p0 = poly->p1;
+		firstVertex[1]._p0 = poly->p1;
+		firstVertex[2]._p0 = poly->p1;
+		firstVertex[3]._p0 = poly->p1;
 
 		TriangulateQuad();
 
