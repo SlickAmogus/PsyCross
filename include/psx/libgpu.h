@@ -292,11 +292,11 @@ extern	int (*GPU_printf)(const char *fmt, ...);
 #define setPolyF3(p)	setlen(p, 4),  setcode(p, 0x20)
 #define setPolyFT3(p)	setlen(p, 7),  setcode(p, 0x24)
 #define setPolyG3(p)	setlen(p, 6),  setcode(p, 0x30)
-#define setPolyGT3(p)	setlen(p, 9),  setcode(p, 0x34), (p)->p1 = 0
+#define setPolyGT3(p)	setlen(p, 9),  setcode(p, 0x34), (p)->p1 = 0, (p)->p2 = 0
 #define setPolyF4(p)	setlen(p, 5),  setcode(p, 0x28)
 #define setPolyFT4(p)	setlen(p, 9),  setcode(p, 0x2c)
 #define setPolyG4(p)	setlen(p, 8),  setcode(p, 0x38)
-#define setPolyGT4(p)	setlen(p, 12), setcode(p, 0x3c), (p)->p1 = 0
+#define setPolyGT4(p)	setlen(p, 12), setcode(p, 0x3c), (p)->p1 = 0, (p)->p2 = 0, (p)->p3 = 0
 
 #define setSprt8(p)	setlen(p, 3),  setcode(p, 0x74)
 #define setSprt16(p)	setlen(p, 3),  setcode(p, 0x7c)

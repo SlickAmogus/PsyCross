@@ -1249,10 +1249,10 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
 
-		// Copy per-primitive fog factor from pad byte
-		firstVertex[0]._p0 = poly->p1;
-		firstVertex[1]._p0 = poly->p1;
-		firstVertex[2]._p0 = poly->p1;
+		// Copy per-vertex fog factor from pad bytes
+		firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+		firstVertex[1]._p0 = poly->p1;  // v1
+		firstVertex[2]._p0 = poly->p2;  // v2
 
 		g_vertexIndex += 3;
 
@@ -1293,11 +1293,11 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
 
-		// Copy per-primitive fog factor from pad byte
-		firstVertex[0]._p0 = poly->p1;
-		firstVertex[1]._p0 = poly->p1;
-		firstVertex[2]._p0 = poly->p1;
-		firstVertex[3]._p0 = poly->p1;
+		// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
+		firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+		firstVertex[1]._p0 = poly->p1;  // v1
+		firstVertex[2]._p0 = poly->p3;  // v3 (buffer[2] = poly vertex 3 due to swap)
+		firstVertex[3]._p0 = poly->p2;  // v2 (buffer[3] = poly vertex 2 due to swap)
 
 		TriangulateQuad();
 
