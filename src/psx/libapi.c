@@ -8,6 +8,24 @@ long sp = 0;
 int dword_300[] = { 0x20, 0xD,  0x0,  0x0 };
 int dword_308[] = { 0x10, 0x20, 0x40, 0x1 };
 
+/* ---- Simple PSX Event System ---- */
+#define MAX_EVENTS 16
+
+typedef struct {
+    int used;
+    int enabled;
+    unsigned int ev_class;  /* e.g. RCntCNT2 */
+    int ev_spec;
+    int ev_mode;
+    long (*callback)(void);
+} PsxEvent;
+
+static PsxEvent g_events[MAX_EVENTS] = { 0 };
+
+/* RCnt2 timer callback — called from PsyX interrupt thread */
+static long (*g_rcnt2_callback)(void) = NULL;
+int g_rcnt2_timer_active = 0;  /* exposed to PsyX_main.cpp */
+
 #define CTR_RUNNING (0)
 #define CTR_STOPPED (1)
 
@@ -137,50 +155,93 @@ int StopRCnt(int spec)//TODO
 	return 0;
 }
 #undef OpenEvent
-int OpenEvent(unsigned int event, int unk01, int unk02, long(*func)())
+int OpenEvent(unsigned int ev_class, int ev_spec, int ev_mode, long(*func)())
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	/* Find a free slot */
+	for (int i = 0; i < MAX_EVENTS; i++) {
+		if (!g_events[i].used) {
+			g_events[i].used = 1;
+			g_events[i].enabled = 0;
+			g_events[i].ev_class = ev_class;
+			g_events[i].ev_spec = ev_spec;
+			g_events[i].ev_mode = ev_mode;
+			g_events[i].callback = func;
+			return i + 1; /* 1-based handle */
+		}
+	}
+	return -1;
 }
 
 int CloseEvent(unsigned int event)
 {
-	PSYX_UNIMPLEMENTED();
+	int idx = (int)event - 1;
+	if (idx >= 0 && idx < MAX_EVENTS) {
+		/* If this was the RCnt2 callback, clear it */
+		if (g_events[idx].callback == g_rcnt2_callback && g_rcnt2_callback != NULL) {
+			g_rcnt2_callback = NULL;
+			g_rcnt2_timer_active = 0;
+		}
+		g_events[idx].used = 0;
+		g_events[idx].enabled = 0;
+		g_events[idx].callback = NULL;
+	}
 	return 0;
 }
 
 int EnableEvent(unsigned int event)
 {
-	PSYX_UNIMPLEMENTED();
+	int idx = (int)event - 1;
+	if (idx >= 0 && idx < MAX_EVENTS && g_events[idx].used) {
+		g_events[idx].enabled = 1;
+
+		/* If this is an RCnt2 event, register the callback for the timer */
+		if ((g_events[idx].ev_class & 0xFFFF) == 2) { /* RCntCNT2 */
+			g_rcnt2_callback = g_events[idx].callback;
+			g_rcnt2_timer_active = 1;
+		}
+	}
 	return 0;
 }
 
 int DisableEvent(unsigned int event)
 {
-	PSYX_UNIMPLEMENTED();
+	int idx = (int)event - 1;
+	if (idx >= 0 && idx < MAX_EVENTS) {
+		g_events[idx].enabled = 0;
+		if ((g_events[idx].ev_class & 0xFFFF) == 2) {
+			g_rcnt2_timer_active = 0;
+		}
+	}
 	return 0;
 }
 
 int WaitEvent(unsigned int event)
 {
-	PSYX_UNIMPLEMENTED();
+	/* Not needed for BGM — just return */
 	return 0;
 }
 
 int TestEvent(unsigned int event)
 {
-	PSYX_UNIMPLEMENTED();
 	return 0;
 }
 
 void DeliverEvent(unsigned int ev1, int ev2)
 {
-	PSYX_UNIMPLEMENTED();
+	/* Not needed */
 }
 
 void UnDeliverEvent(unsigned int ev1, int ev2)
 {
-	PSYX_UNIMPLEMENTED();
+	/* Not needed */
+}
+
+/* Called from PsyX interrupt thread to pump RCnt2 timer */
+void PsyX_PumpRCnt2Timer(void)
+{
+	if (g_rcnt2_timer_active && g_rcnt2_callback) {
+		g_rcnt2_callback();
+	}
 }
 
 int OpenTh(int(*func)(), unsigned int unk01, unsigned int unk02)

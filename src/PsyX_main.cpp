@@ -72,6 +72,8 @@ extern "C" {
 #endif
 
 extern void(*vsync_callback)(void);
+extern int g_rcnt2_timer_active;
+extern void PsyX_PumpRCnt2Timer(void);
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }
@@ -161,7 +163,13 @@ int PsyX_Sys_GetVBlankCount()
 
 int intrThreadMain(void* data)
 {
+	timerCtx_t rcnt2Timer;
 	Util_InitHPCTimer(&g_vblTimer);
+	Util_InitHPCTimer(&rcnt2Timer);
+
+	/* PSX RCnt2 = system clock / 8 = 4233600 Hz.
+	 * Target 7328 → fires at 4233600/7328 ≈ 577.8 Hz → ~1.73ms period */
+	const double rcnt2Period = 1.0 / 577.8;
 
 	while (!g_stopIntrThread)
 	{
@@ -173,18 +181,30 @@ int intrThreadMain(void* data)
 			if (vblDelta > timestep)
 			{
 				SDL_LockMutex(g_intrMutex);
-				
+
 				if (vsync_callback)
 					vsync_callback();
-				
+
 				SDL_UnlockMutex(g_intrMutex);
-				
+
 				// do vblank events
 				g_psxSysCounters[PsxCounter_VBLANK]++;
-			
+
 				Util_GetHPCTime(&g_vblTimer, 1);
 			}
-			
+
+			/* Pump RCnt2 timer for BGM/MIDI sequencer */
+			if (g_rcnt2_timer_active)
+			{
+				const double rcnt2Delta = Util_GetHPCTime(&rcnt2Timer, 0);
+				if (rcnt2Delta > rcnt2Period)
+				{
+					SDL_LockMutex(g_intrMutex);
+					PsyX_PumpRCnt2Timer();
+					SDL_UnlockMutex(g_intrMutex);
+					Util_GetHPCTime(&rcnt2Timer, 1);
+				}
+			}
 		}
 	}
 
