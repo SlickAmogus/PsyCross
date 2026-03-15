@@ -446,6 +446,8 @@ void DrawOTag(u_long* p)
 
 		ParsePrimitivesLinkedList(p, 0);
 
+		glFinish();
+
 		DrawAllSplits();
 	} while (g_dbg_emulatorPaused);
 }

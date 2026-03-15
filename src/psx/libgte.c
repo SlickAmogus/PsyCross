@@ -7,6 +7,7 @@
 #include "PsyX/PsyX_render.h"
 
 #include <assert.h>
+#include <string.h>
 
 #include "../gte/PsyX_GTE.h"
 #include "../gte/rcossin_tbl.h"
@@ -305,10 +306,10 @@ MATRIX* MulMatrix0(MATRIX* m0, MATRIX* m1, MATRIX* m2)
 	m2->m[2][2] = r2.vz;
 
 #else
-	/* ‚±‚ê‚Å‚àm0==m2‚ÌŽžƒ„ƒoƒC */
+	/* ï¿½ï¿½ï¿½ï¿½Å‚ï¿½m0==m2ï¿½ÌŽï¿½ï¿½ï¿½ï¿½oï¿½C */
 	int vx, vy, vz;
 	MATRIX tmp;
-	/* ‚Ì‚Åm0‚ðtmp‚ÉƒRƒs[ */
+	/* ï¿½Ì‚ï¿½m0ï¿½ï¿½tmpï¿½ÉƒRï¿½sï¿½[ */
 	if (m0 == m2) {
 		tmp = *m0; m0 = &tmp;
 	}
@@ -341,7 +342,9 @@ MATRIX* MulMatrix(MATRIX* m0, MATRIX* m1)
 	MATRIX tmp;
 	gte_MulMatrix0(m0, m1, &tmp);
 
-	*m0 = tmp;
+	/* MulMatrix0 only computes the 3x3 rotation; tmp.t[] is uninitialized.
+	 * Copy only the rotation part to preserve m0's translation vector. */
+	memcpy(m0->m, tmp.m, sizeof(m0->m));
 
 	return m0;
 }
@@ -352,7 +355,9 @@ MATRIX* MulMatrix2(MATRIX* m0, MATRIX* m1)
 	MATRIX tmp;
 	gte_MulMatrix0(m0, m1, &tmp);
 
-	*m1 = tmp;
+	/* MulMatrix0 only computes the 3x3 rotation; tmp.t[] is uninitialized.
+	 * Copy only the rotation part to preserve m1's translation vector. */
+	memcpy(m1->m, tmp.m, sizeof(m1->m));
 
 	return m1;
 }
