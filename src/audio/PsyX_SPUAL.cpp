@@ -541,14 +541,14 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 
 	if (loopLen > 0)
 	{
-		loopStart += voice->attr.loop_addr - voice->attr.addr;
-
-		if (loopStart - 54 > 0 && loopStart + loopLen <= count)
-		{
-			int sampleOffs[] = { loopStart, loopStart + loopLen };
-			alBufferiv(alBuffer, AL_LOOP_POINTS_SOFT, sampleOffs);
-		}
-
+		// On PSX, the SPU hardware tracks loop_addr during playback.
+		// On PC, we pre-decode the whole sample, so loop_addr is stale
+		// from previous voice assignments. The original adjustment
+		// (loopStart += loop_addr - addr) can produce plausible-but-wrong
+		// loop points when a voice channel is reused with a different sample,
+		// causing short garbage loops. Whole-buffer looping is correct for
+		// pre-decoded ADPCM and matches the de-facto working behavior
+		// (the old bounds check almost always failed anyway).
 		alSourcei(alSource, AL_LOOPING, AL_TRUE);
 	}
 	else
