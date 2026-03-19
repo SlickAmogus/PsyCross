@@ -24,7 +24,10 @@
 #include <string.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <SDL.h>
+
+#include <exception>
 
 #include "PsyX/PsyX_render.h"
 
@@ -616,12 +619,20 @@ void PsyX_Log_Success(const char* fmt, ...)
 }
 
 
+static void sh_terminate_handler()
+{
+	fprintf(stderr, "[PsyX] FATAL: std::terminate() called!\n");
+	fflush(stderr);
+	abort();
+}
+
 void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 {
 	char windowNameStr[128];
 
 	g_appNameStr = appName;
 
+	std::set_terminate(sh_terminate_handler);
 	InstallExceptionHandler();
 
 	PsyX_Log_Initialise();
@@ -1023,11 +1034,15 @@ void PsyX_WaitForTimestep(int count)
 
 void PsyX_Exit()
 {
+	fprintf(stderr, "[PsyX] PsyX_Exit() called — normal game exit.\n");
+	fflush(stderr);
 	exit(0);
 }
 
 void PsyX_Shutdown()
 {
+	fprintf(stderr, "[PsyX] PsyX_Shutdown() called (g_window=%p).\n", (void*)g_window);
+	fflush(stderr);
 	if (!g_window)
 		return;
 

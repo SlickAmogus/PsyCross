@@ -846,23 +846,20 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 	}
 	else
 	{
-		// walk OT_TAG linked list
-		for (uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);; basePacket = reinterpret_cast<uintptr_t>(nextPrim(basePacket)))
+		// walk OT_TAG linked list with safety guards
+		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
+		for (int safety = 0; safety < 16384; safety++)
 		{
 			const int tagLength = getlen(basePacket);
-			if (tagLength > 0)
+			if (tagLength > 0 && tagLength <= 32)
 			{
-				if (tagLength > 32)
-				{
-					eprinterr("got invalid tag length %d, code %d\n", tagLength, reinterpret_cast<P_TAG*>(basePacket)->code);
-				}
-
 				uintptr_t currentPacket = basePacket;
 				const uintptr_t endPacket = basePacket + (tagLength + P_LEN) * sizeof(u_int);
 				int primLength = 0;
 				while (currentPacket < endPacket)
 				{
 					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
+					if (primLength <= 0) break;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
 
@@ -871,12 +868,24 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					eprinterr("did not output valid primitive or ptag length is not valid (diff=%d)\n", endPacket-currentPacket);
 				}
 			}
+			else if (tagLength > 32)
+			{
+				eprinterr("got invalid tag length %d, code %d\n", tagLength, reinterpret_cast<P_TAG*>(basePacket)->code);
+			}
 
 			GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
 			lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
 
 			if (isendprim(basePacket))
 				break;
+
+			// Validate next pointer before following it
+			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
+			if (nextPtr < 0x10000) {
+				// NULL or very low address — likely end of list or corrupt
+				break;
+			}
+			basePacket = nextPtr;
 		}
 	}
 }
