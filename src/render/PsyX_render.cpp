@@ -78,6 +78,10 @@ int g_windowHeight = 0;
 int g_dbg_wireframeMode = 0;
 int g_dbg_texturelessMode = 0;
 
+// Set to 1 by game code only during states that render a 3D world (InGame, MapEvent).
+// When 0, GR_SetOffscreenState uses 4:3 ortho so 2D UI screens don't show VRAM garbage.
+int g_PcHorPlusEnabled = 1;
+
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
 int g_cfg_bilinearFiltering = 0;
@@ -1497,7 +1501,23 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		GR_Ortho2D(-0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f, -0.5f, -1.0f, 1.0f);
 		GR_Perspective3D(perspectiveFOV, 1.0f, 1.0f / (emuScreenAspect * PSX_SCREEN_ASPECT), perspectiveZNear, perspectiveZFar);
 #else
-		GR_Ortho2D(0, activeDispEnv.disp.w, activeDispEnv.disp.h, 0, -1.0f, 1.0f);
+		{
+			// Hor+ widescreen: expand x range so the vertical FOV is preserved and
+			// extra horizontal content fills the wider display instead of stretching.
+			// Only apply during 3D gameplay states (g_PcHorPlusEnabled=1); 2D UI
+			// screens use 4:3 ortho to avoid exposing adjacent VRAM as garbage.
+			const float psxW = (float)activeDispEnv.disp.w;  // 320
+			const float psxH = (float)activeDispEnv.disp.h;  // 240
+			const float psxAspect = psxW / psxH;             // 4/3
+			const float winAspect = (g_windowHeight > 0)
+				? ((float)g_windowWidth / (float)g_windowHeight)
+				: psxAspect;
+			const float horScale = winAspect / psxAspect;
+			const float margin = (g_PcHorPlusEnabled && horScale > 1.0f)
+				? psxW * (horScale - 1.0f) * 0.5f
+				: 0.0f;
+			GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
+		}
 #endif
 	}
 
