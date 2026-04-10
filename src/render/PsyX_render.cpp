@@ -85,6 +85,7 @@ int g_PcHorPlusEnabled = 1;
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
 int g_cfg_bilinearFiltering = 0;
+int g_cfg_affineTextures = 0;
 
 int vram_need_update = 1;
 int framebuffer_need_update = 0;
@@ -689,9 +690,9 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"	}\n"
 
 const char* gte_shader_4 =
-	"varying vec4 v_texcoord;\n"
+	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"varying vec4 v_page_clut;\n"
+	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
@@ -701,9 +702,9 @@ const char* gte_shader_4 =
 	"#endif\n";
 
 const char* gte_shader_8 =
-	"varying vec4 v_texcoord;\n"
+	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"varying vec4 v_page_clut;\n"
+	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
@@ -713,9 +714,9 @@ const char* gte_shader_8 =
 	"#endif\n";
 
 const char* gte_shader_16 =
-	"varying vec4 v_texcoord;\n"
+	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"varying vec4 v_page_clut;\n"
+	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
@@ -724,10 +725,10 @@ const char* gte_shader_16 =
 	GPU_FRAGMENT_SAMPLE_SHADER(16)
 	"#endif\n";
 
-const char* gte_shader_32_rgba = 
-	"varying vec4 v_texcoord;\n"
+const char* gte_shader_32_rgba =
+	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"varying vec4 v_page_clut;\n"
+	"AFFINE_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"#ifdef VERTEX\n"
@@ -841,6 +842,19 @@ ShaderID GR_Shader_Compile(const char* source)
 	if (g_cfg_bilinearFiltering)
 	{
 		strcat(extra_fs_defines, "#define BILINEAR_FILTER\n");
+	}
+
+	/* Affine (non-perspective-correct) texture mapping — matches PSX GPU behaviour.
+	 * Uses noperspective interpolation qualifier (GLSL 1.30+, desktop only). */
+	if (g_cfg_affineTextures)
+	{
+		strcat(extra_vs_defines, "#define AFFINE_VARYING noperspective varying\n");
+		strcat(extra_fs_defines, "#define AFFINE_VARYING noperspective varying\n");
+	}
+	else
+	{
+		strcat(extra_vs_defines, "#define AFFINE_VARYING varying\n");
+		strcat(extra_fs_defines, "#define AFFINE_VARYING varying\n");
 	}
 
 	const char* vs_list[] = { GLSL_HEADER_VERT, extra_vs_defines, source };
