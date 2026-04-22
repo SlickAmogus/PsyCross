@@ -245,12 +245,17 @@ static void PsyX_Sys_InitialiseInput()
 	g_cfg_keyboardMapping.kc_triangle = SDL_SCANCODE_Z;
 	g_cfg_keyboardMapping.kc_cross = SDL_SCANCODE_C;
 
-	g_cfg_keyboardMapping.kc_l1 = SDL_SCANCODE_LSHIFT;
-	g_cfg_keyboardMapping.kc_l2 = SDL_SCANCODE_LCTRL;
+	/* Sidestep moved to A/D, aim moved to LSHIFT, view moved to RSHIFT.
+	 * RCTRL was unreliable on the user's Win11 setup (never reached
+	 * btnsHeld_C even though SDL_SCANCODE_RCTRL is the documented
+	 * scancode for the right Control key). LCTRL also retired so the
+	 * shift keys mirror cleanly. */
+	g_cfg_keyboardMapping.kc_l1 = SDL_SCANCODE_A;            /* sidestep left */
+	g_cfg_keyboardMapping.kc_l2 = SDL_SCANCODE_RSHIFT;       /* view */
 	g_cfg_keyboardMapping.kc_l3 = SDL_SCANCODE_LEFTBRACKET;
 
-	g_cfg_keyboardMapping.kc_r1 = SDL_SCANCODE_RSHIFT;
-	g_cfg_keyboardMapping.kc_r2 = SDL_SCANCODE_RCTRL;
+	g_cfg_keyboardMapping.kc_r1 = SDL_SCANCODE_D;            /* sidestep right */
+	g_cfg_keyboardMapping.kc_r2 = SDL_SCANCODE_LSHIFT;       /* aim */
 	g_cfg_keyboardMapping.kc_r3 = SDL_SCANCODE_RIGHTBRACKET;
 
 	g_cfg_keyboardMapping.kc_dpad_up = SDL_SCANCODE_UP;
