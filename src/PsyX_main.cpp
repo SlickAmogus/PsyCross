@@ -833,15 +833,18 @@ char PsyX_BeginScene()
 
 	GR_BeginScene();
 
-	if (activeDrawEnv.isbg)
+	// Always clear the backbuffer at the start of every frame. The PSX
+	// behavior gates this on activeDrawEnv.isbg, but during state
+	// transitions (door fades, map pickups, screen wipes) the game can
+	// briefly emit prims into the OT for a frame where isbg wasn't yet
+	// set — leaving stale "street sign" garbage from the prior frame
+	// visible for a split second. Forcing a clear every frame is the
+	// PC equivalent of glClear(GL_COLOR_BUFFER_BIT) at frame start.
 	{
 		const RECT16 clipenv = activeDrawEnv.clip;
-		const u_char r = activeDrawEnv.r0;
-		const u_char g = activeDrawEnv.g0;
-		const u_char b = activeDrawEnv.b0;
-
-		// TODO: clear all affected backbuffers
-		//GR_ClearVRAM(clipenv.x, clipenv.y, clipenv.w, clipenv.h, r, g, b);
+		const u_char r = activeDrawEnv.isbg ? activeDrawEnv.r0 : 0;
+		const u_char g = activeDrawEnv.isbg ? activeDrawEnv.g0 : 0;
+		const u_char b = activeDrawEnv.isbg ? activeDrawEnv.b0 : 0;
 		GR_Clear(clipenv.x, clipenv.y, clipenv.w, clipenv.h, r, g, b);
 	}
 
