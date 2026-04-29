@@ -361,6 +361,13 @@ int CdControl(u_char com, u_char * param, u_char * result)
 
 		break;
 	}
+	case CdlSetfilter:
+	{
+		// TODO: set channel. Primarily used for CDDA/XA.
+		// Silence spam — the PC port routes XA through xa_player.c which
+		// owns its own channel filter, so the PSX-side filter is a no-op.
+		return 1;
+	}
 	default:
 		eprinterr("Unhandled command 0x%02X!\n", com);
 		break;
