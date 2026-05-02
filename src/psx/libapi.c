@@ -1,6 +1,10 @@
 #include "psx/libapi.h"
+#include "psx/libmcrd.h"
+#include "psx/kernel.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "../PsyX_main.h"
 
 long sp = 0;
@@ -14,7 +18,8 @@ int dword_308[] = { 0x10, 0x20, 0x40, 0x1 };
 typedef struct {
     int used;
     int enabled;
-    unsigned int ev_class;  /* e.g. RCntCNT2 */
+    int pending;            /* set by DeliverEvent, consumed by TestEvent */
+    unsigned int ev_class;  /* e.g. RCntCNT2, SwCARD, HwCARD */
     int ev_spec;
     int ev_mode;
     long (*callback)(void);
@@ -162,6 +167,7 @@ int OpenEvent(unsigned int ev_class, int ev_spec, int ev_mode, long(*func)())
 		if (!g_events[i].used) {
 			g_events[i].used = 1;
 			g_events[i].enabled = 0;
+			g_events[i].pending = 0;
 			g_events[i].ev_class = ev_class;
 			g_events[i].ev_spec = ev_spec;
 			g_events[i].ev_mode = ev_mode;
@@ -223,17 +229,36 @@ int WaitEvent(unsigned int event)
 
 int TestEvent(unsigned int event)
 {
+	int idx = (int)event - 1;
+	if (idx >= 0 && idx < MAX_EVENTS && g_events[idx].used && g_events[idx].pending) {
+		g_events[idx].pending = 0;
+		return 1;
+	}
 	return 0;
 }
 
 void DeliverEvent(unsigned int ev1, int ev2)
 {
-	/* Not needed */
+	/* Mark all matching events as pending; if EvMdINTR, also fire callback. */
+	for (int i = 0; i < MAX_EVENTS; i++) {
+		if (!g_events[i].used) continue;
+		if (g_events[i].ev_class != ev1) continue;
+		if (g_events[i].ev_spec != ev2) continue;
+		g_events[i].pending = 1;
+		if ((g_events[i].ev_mode & EvMdINTR) && g_events[i].callback) {
+			g_events[i].callback();
+		}
+	}
 }
 
 void UnDeliverEvent(unsigned int ev1, int ev2)
 {
-	/* Not needed */
+	for (int i = 0; i < MAX_EVENTS; i++) {
+		if (!g_events[i].used) continue;
+		if (g_events[i].ev_class != ev1) continue;
+		if (g_events[i].ev_spec != ev2) continue;
+		g_events[i].pending = 0;
+	}
 }
 
 /* Called from PsyX interrupt thread to pump RCnt2 timer */
@@ -530,89 +555,502 @@ void ChangeClearPAD(int unk00)
 	PSYX_UNIMPLEMENTED();
 }
 
+/* ============================================================================
+ * PSX Memory Card backing storage (0.MCD / 1.MCD).
+ *
+ * Layout (PSX standard, 128KB per card):
+ *   block 0 (frames 0..63, 8192 bytes) = directory
+ *     frame 0      = "MC" header (0x4D43...)
+ *     frames 1..15 = 15 directory entries (128 bytes each)
+ *     frames 16..35 = broken-sector list (32 entries)
+ *     frame 63     = test write frame (last)
+ *   blocks 1..15 = 15 file data slots (8192 bytes each)
+ *
+ * Frame size = 128 bytes. Block size = 64 frames = 8192 bytes.
+ *
+ * This implementation routes:
+ *   - _card_load/_clear/_info/_status/_wait/_chan/_format -> open/poke 0.MCD
+ *   - _card_read/_card_write -> read/write 128-byte frames at frame index
+ *   - open/lseek/read/write/close of "buXX:NAME" -> dir-entry lookup + block I/O
+ *   - firstfile/nextfile -> directory scan
+ *   - erase / format -> dir entry zero / full card wipe
+ *
+ * Each operation deliveres SwCARD/HwCARD EvSpIOE on success so the game's
+ * memcard state machine (s_MemCard_Work) advances.
+ * ============================================================================
+ */
+
+#define MC_FRAME_SIZE   128
+#define MC_BLOCK_SIZE   8192
+#define MC_FRAMES_PER_BLOCK 64
+#define MC_NUM_BLOCKS   16
+#define MC_TOTAL_SIZE   (MC_NUM_BLOCKS * MC_BLOCK_SIZE)
+#define MC_DIR_ENTRY_COUNT 15
+
+/* Directory entry attr (frame 0..15). Lower 3 bits = block-link / count.
+ * Upper nibble: 0x50 = first/only, 0x51 = middle, 0x52 = last, 0xA0 = free,
+ * 0xF0 = unusable. Game writes 0x51 with blockCount in low bits when creating. */
+#define MC_DIR_ATTR_FREE         0xA0
+#define MC_DIR_ATTR_FIRST_OR_ONLY 0x50
+
+#pragma pack(push,1)
+typedef struct {
+	unsigned int   attr;        /* state | block-count */
+	unsigned int   size;        /* bytes */
+	unsigned short unknown;
+	char           name[20];    /* null-terminated */
+	char           padding[98]; /* pad to 128 bytes */
+} McDirEntry;
+#pragma pack(pop)
+
+static int  s_currentChannel = 0;
+static int  s_lastCardOk[2]  = { 0, 0 };
+
+/* PSX file-handle table for open()/read()/write()/lseek()/close().
+ * We use small positive ints as handles (1..MC_DIR_ENTRY_COUNT). */
+typedef struct {
+	int  used;
+	int  channel;
+	int  dirIndex;       /* 1..15 */
+	int  flags;          /* O_RDONLY/O_WRONLY/O_CREAT */
+	long offset;         /* current seek pos (0..size) */
+	long size;           /* file size in bytes (block-aligned) */
+} McFileHandle;
+static McFileHandle s_handles[16] = { 0 };
+
+static const char* mc_path_for_channel(int chan)
+{
+	static char buf[16];
+	snprintf(buf, sizeof(buf), "%d.MCD", chan);
+	return buf;
+}
+
+static FILE* mc_fopen(int chan, const char* mode)
+{
+	return fopen(mc_path_for_channel(chan), mode);
+}
+
+/* Build a "fresh card" image: header magic + free dir + 0xFF data. */
+static void mc_format_buffer(unsigned char* buf)
+{
+	memset(buf, 0xFF, MC_TOTAL_SIZE);
+	/* Frame 0: "MC" magic at offset 0; 0x80 xor checksum at offset 127. */
+	memset(buf, 0, MC_FRAME_SIZE);
+	buf[0] = 'M';
+	buf[1] = 'C';
+	{
+		unsigned char xorck = 0;
+		for (int i = 0; i < MC_FRAME_SIZE - 1; i++) xorck ^= buf[i];
+		buf[MC_FRAME_SIZE - 1] = xorck;
+	}
+	/* Frames 1..15: free directory entries. */
+	for (int i = 0; i < MC_DIR_ENTRY_COUNT; i++) {
+		McDirEntry* d = (McDirEntry*)(buf + (1 + i) * MC_FRAME_SIZE);
+		memset(d, 0, sizeof(*d));
+		d->attr = MC_DIR_ATTR_FREE;
+	}
+	/* Frames 16..35: broken-sector list (filled with 0xFF, unused). */
+	memset(buf + 16 * MC_FRAME_SIZE, 0xFF, 20 * MC_FRAME_SIZE);
+	/* Data blocks 1..15 stay 0xFF. */
+}
+
+/* Ensure 0.MCD exists; create a freshly-formatted one if not. */
+static int mc_ensure_card(int chan)
+{
+	FILE* f = mc_fopen(chan, "rb");
+	if (f) { fclose(f); return 1; }
+	f = mc_fopen(chan, "wb");
+	if (!f) return 0;
+	{
+		unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
+		if (!fresh) { fclose(f); return 0; }
+		mc_format_buffer(fresh);
+		fwrite(fresh, 1, MC_TOTAL_SIZE, f);
+		free(fresh);
+	}
+	fclose(f);
+	return 1;
+}
+
+/* Read N bytes at byte offset; returns 1 on success. */
+static int mc_read_at(int chan, long ofs, void* buf, int bytes)
+{
+	FILE* f = mc_fopen(chan, "rb");
+	if (!f) return 0;
+	if (fseek(f, ofs, SEEK_SET) != 0) { fclose(f); return 0; }
+	size_t n = fread(buf, 1, bytes, f);
+	fclose(f);
+	return (int)n == bytes;
+}
+
+/* Write N bytes at byte offset; returns 1 on success. */
+static int mc_write_at(int chan, long ofs, const void* buf, int bytes)
+{
+	FILE* f = mc_fopen(chan, "rb+");
+	if (!f) {
+		/* card missing — auto-create then retry */
+		if (!mc_ensure_card(chan)) return 0;
+		f = mc_fopen(chan, "rb+");
+		if (!f) return 0;
+	}
+	if (fseek(f, ofs, SEEK_SET) != 0) { fclose(f); return 0; }
+	size_t n = fwrite(buf, 1, bytes, f);
+	fflush(f);
+	fclose(f);
+	return (int)n == bytes;
+}
+
+/* Find a directory entry by name. Returns 1..15 if found, 0 otherwise. */
+static int mc_find_dir(int chan, const char* name, McDirEntry* outEntry)
+{
+	for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++) {
+		McDirEntry e;
+		if (!mc_read_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+		if ((e.attr & 0xF0) == MC_DIR_ATTR_FREE) continue;
+		if (e.name[0] == '\0') continue;
+		if (strncmp(e.name, name, sizeof(e.name)) == 0) {
+			if (outEntry) *outEntry = e;
+			return i;
+		}
+	}
+	return 0;
+}
+
+/* Allocate a dir entry + contiguous data blocks for a new file.
+ * blocks = block count requested. Returns dir index 1..15 or 0 on failure. */
+static int mc_alloc_dir(int chan, const char* name, int blocks)
+{
+	int dirIdx = 0;
+	for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++) {
+		McDirEntry e;
+		if (!mc_read_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+		if ((e.attr & 0xF0) == MC_DIR_ATTR_FREE) {
+			dirIdx = i;
+			memset(&e, 0, sizeof(e));
+			e.attr = MC_DIR_ATTR_FIRST_OR_ONLY | (blocks & 0x7);
+			e.size = blocks * MC_BLOCK_SIZE;
+			strncpy(e.name, name, sizeof(e.name) - 1);
+			if (!mc_write_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+			return i;
+		}
+	}
+	return 0;
+}
+
+/* Strip "buXX:" prefix if present, return remaining name. */
+static const char* mc_strip_prefix(const char* path, int* outChan)
+{
+	if (!path) return NULL;
+	if (path[0] == 'b' && path[1] == 'u' && path[3] != '\0' && path[4] == ':') {
+		if (outChan) *outChan = (path[2] - '0') * 8 + (path[3] - '0');
+		return path + 5;
+	}
+	if (outChan) *outChan = 0;
+	return path;
+}
+
+/* Deliver SwCARD + HwCARD EvSpIOE so the game's state machine advances. */
+static void mc_deliver_iod(void)
+{
+	DeliverEvent(SwCARD, EvSpIOE);
+	DeliverEvent(HwCARD, EvSpIOE);
+}
+
+/* ----- BIOS-level memcard funcs ----- */
+
 void InitCARD(int val)
 {
-	PSYX_UNIMPLEMENTED();
+	(void)val;
+	MemCardInit(0);
+	mc_ensure_card(0);
 }
 
 int StartCARD()
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	MemCardStart();
+	return 1;
 }
 
 int StopCARD()
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	MemCardStop();
+	return 1;
 }
 
 void _bu_init()
 {
-	PSYX_UNIMPLEMENTED();
+	mc_ensure_card(0);
 }
 
 int _card_info(int chan)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	mc_ensure_card(chan & 1);
+	s_lastCardOk[chan & 1] = 1;
+	mc_deliver_iod();
+	return 1;
 }
 
 int _card_clear(int chan)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	mc_deliver_iod();
+	return 1;
 }
 
 int _card_load(int chan)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	s_currentChannel = chan & 1;
+	if (!mc_ensure_card(s_currentChannel)) return 0;
+	s_lastCardOk[s_currentChannel] = 1;
+	mc_deliver_iod();
+	return 1;
 }
 
 int _card_auto(int val)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	(void)val;
+	return 1;
 }
 
 void _new_card()
 {
-	PSYX_UNIMPLEMENTED();
+	/* PSX BIOS: marks card as "newly inserted" — clear cached state. */
+	s_lastCardOk[0] = 0;
+	s_lastCardOk[1] = 0;
 }
 
 int _card_status(int drv)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	return s_lastCardOk[drv & 1] ? 1 : 0;
 }
 
 int _card_wait(int drv)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	(void)drv;
+	return 1;  /* sync mode — operation already complete */
 }
 
 unsigned int _card_chan(void)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	return (unsigned int)s_currentChannel;
 }
 
-int _card_write(int chan, int block, unsigned char *buf)
+int _card_write(int chan, int frameIdx, unsigned char *buf)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	int c = chan & 1;
+	if (!mc_ensure_card(c)) return 0;
+	if (!mc_write_at(c, (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
+	mc_deliver_iod();
+	return 1;
 }
 
-int _card_read(int chan, int block, unsigned char *buf)
+int _card_read(int chan, int frameIdx, unsigned char *buf)
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	int c = chan & 1;
+	if (!mc_ensure_card(c)) return 0;
+	if (!mc_read_at(c, (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
+	mc_deliver_iod();
+	return 1;
 }
 
 int _card_format(int chan)
 {
-	PSYX_UNIMPLEMENTED();
+	int c = chan & 1;
+	unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
+	if (!fresh) return 0;
+	mc_format_buffer(fresh);
+	{
+		FILE* f = mc_fopen(c, "wb");
+		if (!f) { free(fresh); return 0; }
+		fwrite(fresh, 1, MC_TOTAL_SIZE, f);
+		fflush(f);
+		fclose(f);
+	}
+	free(fresh);
+	mc_deliver_iod();
+	return 1;
+}
+
+/* ----- POSIX-style file ops on "buXX:NAME" paths ----- */
+
+int open(char* path, unsigned int flags)
+{
+	if (!path) return -1;
+	int chan = 0;
+	const char* name = mc_strip_prefix(path, &chan);
+	if (name == path) {
+		/* Not a memcard path (e.g. "sim:..."). Not supported here. */
+		return -1;
+	}
+	if (!mc_ensure_card(chan)) return -1;
+
+	int blockCount = (int)((flags >> 16) & 0xFFFF);
+	int isCreate = (flags & 0x0200) != 0;  /* O_CREAT/FCREAT */
+
+	int dirIdx = mc_find_dir(chan, name, NULL);
+	if (dirIdx == 0) {
+		if (!isCreate) return -1;
+		if (blockCount <= 0 || blockCount > 15) blockCount = 1;
+		dirIdx = mc_alloc_dir(chan, name, blockCount);
+		if (dirIdx == 0) return -1;
+	}
+
+	for (int h = 1; h < (int)(sizeof(s_handles)/sizeof(s_handles[0])); h++) {
+		if (!s_handles[h].used) {
+			McDirEntry e;
+			if (!mc_read_at(chan, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return -1;
+			s_handles[h].used = 1;
+			s_handles[h].channel = chan;
+			s_handles[h].dirIndex = dirIdx;
+			s_handles[h].flags = (int)flags;
+			s_handles[h].offset = 0;
+			s_handles[h].size = (long)e.size;
+			if (s_handles[h].size <= 0) s_handles[h].size = MC_BLOCK_SIZE;
+			return h;
+		}
+	}
+	return -1;
+}
+
+int close(int handle)
+{
+	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
+	if (!s_handles[handle].used) return -1;
+	s_handles[handle].used = 0;
+	return 0;
+}
+
+int lseek(int handle, int offset, int whence)
+{
+	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
+	if (!s_handles[handle].used) return -1;
+	long base = 0;
+	if (whence == 0) base = 0;
+	else if (whence == 1) base = s_handles[handle].offset;
+	else if (whence == 2) base = s_handles[handle].size;
+	long p = base + offset;
+	if (p < 0) return -1;
+	s_handles[handle].offset = p;
+	return (int)p;
+}
+
+int read(int handle, void* buf, int bytes)
+{
+	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
+	if (!s_handles[handle].used) return -1;
+	int chan = s_handles[handle].channel;
+	int dataBlock = s_handles[handle].dirIndex;  /* file occupies data blocks dirIndex..dirIndex+N-1 */
+	long fileBase = (long)dataBlock * MC_BLOCK_SIZE;
+	long ofs = fileBase + s_handles[handle].offset;
+	if (!mc_read_at(chan, ofs, buf, bytes)) return -1;
+	s_handles[handle].offset += bytes;
+	mc_deliver_iod();
+	return bytes;
+}
+
+int write(int handle, void* buf, int bytes)
+{
+	if (handle < 1 || handle >= (int)(sizeof(s_handles)/sizeof(s_handles[0]))) return -1;
+	if (!s_handles[handle].used) return -1;
+	int chan = s_handles[handle].channel;
+	int dataBlock = s_handles[handle].dirIndex;
+	long fileBase = (long)dataBlock * MC_BLOCK_SIZE;
+	long ofs = fileBase + s_handles[handle].offset;
+	if (!mc_write_at(chan, ofs, buf, bytes)) return -1;
+	s_handles[handle].offset += bytes;
+	mc_deliver_iod();
+	return bytes;
+}
+
+int ioctl(int unk00, int unk01, int unk02)
+{
+	(void)unk00; (void)unk01; (void)unk02;
+	return 0;
+}
+
+/* ----- Directory enumeration ----- */
+
+/* Internal cursor for firstfile/nextfile. We embed it in DIRENTRY's `system[]`. */
+struct DIRENTRY* firstfile(char* path, struct DIRENTRY* dir)
+{
+	if (!path || !dir) return NULL;
+	int chan = 0;
+	const char* pattern = mc_strip_prefix(path, &chan);
+	(void)pattern;  /* "*" matches all; we don't support patterns here */
+	if (!mc_ensure_card(chan)) return NULL;
+	memset(dir, 0, sizeof(*dir));
+	dir->system[0] = (char)chan;
+	dir->system[1] = 0;  /* next dirIdx to scan */
+	return nextfile(dir);
+}
+
+struct DIRENTRY* nextfile(struct DIRENTRY* dir)
+{
+	if (!dir) return NULL;
+	int chan = (int)(unsigned char)dir->system[0];
+	int start = (int)(unsigned char)dir->system[1] + 1;
+	for (int i = (start < 1 ? 1 : start); i <= MC_DIR_ENTRY_COUNT; i++) {
+		McDirEntry e;
+		if (!mc_read_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return NULL;
+		if ((e.attr & 0xF0) == MC_DIR_ATTR_FREE) continue;
+		if (e.name[0] == '\0') continue;
+		dir->system[1] = (char)i;
+		strncpy(dir->name, e.name, 20);
+		dir->name[19] = '\0';
+		dir->attr = e.attr;
+		dir->size = e.size;
+		dir->head = 0;
+		dir->next = NULL;
+		return dir;
+	}
+	return NULL;
+}
+
+int erase(char* path)
+{
+	if (!path) return 0;
+	int chan = 0;
+	const char* name = mc_strip_prefix(path, &chan);
+	int dirIdx = mc_find_dir(chan, name, NULL);
+	if (dirIdx == 0) return 0;
+	McDirEntry e;
+	memset(&e, 0, sizeof(e));
+	e.attr = MC_DIR_ATTR_FREE;
+	if (!mc_write_at(chan, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+	return 1;
+}
+
+int undelete(char* unk00)
+{
+	(void)unk00;
+	return 0;
+}
+
+int format(char* path)
+{
+	int chan = 0;
+	if (path) mc_strip_prefix(path, &chan);
+	return _card_format(chan);
+}
+
+int rename(char* oldpath, char* newpath)
+{
+	if (!oldpath || !newpath) return 0;
+	int chanA = 0, chanB = 0;
+	const char* oldname = mc_strip_prefix(oldpath, &chanA);
+	const char* newname = mc_strip_prefix(newpath, &chanB);
+	if (chanA != chanB) return 0;
+	int dirIdx = mc_find_dir(chanA, oldname, NULL);
+	if (dirIdx == 0) return 0;
+	McDirEntry e;
+	if (!mc_read_at(chanA, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+	memset(e.name, 0, sizeof(e.name));
+	strncpy(e.name, newname, sizeof(e.name) - 1);
+	if (!mc_write_at(chanA, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+	return 1;
+}
+
+int cd(char* unk00)
+{
+	(void)unk00;
 	return 0;
 }
