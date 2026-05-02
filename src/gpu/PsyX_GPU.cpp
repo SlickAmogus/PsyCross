@@ -879,10 +879,29 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			if (isendprim(basePacket))
 				break;
 
-			// Validate next pointer before following it
+			// Validate next pointer before following it.
+			// Crash root-caused via WinDbg minidump on the muzzle-flash repro:
+			// FAILURE_BUCKET_ID INVALID_POINTER_READ at this exact site,
+			// stack ParsePrimitivesLinkedList+0xa5 -> DrawOTag -> GsDrawOt.
+			// The next-pointer can land on:
+			//   1. NULL / very low (uninitialized OT bucket)        — break
+			//   2. (uintptr_t)-1 == 0xFFFF..FF (PSX legacy terminator
+			//      written by some not-fully-ported code; differs from
+			//      &prim_terminator that isendprim looks for)        — break
+			//   3. Unmapped high address (Windows user mode tops at
+			//      0x7FFF'FFFF'FFFF; anything past that is kernel)   — break
+			//   4. Wild but technically-mapped — can't catch without
+			//      VirtualQuery; rely on the 16384 safety counter.
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
-			if (nextPtr < 0x10000) {
-				// NULL or very low address — likely end of list or corrupt
+			if (nextPtr < 0x10000 ||
+			    nextPtr == static_cast<uintptr_t>(-1) ||
+			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+				static int s_badNextLogged = 0;
+				if (s_badNextLogged < 16) {
+					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",
+						(unsigned long long)nextPtr, (void*)basePacket);
+					s_badNextLogged++;
+				}
 				break;
 			}
 			basePacket = nextPtr;
