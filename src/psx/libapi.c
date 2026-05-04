@@ -1039,8 +1039,10 @@ struct DIRENTRY* nextfile(struct DIRENTRY* dir)
 		if ((e.attr & 0xF0) == MC_DIR_ATTR_FREE) continue;
 		if (e.name[0] == '\0') continue;
 		dir->system[1] = (char)i;
-		strncpy(dir->name, e.name, 20);
-		dir->name[19] = '\0';
+		/* Copy full 20-char name; null-terminate at byte 20.
+		 * DIRENTRY.name is now 21 bytes (kernel.h) so the null fits. */
+		memcpy(dir->name, e.name, 20);
+		dir->name[20] = '\0';
 		dir->attr = e.attr;
 		dir->size = e.size;
 		dir->head = 0;

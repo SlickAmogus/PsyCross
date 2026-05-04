@@ -132,7 +132,12 @@ struct XF_HDR {
 };
 
 struct DIRENTRY {
-	char name[20];
+	/* PSX standard says 20-char name, but the game's downstream code uses
+	 * strcpy/strcmp on this field and will overrun if the name is exactly
+	 * 20 chars (no room for null terminator). Bump to 21 to keep the
+	 * full filename + null and avoid the overrun. */
+	char name[21];
+	char _pad[3];   /* keep 4-byte alignment for the int that follows */
 	int attr;
 	int size;
 	struct DIRENTRY *next;
