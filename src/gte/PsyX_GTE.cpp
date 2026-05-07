@@ -396,13 +396,23 @@ int GTE_RotTransPers(int idx, int lm)
 	C2_SY2 = Lm_G2(F((long long)C2_OFY + ((long long)C2_IR2 * h_over_sz3)) >> 16);
 
 #if USE_PGXP
+	// PC port: skip the entire FP transform + cache emit when the runtime
+	// PGXP master switch is OFF. The GPU side already short-circuits on
+	// g_PsxUsePgxp in ApplyVertexPGXP, so the cache data goes unread —
+	// emitting it just burns CPU on every GTE RTPS/RTPT op (and for a
+	// scene with thousands of verts per frame that's measurable). Also
+	// avoids any future bug in the cache emit path biting users who have
+	// PGXP turned off.
+	extern int g_PsxUsePgxp;
+	if (g_PsxUsePgxp)
+	{
 	// perform the same but in floating point
 	double fMAC1 = (/*int44*/(double)((float)C2_TRX * 4096.0f) + ((float)C2_R11 * (float)VX(idx)) + ((float)C2_R12 * (float)VY(idx)) + ((float)C2_R13 * (float)VZ(idx)));
 	double fMAC2 = (/*int44*/(double)((float)C2_TRY * 4096.0f) + ((float)C2_R21 * (float)VX(idx)) + ((float)C2_R22 * (float)VY(idx)) + ((float)C2_R23 * (float)VZ(idx)));
 	double fMAC3 = (/*int44*/(double)((float)C2_TRZ * 4096.0f) + ((float)C2_R31 * (float)VX(idx)) + ((float)C2_R32 * (float)VY(idx)) + ((float)C2_R33 * (float)VZ(idx)));
 
 	const double one_by_v = 1.0 / (512.0 * 1024.0);
-	
+
 	g_FP_SXYZ0 = g_FP_SXYZ1;
 	g_FP_SXYZ1 = g_FP_SXYZ2;
 
@@ -438,6 +448,7 @@ int GTE_RotTransPers(int idx, int lm)
 	vdata.scr_h = float(C2_H);
 
 	PGXP_EmitCacheData(&vdata);
+	}
 #endif
 
 	return h_over_sz3;
