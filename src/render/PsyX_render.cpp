@@ -534,6 +534,7 @@ typedef struct
 	GLint pixelScaleLoc;
 	GLint texelSizeLoc;
 	GLint fogColorLoc;
+	GLint pgxpEnabledLoc;
 #endif
 } GTEShader;
 
@@ -551,6 +552,7 @@ GLint u_ditherForceLoc;
 GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
 GLint u_fogColorLoc;
+GLint u_pgxpEnabledLoc;
 
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 
@@ -739,6 +741,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"	attribute vec4 a_zw;\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
+	"	uniform int u_pgxpEnabled;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -752,7 +755,16 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"		v_page_clut.xy += c_UVFudge;\n"\
 	"		v_page_clut.zw += c_UVFudge;\n"\
 	GTE_PERSPECTIVE_CORRECTION\
-	"		v_is3d = (a_zw.y > 100.0) ? 1.0 : 0.0;\n"\
+	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp.
+	 * The `a_zw.y > 100` test only distinguishes 3D from 2D when the
+	 * runtime PGXP master gate is on (then a_zw.y is the screen
+	 * height ~240 for 3D content, 0 for 2D). With PGXP off at
+	 * runtime, ApplyVertexPGXP zeroes a_zw for everything → without
+	 * the u_pgxpEnabled override every prim would read v_is3d=0 and
+	 * we'd lose dither / bilinear on real 3D geometry too (visibly
+	 * blocky tree leaves, etc.). When pgxp off, fall back to legacy
+	 * "always treat as 3D" behavior — matches pre-USE_PGXP=1 builds. */\
+	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_zw.y > 100.0) ? 1.0 : 0.0) : 1.0;\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"	}\n"
@@ -1058,6 +1070,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
+	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 #if USE_PGXP
 	sh->projection3DLoc = glGetUniformLocation(sh->shader, "Projection3D");
 #endif
@@ -1372,6 +1385,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
+		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		break;
 	case TF_8_BIT:
 		GR_SetShader(g_gte_shader_8.shader);
@@ -1382,6 +1396,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
+		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		break;
 	case TF_16_BIT:
 		GR_SetShader(g_gte_shader_16.shader);
@@ -1392,6 +1407,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
+		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
@@ -1402,8 +1418,18 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
 		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
+		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		break;
 	}
+
+	/* Push u_pgxpEnabled every shader bind so vertex shader's v_is3d
+	 * fallback ((u_pgxpEnabled > 0) ? a_zw.y test : 1.0) correctly
+	 * drops the 3D-only gate when PGXP is off at runtime. Without
+	 * this fallback, every prim got a_zw.y=0 → v_is3d=0 → no dither
+	 * and forced-nearest sampling on actual 3D geometry (visible as
+	 * blocky tree leaves). */
+	if (u_pgxpEnabledLoc != -1)
+		glUniform1i(u_pgxpEnabledLoc, g_PsxUsePgxp);
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
