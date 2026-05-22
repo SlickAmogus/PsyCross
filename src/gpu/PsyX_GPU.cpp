@@ -1498,23 +1498,6 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
 		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
-		{
-			static int sprtLog = 0;
-			if (sprtLog < 80) {
-				int fmt = (activeDrawEnv.tpage >> 7) & 3;
-				int pageX = (activeDrawEnv.tpage & 0xF) * 64;
-				int pageY = ((activeDrawEnv.tpage >> 4) & 1) * 256;
-				int clutX = (poly->clut & 0x3F) * 16;
-				int clutY = poly->clut >> 6;
-				eprintf("[DBG] SPRT: tpage=0x%x fmt=%d pageXY=(%d,%d) uv=(%d,%d) wh=(%d,%d) clut=0x%x clutXY=(%d,%d) rgb=(%d,%d,%d) xy=(%d,%d)\n",
-					activeDrawEnv.tpage, fmt, pageX, pageY,
-					poly->u0, poly->v0, poly->w, poly->h,
-					poly->clut, clutX, clutY,
-					poly->r0, poly->g0, poly->b0,
-					poly->x0, poly->y0);
-				sprtLog++;
-			}
-		}
 
 		TriangulateQuad();
 
