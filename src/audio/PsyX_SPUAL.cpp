@@ -517,11 +517,6 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 	int loopStart, loopLen, count;
 	ALuint alSource, alBuffer;
 
-	/* Detect radio voices via index. SPUALVoice doesn't carry its own
-	 * index, but g_SpuVoices is contiguous so index = voice - g_SpuVoices. */
-	int voiceIdx = (int)(voice - g_SpuVoices);
-	int isRadio = (voiceIdx == 22 || voiceIdx == 23);
-
 	//if (!voice->sampledirty)
 	//	return;
 
@@ -530,23 +525,13 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 	alSource = voice->alSource;
 	alBuffer = voice->alBuffer;
 
-	if (alSource == AL_NONE) {
-		if (isRadio) {
-			eprintf("[RADIO_SPU] UpdateVoice i=%d alSource=AL_NONE — skip\n",
-			        voiceIdx);
-		}
+	if (alSource == AL_NONE)
 		return;
-	}
 
 	loopStart = 0;
 	loopLen = 0;
 
 	count = decodeSound(s_SpuMemory.samplemem + voice->attr.addr, SPU_MEMSIZE - voice->attr.addr, waveBuffer, &loopStart, &loopLen, 1);
-
-	if (isRadio) {
-		eprintf("[RADIO_SPU] UpdateVoice i=%d addr=%d count=%d loopStart=%d loopLen=%d\n",
-		        voiceIdx, voice->attr.addr, count, loopStart, loopLen);
-	}
 
 	if (count == 0)
 		return;
@@ -667,16 +652,6 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 		SPUALVoice* voice = &g_SpuVoices[i];
 		ALuint alSource = voice->alSource;
 
-		/* Diagnostic for radio voices 22/23 — log every attr update */
-		int isRadioAttr = (i == 22 || i == 23);
-		if (isRadioAttr) {
-			eprintf("[RADIO_SPU] SetVoiceAttr i=%d alSource=%u mask=0x%X addr=%d loop=%d volL=%d volR=%d pitch=%d\n",
-			        i, alSource, psxAttrib->mask, psxAttrib->addr,
-			        psxAttrib->loop_addr,
-			        psxAttrib->volume.left, psxAttrib->volume.right,
-			        psxAttrib->pitch);
-		}
-
 		if (alSource == AL_NONE)
 			continue;
 
@@ -749,14 +724,8 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 
 void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 {
-	if (!g_spuInit) {
-		/* Radio uses voices 22/23 — log if SetKey fires before init */
-		if (voice_bit & (SPU_VOICECH(22) | SPU_VOICECH(23))) {
-			eprintf("[RADIO_SPU] SetKey on=%d voice_bit=0x%X but g_spuInit=0\n",
-			        on_off, voice_bit);
-		}
+	if (!g_spuInit)
 		return;
-	}
 
 	SDL_LockMutex(g_SpuMutex);
 	for (int i = 0; i < s_spuVoiceCount; i++)
@@ -767,17 +736,6 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 		SPUALVoice* voice = &g_SpuVoices[i];
 		ALuint alSource = voice->alSource;
 
-		/* Diagnostic: radio voices 22 (interference) and 23 (static)
-		 * are reserved-voice path via SdUtKeyOnV. Log every SetKey
-		 * for these so we can see if/when they get keyed on/off and
-		 * whether they have a valid alSource + attr.addr at that
-		 * point. */
-		if (i == 22 || i == 23) {
-			eprintf("[RADIO_SPU] SetKey i=%d on=%d alSource=%u alBuffer=%u attr.addr=%d muted=%d\n",
-			        i, on_off, alSource, voice->alBuffer,
-			        voice->attr.addr, g_SPUMuted);
-		}
-
 		if (alSource == AL_NONE)
 			continue;
 
@@ -787,20 +745,6 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 			UpdateVoiceSample(voice);
 
 			alSourcePlay(alSource);
-
-			if (i == 22 || i == 23) {
-				ALint state = 0;
-				alGetSourcei(alSource, AL_SOURCE_STATE, &state);
-				ALint bufferAttached = 0;
-				alGetSourcei(alSource, AL_BUFFER, &bufferAttached);
-				ALint looping = 0;
-				alGetSourcei(alSource, AL_LOOPING, &looping);
-				ALfloat gain = 0.0f;
-				alGetSourcef(alSource, AL_GAIN, &gain);
-				eprintf("[RADIO_SPU] post-Play i=%d state=%d (PLAYING=%d) buf=%d loop=%d gain=%.3f alErr=0x%X\n",
-				        i, state, AL_PLAYING, bufferAttached, looping,
-				        gain, alGetError());
-			}
 		}
 		else
 		{
