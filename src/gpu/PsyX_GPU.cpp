@@ -101,33 +101,8 @@ void DrawEnvOffset(float& ofsX, float& ofsY)
 	}
 }
 
-// remaps screen coordinates to [0..1]
-// without clamping
-//
-// PC port (Silent Hill): runtime-gated. Only do the fractional remap when
-// g_PsxUsePgxp is on, because the PGXP shader path expects vertices in
-// (-0.5..0.5) clip-space-ish coords and the non-PGXP shader path expects
-// raw pixel coords (the legacy GR_Ortho2D(0, psxW+margin, psxH, 0) maps
-// those to NDC). With USE_PGXP=1 compiled in but the runtime flag off,
-// the unconditional pre-version remapped pixel coords down to (-0.5..0.5)
-// and then ran them through a 0..640-pixel ortho — every vertex landed
-// far outside the clip cube and the whole frame went black. Affected
-// every prim that came through MakeVertex* (i.e. nearly all 2D UI).
 inline void ScreenCoordsToEmulator(GrVertex* vertex, int count)
 {
-#if USE_PGXP
-	if (!g_PsxUsePgxp)
-		return;
-
-	float w, h;
-	DrawEnvDimensions(w, h);
-
-	while (count--)
-	{
-		vertex[count].x = vertex[count].x / w - 0.5f;
-		vertex[count].y = vertex[count].y / h - 0.5f;
-	}
-#endif
 }
 
 void LineSwapSourceVerts(VERTTYPE*& p0, VERTTYPE*& p1, unsigned char*& c0, unsigned char*& c1)
@@ -185,63 +160,9 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 		vertex[3].y = vertex[0].y;
 	} // TODO diagonal line alignment
 
-#if USE_PGXP
-	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
-#else
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
-#endif
 
 	ScreenCoordsToEmulator(vertex, 4);
-}
-
-/* PC port: runtime PGXP master gate. Defined in PsyX_render.cpp. When 0,
- * ApplyVertexPGXP zeroes a_zw so the vertex shader's `a_zw.y > 100.0` branch
- * falls through to the 2D ortho path (PSX-affine look). */
-extern int g_PsxUsePgxp;
-
-inline void ApplyVertexPGXP(GrVertex* v, VERTTYPE* p, float ofsX, float ofsY, ushort gteidx, int lookupOfs)
-{
-#if USE_PGXP
-	if (!g_PsxUsePgxp)
-	{
-		// PGXP master switch is OFF — leave a_zw zeroed so the shader takes
-		// the 2D-ortho branch. memset() in the caller already cleared this
-		// vertex; just be explicit about the contract.
-		v->z = 0.0f;
-		v->scr_h = 0.0f;
-		v->ofsX = 0.0f;
-		v->ofsY = 0.0f;
-		return;
-	}
-
-	uint lookup = PGXP_LOOKUP_VALUE(p[0], p[1]);
-
-	PGXPVData vd;
-	if (gteidx != 0xffff &&
-		g_cfg_pgxpTextureCorrection &&
-		PGXP_GetCacheData(&vd, lookup, gteidx + lookupOfs))
-	{
-		v->x = vd.px;
-		v->y = vd.py;
-		v->z = vd.pz;
-
-		// calculate offset for our perspective matrix based on supposed GTE transformed geometry offset
-		float dispW, dispH;
-		DrawEnvDimensions(dispW, dispH);
-
-		const float gteOfsX = fmodf(vd.ofx, dispW) - dispW * 0.5f;
-		const float gteOfsY = fmodf(vd.ofy, dispH) - dispH * 0.5f;
-
-		v->ofsX = (ofsX + gteOfsX) / dispW * 2.0f;
-		v->ofsY = (ofsY + gteOfsY) / dispH * 2.0f;
-		v->scr_h = vd.scr_h;
-	}
-	else
-	{
-		v->scr_h = 0.0f;
-		v->z = 0.0f;
-	}
-#endif
 }
 
 void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, ushort gteidx)
@@ -264,13 +185,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	vertex[2].x = p2[0] + ofsX;
 	vertex[2].y = p2[1] + ofsY;
 
-#if !USE_PGXP
 	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
-#endif
-
-	ApplyVertexPGXP(&vertex[0], p0, ofsX, ofsY, gteidx, -2);
-	ApplyVertexPGXP(&vertex[1], p1, ofsX, ofsY, gteidx, -1);
-	ApplyVertexPGXP(&vertex[2], p2, ofsX, ofsY, gteidx, 0);
 
 	ScreenCoordsToEmulator(vertex, 3);
 }
@@ -299,14 +214,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 	vertex[3].x = p3[0] + ofsX;
 	vertex[3].y = p3[1] + ofsY;
 
-#if !USE_PGXP
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
-#endif
-
-	ApplyVertexPGXP(&vertex[0], p0, ofsX, ofsY, gteidx, -3);
-	ApplyVertexPGXP(&vertex[1], p1, ofsX, ofsY, gteidx, -2);
-	ApplyVertexPGXP(&vertex[2], p2, ofsX, ofsY, gteidx, -1);
-	ApplyVertexPGXP(&vertex[3], p3, ofsX, ofsY, gteidx, 0);
 
 	ScreenCoordsToEmulator(vertex, 4);
 }
@@ -332,11 +240,7 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	vertex[3].x = vertex[0].x + w;
 	vertex[3].y = vertex[0].y;
 
-#if USE_PGXP
-	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
-#else
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
-#endif
 
 	ScreenCoordsToEmulator(vertex, 4);
 }
@@ -840,15 +744,12 @@ void DrawAllSplits()
 
 			eprintf("==========================================\n");
 			eprintf("POLYGON: %d\n", g_dbg_polygonSelected);
-#if USE_PGXP
-			eprintf("X: %.2f Y: %.2f\n", (float)vert->x, (float)vert->y);
-			eprintf("U: %.2f V: %.2f\n", (float)vert->u, (float)vert->v);
-			eprintf("TP: %d CLT: %d\n", (int)vert->page, (int)vert->clut);
-#else
-			eprintf("X: %d Y: %d\n", vert->x, vert->y);
-			eprintf("U: %d V: %d\n", vert->u, vert->v);
-			eprintf("TP: %d CLT: %d\n", vert->page, vert->clut);
-#endif
+			eprintf("X: %d Y: %d
+", vert->x, vert->y);
+			eprintf("U: %d V: %d
+", vert->u, vert->v);
+			eprintf("TP: %d CLT: %d
+", vert->page, vert->clut);
 			
 			eprintf("==========================================\n");
 		}
@@ -880,10 +781,6 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 	if (singlePrimitive)
 	{
 		P_TAG* polyTag = reinterpret_cast<P_TAG*>(p);
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-		// force PGXP off
-		polyTag->pgxp_index = 0xFFFF;
-#endif
 		ParsePrimitive(polyTag);
 
 		GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
@@ -891,11 +788,12 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 	}
 	else
 	{
-#if !USE_PGXP
-		const float otBucketStep = (g_currentOTBucketCount > 1)
-			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
+		// Step per linked-list entry (which includes individual primitives,
+		// not just bucket transitions). Use the safety-loop limit as the
+		// denominator so z_view never exceeds ±1.0 regardless of scene
+		// primitive count — exceeding 1.0 causes GPU geometry clipping.
+		const float otBucketStep = 2.0f / 16383.0f;
 		g_otBucketDepth = -1.0f;
-#endif
 		// walk OT_TAG linked list with safety guards
 		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
 		for (int safety = 0; safety < 16384; safety++)
@@ -959,9 +857,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
 			lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
 
-#if !USE_PGXP
 			g_otBucketDepth += otBucketStep;
-#endif
 
 			if (isendprim(basePacket))
 				break;
@@ -1008,11 +904,7 @@ inline int IsNull(POLY_FT3* poly)
 
 static int ProcessFlatLines(P_TAG* polyTag)
 {
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-	const u_short gteIndex = polyTag->pgxp_index;
-#else
 	const u_short gteIndex = 0xFFFF;
-#endif
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1169,11 +1061,7 @@ static int ProcessFlatLines(P_TAG* polyTag)
 
 static int ProcessGouraudLines(P_TAG* polyTag)
 {
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-	const u_short gteIndex = polyTag->pgxp_index;
-#else
 	const u_short gteIndex = 0xFFFF;
-#endif
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1223,11 +1111,7 @@ static int ProcessGouraudLines(P_TAG* polyTag)
 
 static int ProcessFlatPoly(P_TAG* polyTag)
 {
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-	const u_short gteIndex = polyTag->pgxp_index;
-#else
 	const u_short gteIndex = 0xFFFF;
-#endif
 
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1361,11 +1245,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 static int ProcessGouraudPoly(P_TAG* polyTag)
 {
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-	const u_short gteIndex = polyTag->pgxp_index;
-#else
 	const u_short gteIndex = 0xFFFF;
-#endif
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1480,11 +1360,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 static int ProcessTileAndSprt(P_TAG* polyTag)
 {
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-	const u_short gteIndex = polyTag->pgxp_index;
-#else
 	const u_short gteIndex = 0xFFFF;
-#endif
 
 	// NOTE: TILE does not support switching shadeTex on real PSX
 	const bool shadeTexOn = (polyTag->code & 1) == 0;

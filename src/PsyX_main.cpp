@@ -865,10 +865,6 @@ void PsyX_EndScene()
 	assert(begin_scene_flag);
 	begin_scene_flag = 0;
 
-#if USE_PGXP
-	PGXP_ClearCache();
-#endif
-
 	GR_EndScene();
 
 #ifndef PSYX_SKIP_FRAMEBUFFER_STORE

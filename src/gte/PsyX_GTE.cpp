@@ -279,101 +279,7 @@ int Lm_H(long long value, int sf) {
 	return value_12;
 }
 
-#if USE_PGXP
-PGXPVector3D g_FP_SXYZ0; // direct access PGXP without table lookup
-PGXPVector3D g_FP_SXYZ1;
-PGXPVector3D g_FP_SXYZ2;
 
-PGXPVData g_pgxpCache[1 << sizeof(ushort)*8];
-ushort g_pgxpVertexIndex = 0;
-
-int g_pgxpTransformed = 0;
-
-// "render" states
-float g_pgxpZOffset = 0.0f;
-float g_pgxpZScale = 1.0f;
-
-void PGXP_ClearCache()
-{
-	g_pgxpVertexIndex = 0;
-}
-
-ushort PGXP_GetIndex(int checkTransform)
-{
-	if (!checkTransform || g_pgxpTransformed)
-	{
-		if(checkTransform)
-			g_pgxpTransformed = 0;
-		return g_pgxpVertexIndex;
-	}
-
-	return 0xFFFF;
-}
-
-ushort PGXP_EmitCacheData(PGXPVData* newData)
-{
-	ushort nextIndex = g_pgxpVertexIndex++;
-
-	if (nextIndex == 0xffff)
-		return 0xffff;
-
-	g_pgxpCache[nextIndex] = *newData;
-	g_pgxpTransformed = 1;
-	return nextIndex;
-}
-
-void PGXP_SetZOffsetScale(float offset, float scale)
-{
-	g_pgxpZOffset = offset;
-	g_pgxpZScale = scale;
-}
-
-// sets copy of cached vertex data to out
-int PGXP_GetCacheData(PGXPVData* out, uint lookup, ushort indexhint)
-{
-	if (indexhint == 0xFFFF)
-	{
-		out->px = 0.0f;
-		out->py = 0.0f;
-		out->pz = 1.0f;
-		out->scr_h = 0.0f;
-		out->ofx = 0.0f;
-		out->ofx = 0.0f;
-		return 0;
-	}
-
-	// index hint allows us to start from specific index
-	ushort index = max(0, int(indexhint) - 8);
-
-	for(int i = 0; i < 512; i++)
-	{
-		if (index == 0xffff)
-			index++;
-
-		if (g_pgxpCache[index].lookup == lookup)
-		{
-			if (i > 256)
-				PsyX_Log_Warning("PGXP_GetCacheData lookup IS inefficient: hint: %d, start: %d, found: %d, cycles: %d\n", indexhint, ushort(indexhint - 8u), index, i);
-
-			*out = g_pgxpCache[index];
-			return 1;
-		}
-		index++;
-	}
-
-	//PsyX_Log_Warning("PGXP_GetCacheData lookup IS NOT FOUND: hint: %d\n", indexhint);
-
-	out->px = 0.0f;
-	out->py = 0.0f;
-	out->pz = 1.0f;
-	out->scr_h = 0.0f;
-	out->ofx = 0.0f;
-	out->ofx = 0.0f;
-
-	return 0;
-}
-
-#endif // USE_PGXP
 
 int GTE_RotTransPers(int idx, int lm)
 {
@@ -395,50 +301,6 @@ int GTE_RotTransPers(int idx, int lm)
 	C2_SX2 = Lm_G1(F((long long)C2_OFX + ((long long)C2_IR1 * h_over_sz3)) >> 16);
 	C2_SY2 = Lm_G2(F((long long)C2_OFY + ((long long)C2_IR2 * h_over_sz3)) >> 16);
 
-#if USE_PGXP
-	// perform the same but in floating point
-	double fMAC1 = (/*int44*/(double)((float)C2_TRX * 4096.0f) + ((float)C2_R11 * (float)VX(idx)) + ((float)C2_R12 * (float)VY(idx)) + ((float)C2_R13 * (float)VZ(idx)));
-	double fMAC2 = (/*int44*/(double)((float)C2_TRY * 4096.0f) + ((float)C2_R21 * (float)VX(idx)) + ((float)C2_R22 * (float)VY(idx)) + ((float)C2_R23 * (float)VZ(idx)));
-	double fMAC3 = (/*int44*/(double)((float)C2_TRZ * 4096.0f) + ((float)C2_R31 * (float)VX(idx)) + ((float)C2_R32 * (float)VY(idx)) + ((float)C2_R33 * (float)VZ(idx)));
-
-	const double one_by_v = 1.0 / (512.0 * 1024.0);
-	
-	g_FP_SXYZ0 = g_FP_SXYZ1;
-	g_FP_SXYZ1 = g_FP_SXYZ2;
-
-	// do not perform perspective multiplication so it stays in object space
-	// perspective is performed exclusively in shader
-	PGXPVector3D temp;
-	temp.px = fMAC1 * one_by_v * g_pgxpZScale + g_pgxpZOffset;
-	temp.py = fMAC2 * one_by_v * g_pgxpZScale + g_pgxpZOffset;
-	temp.pz = fMAC3 * one_by_v * g_pgxpZScale + g_pgxpZOffset;
-
-	// calculate projected values for cache
-	// PC port: VERTTYPE is `short` (see pgxp_defs.h), so these assignments
-	// truncate the fractional pixel coords down to the same integer bit
-	// pattern that gte_stsxy writes via *(uint*)&g_FP_SXYZ2.x — that's the
-	// hash key used by PGXP_LOOKUP_VALUE, so it MUST match what the C-side
-	// prim writer (setXY0) puts into poly->x0/y0.
-	temp.x = (VERTTYPE)((double(C2_OFX) + double(float(C2_IR1) * float(h_over_sz3))) / float(1 << 16));
-	temp.y = (VERTTYPE)((double(C2_OFY) + double(float(C2_IR2) * float(h_over_sz3))) / float(1 << 16));
-	temp.z = (VERTTYPE)(float(max(C2_SZ3, C2_H / 2)) / float(1 << 16));
-
-	g_FP_SXYZ2 = temp;
-
-	PGXPVData vdata;
-	vdata.lookup = PGXP_LOOKUP_VALUE(temp.x, temp.y);		// hash short values
-
-	// FIXME: actually we scaling here entire geometry, is that correct?
-	vdata.px = temp.px;
-	vdata.py = temp.py;
-	vdata.pz = temp.pz;
-
-	vdata.ofx = float(C2_OFX) / float(1 << 16);
-	vdata.ofy = float(C2_OFY) / float(1 << 16);
-	vdata.scr_h = float(C2_H);
-
-	PGXP_EmitCacheData(&vdata);
-#endif
 
 	return h_over_sz3;
 }
@@ -474,58 +336,7 @@ int GTE_operator(int op)
 #ifdef GTE_LOG
 		GTELOG("%08x NCLIP", op);
 #endif
-#if USE_PGXP
-
-		if(g_cfg_pgxpTextureCorrection)
-		{
-			struct fvec3 {
-				float x, y, z;
-			};
-			static auto subtractVec = [](const fvec3& u, const fvec3& v) -> fvec3 {
-				return fvec3{ u.x - v.x, u.y - v.y, u.z - v.z };
-			};
-			static auto crossProduct = [](const fvec3& u, const fvec3& v) -> fvec3 {
-				return fvec3{ u.y * v.z - v.y * u.z, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x };
-			};
-			static auto dotProduct = [](const fvec3& u, const fvec3& v) -> float {
-				return u.x * v.x + u.y * v.y + u.z * v.z;
-			};
-			static auto normalize = [](const fvec3& v) -> fvec3 {
-				const float invLen = 1.0f / sqrtf(dotProduct(v, v));
-				return fvec3{ v.x * invLen, v.y * invLen, v.z * invLen };
-			};
-
-			// treat our PGXP triangle as plane
-			const fvec3 v0 = *(fvec3*)&g_FP_SXYZ0;
-			const fvec3 v1 = *(fvec3*)&g_FP_SXYZ1;
-			const fvec3 v2 = *(fvec3*)&g_FP_SXYZ2;
-			const fvec3 normal = normalize(crossProduct(subtractVec(v2, v1), subtractVec(v0, v1)));
-
-			C2_MAC0 = dotProduct(v0, normal) < 0 ? -1 : 1;
-		}
-		else
-		{
-			float fSX0 = g_FP_SXYZ0.x;
-			float fSY0 = g_FP_SXYZ0.y;
-
-			float fSX1 = g_FP_SXYZ1.x;
-			float fSY1 = g_FP_SXYZ1.y;
-
-			float fSX2 = g_FP_SXYZ2.x;
-			float fSY2 = g_FP_SXYZ2.y;
-
-			float nclip = (fSX0 * fSY1) + (fSX1 * fSY2) + (fSX2 * fSY0) - (fSX0 * fSY2) - (fSX1 * fSY0) - (fSX2 * fSY1);
-
-			float absNclip = fabs(nclip);
-
-			if ((0.1f < absNclip) && (absNclip < 1.0f))
-				nclip += (nclip < 0.0f) ? -1.0f : 1.0f;
-
-			C2_MAC0 = nclip;
-		}
-#else
 		C2_MAC0 = int(F((long long)(C2_SX0 * C2_SY1) + (C2_SX1 * C2_SY2) + (C2_SX2 * C2_SY0) - (C2_SX0 * C2_SY2) - (C2_SX1 * C2_SY0) - (C2_SX2 * C2_SY1)));
-#endif
 		C2_FLAG = 0;
 		return 1;
 

@@ -204,12 +204,7 @@ extern	int (*GPU_printf)(const char *fmt, ...);
 #define getlen(p)    		(u_char)(((P_TAG *)(p))->len)
 #define getcode(p)   		(u_char)(((P_TAG *)(p))->code)
 
-#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
-#define setpgxpindex(p, i)	(((P_TAG *)(p))->pgxp_index = (u_short)(i))
-#define addPrim(ot, p)		setaddr(p, getaddr(ot)), setaddr(ot, p), setpgxpindex(p, PGXP_GetIndex(1))
-#else
 #define addPrim(ot, p)		setaddr(p, getaddr(ot)), setaddr(ot, p)
-#endif
 
 #define addPrims(ot, p0, p1)	setaddr(p1, getaddr(ot)),setaddr(ot, p0)
 

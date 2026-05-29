@@ -118,13 +118,8 @@
 #pragma pack(push,1)
 typedef struct
 {
-#if USE_PGXP
-	float		x, y, page, clut;
-	float		z, scr_h, ofsX, ofsY;
-#else
 	short		x, y, page, clut;
 	float		z;
-#endif
 
 	u_char		u, v, bright, dither;
 	u_char		r, g, b, a;

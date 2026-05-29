@@ -105,11 +105,10 @@ int g_PcHorPlusEnabled = 1;
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
 
-/* PC port (Silent Hill): runtime master gate for PGXP. Even when the binary
- * is compiled with USE_PGXP=1, the game can flip this to 0 to fall back to
- * the affine-2D-ortho path (the shader takes the `a_zw.y > 100.0` else branch
- * because MakeVertex* writes 0 into a_zw when this is 0). Set from main_pc.c
- * after PcConfig_Load runs (config key: use_pgxp). */
+/* PC port (Silent Hill): runtime master gate for PGXP. When 0,
+ * MakeVertex* writes 0 into a_zw, the shader takes the `a_zw.y > 100.0`
+ * else branch (2D-ortho path). Set from main_pc.c after PcConfig_Load runs
+ * (config key: use_pgxp). */
 int g_PsxUsePgxp = 0;
 int g_cfg_bilinearFiltering = 0;
 int g_cfg_affineTextures = 0;
@@ -719,20 +718,8 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 		"	vec2 VRAM(vec2 uv) { return texture2D(s_texture, uv).rg; }\n"
 #endif
 
-#if USE_PGXP
-#define GTE_PERSPECTIVE_CORRECTION \
-		"	mat4 ofsMat = mat4(\n"\
-		"		vec4(1.0,  0.0,  0.0,  0.0),\n"\
-		"		vec4(0.0,  1.0,  0.0,  0.0),\n"\
-		"		vec4(0.0,  0.0,  1.0,  0.0),\n"\
-		"		vec4(a_zw.z, -a_zw.w,  0.0,  1.0));\n"\
-		"	vec2 geom_ofs = vec2(0.5, 0.5);\n"\
-		"	vec4 fragPosition = (a_zw.y > 100.0 ? ofsMat * (Projection3D * vec4((a_position.xy + geom_ofs) * vec2(1.0,-1.0) * a_zw.y, a_zw.x, 1.0)) : (Projection * vec4(a_position.xy, 0.0, 1.0)));\n" \
-		"	gl_Position = fragPosition;\n"
-#else
 #define GTE_PERSPECTIVE_CORRECTION \
 		"	gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"
-#endif
 
 #define GTE_VERTEX_SHADER \
 	"	attribute vec4 a_position;\n"\
@@ -764,8 +751,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	 * the u_pgxpEnabled override every prim would read v_is3d=0 and
 	 * we'd lose dither / bilinear on real 3D geometry too (visibly
 	 * blocky tree leaves, etc.). When pgxp off, fall back to legacy
-	 * "always treat as 3D" behavior — matches pre-USE_PGXP=1 builds. */\
-	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_zw.y > 100.0) ? 1.0 : 0.0) : 1.0;\n"\
+	 * "always treat as 3D" behavior — matches legacy behavior. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_zw.y > 100.0) ? 1.0 : 0.0) : 1.0;\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"	}\n"
@@ -1069,9 +1055,6 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
-#if USE_PGXP
-	sh->projection3DLoc = glGetUniformLocation(sh->shader, "Projection3D");
-#endif
 #endif
 }
 
@@ -1285,13 +1268,7 @@ void GR_SetupClipMode(const RECT16* rect, int enable)
 	// 2D ortho. With PGXP at compile time but off at runtime, falling
 	// through to the PGXP aspect calc would shrink the scissor and
 	// cause clipping inconsistent with the prim ortho.
-#if USE_PGXP
-	const float emuScreenAspect = g_PsxUsePgxp
-		? (1.0f / (PSX_SCREEN_ASPECT * (float)g_windowWidth / (float)g_windowHeight))
-		: 1.0f;
-#else
 	const float emuScreenAspect = 1.0f;
-#endif
 
 	const float psxScreenWInv = 1.0f / (float)activeDispEnv.disp.w;
 	const float psxScreenHInv = 1.0f / (float)activeDispEnv.disp.h;
@@ -1326,29 +1303,7 @@ void GR_SetupClipMode(const RECT16* rect, int enable)
 
 void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect)
 {
-#if USE_PGXP
-	if (g_PsxUsePgxp)
-	{
-		float psxScreenW, psxScreenH;
-		float emuScreenAspect;
 
-		emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
-
-		psxScreenW = activeDispEnv.disp.w;
-		psxScreenH = activeDispEnv.disp.h;
-
-		rect->x = activeDispEnv.screen.x;
-		rect->y = activeDispEnv.screen.y;
-
-		rect->w = psxScreenW * emuScreenAspect * PSX_SCREEN_ASPECT; // windowWidth;
-		rect->h = psxScreenH; // windowHeight;
-
-		rect->x -= (rect->w - activeDispEnv.disp.w) / 2;
-
-		rect->w += rect->x;
-		return;
-	}
-#endif
 	rect->x = activeDispEnv.screen.x;
 	rect->y = activeDispEnv.screen.y;
 	rect->w = activeDispEnv.disp.w;
@@ -1664,50 +1619,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 	if (enable)
 	{
 		// setup render target viewport
-		// Runtime PGXP gate (matches the default-viewport path below):
-		// when g_PsxUsePgxp is 0 we use the legacy pixel-coord ortho even
-		// if USE_PGXP=1 was compiled in, because prim-emit writes
-		// vertices in pixel space (a_zw=0 → shader takes the 2D-ortho
-		// branch via Projection*a_position.xy). Without this gate, an
-		// offscreen render target with PGXP off mapped pixel-coord
-		// vertices through fractional-coord ortho (-0.5..0.5) and clipped
-		// every prim out — Silent Hill's title-screen background uses
-		// dfe=0 which routes here, so the menu went black.
-#if USE_PGXP
-		if (g_PsxUsePgxp)
-			GR_Ortho2D(-0.5f, 0.5f, 0.5f, -0.5f, -1.0f, 1.0f);
-		else
-#endif
-			GR_Ortho2D(0, offscreenRect->w, offscreenRect->h, 0, -1.0f, 1.0f);
+		GR_Ortho2D(0, offscreenRect->w, offscreenRect->h, 0, -1.0f, 1.0f);
 	}
 	else
 	{
 		// setup default viewport
-		// Runtime PGXP gate: when g_PsxUsePgxp is on we use the
-		// fractional-coord ortho + perspective pair (PGXP-compatible
-		// shader path). When off, fall through to the legacy non-PGXP
-		// pixel-coord ortho even if USE_PGXP=1 was compiled in. This
-		// preserves the original "menus stretched at 16:9" look that
-		// the project shipped with pre-USE_PGXP=1, since the PGXP
-		// ortho is intrinsically 4:3 (pillarboxed) while the non-PGXP
-		// ortho fills the full disp.w directly.
-#if USE_PGXP
-	if (g_PsxUsePgxp)
-	{
 
-		// these constants below are guessed
-		const float perspectiveFOV = 0.9265f;
-		const float perspectiveZNear = 0.25f;
-		const float perspectiveZFar = 1000.0f;
-
-		const float emuScreenAspect = (float)(g_windowWidth) / (float)(g_windowHeight);
-
-		GR_Ortho2D(-0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f * emuScreenAspect * PSX_SCREEN_ASPECT, 0.5f, -0.5f, -1.0f, 1.0f);
-		GR_Perspective3D(perspectiveFOV, 1.0f, 1.0f / (emuScreenAspect * PSX_SCREEN_ASPECT), perspectiveZNear, perspectiveZFar);
-	}
-	else
-#endif
-#if 1 /* legacy non-PGXP ortho — used when USE_PGXP=0 OR g_PsxUsePgxp=0 */
 		{
 			// Hor+ widescreen: expand x range so the vertical FOV is preserved and
 			// extra horizontal content fills the wider display instead of stretching.
@@ -1734,7 +1651,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				: 0.0f;
 			GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
 		}
-#endif
+
 	}
 
 	if (g_PreviousOffscreenState == enable)
@@ -2129,16 +2046,9 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_color);
 	glEnableVertexAttribArray(a_extra);
 
-#if USE_PGXP
-	glVertexAttribPointer(a_position, 4, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
-	glVertexAttribPointer(a_zw, 4, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
-
-	glEnableVertexAttribArray(a_zw);
-#else
 	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
 	glVertexAttribPointer(a_zw, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
 	glEnableVertexAttribArray(a_zw);
-#endif
 	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->u);
 	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GrVertex), &((GrVertex*)NULL)->r);
 	glVertexAttribPointer(a_extra, 4, GL_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->tcx);
