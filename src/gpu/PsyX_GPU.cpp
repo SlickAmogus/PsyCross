@@ -48,31 +48,45 @@ int g_DrawPrimMode = 0;
 struct SZEntry { uintptr_t key; uint16_t sz[4]; };
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
+// Global SZ scale: maximum SZ seen in the previous frame, used as the
+// depth reference so all polygons share a consistent window_depth space
+// regardless of which OT bucket they landed in.
+static uint32_t g_szMaxThisFrame = 0;
+static uint32_t g_szMaxPrevFrame = 0;
+
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
+
+	uint16_t s0 = (uint16_t)C2_SZ0, s1 = (uint16_t)C2_SZ1;
+	uint16_t s2 = (uint16_t)C2_SZ2, s3 = (uint16_t)C2_SZ3;
+
+	// Track per-frame SZ maximum for global depth calibration
+	uint32_t mx = s0 > s1 ? s0 : s1;
+	if (s2 > mx) mx = s2;
+	if (s3 > mx) mx = s3;
+	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
+
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == 0 || g_szTable[s].key == key) {
 			g_szTable[s].key = key;
-			g_szTable[s].sz[0] = (uint16_t)C2_SZ0;
-			g_szTable[s].sz[1] = (uint16_t)C2_SZ1;
-			g_szTable[s].sz[2] = (uint16_t)C2_SZ2;
-			g_szTable[s].sz[3] = (uint16_t)C2_SZ3;
+			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
+			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			return;
 		}
 	}
 	// Probe exhausted — overwrite initial slot
 	g_szTable[slot].key = key;
-	g_szTable[slot].sz[0] = (uint16_t)C2_SZ0;
-	g_szTable[slot].sz[1] = (uint16_t)C2_SZ1;
-	g_szTable[slot].sz[2] = (uint16_t)C2_SZ2;
-	g_szTable[slot].sz[3] = (uint16_t)C2_SZ3;
+	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
+	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 }
 
 extern "C" void PsyX_ClearGteDepthTable(void)
 {
+	g_szMaxPrevFrame = g_szMaxThisFrame;
+	g_szMaxThisFrame = 0;
 	memset(g_szTable, 0, sizeof(g_szTable));
 }
 
@@ -92,15 +106,20 @@ static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
 	return false;
 }
 
-// Overrides flat bucket z with per-vertex perspective depth from GTE SZ registers.
+// Overrides flat bucket z with physically-correct per-vertex GL depth.
 // For quads (4x RTPS): SZ0=V0,SZ1=V1,SZ2=V2,SZ3=V3; buffer order V0,V1,V3,V2 (swap).
 //   → sz[0]→v[0], sz[1]→v[1], sz[3]→v[2], sz[2]→v[3].
 // For tris (3x RTPS): SZ1=V0,SZ2=V1,SZ3=V2 (SZ0 stale).
 //   → sz[1]→v[0], sz[2]→v[1], sz[3]→v[2].
-// Formula: z_view = 1 - 2*sz_v/max_sz, max_sz = 2*sz_avg/(1-bucket_depth).
-// Average vertex lands exactly on g_otBucketDepth; outliers vary proportionally.
+// Formula: z_view = 1 - 2*sz_v/g_szMaxPrevFrame  (window_depth = sz_v/max_sz).
+// Uses a global per-frame SZ scale so cross-primitive depth ordering is physically
+// correct regardless of which OT bucket a polygon was assigned to.  The bucket-anchored
+// formula was correct within a primitive but failed when two primitives were in wrong
+// buckets relative to each other (Z-fighting / wrong face winning the depth test).
 static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
 {
+	if (g_szMaxPrevFrame < 1) return;  // no calibration yet (first frame)
+
 	uint16_t sz[4];
 	if (!PsyX_LookupGteDepths(polyTag, sz))
 		return;
@@ -115,24 +134,16 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
-	if (sz_avg < 1.0f) return;
+	if (sz_avg < 1.0f) return;  // no GTE transform (2D/HUD prim) — keep bucket depth
 
-	float denom = 1.0f - g_otBucketDepth;
-	if (denom < 0.01f) denom = 0.01f;
-
-	float rmax = denom / (2.0f * sz_avg);  // 1/max_sz
-	float z0 = 1.0f - 2.0f * sv0 * rmax;
-	float z1 = 1.0f - 2.0f * sv1 * rmax;
-	float z2 = 1.0f - 2.0f * sv2 * rmax;
+	float rmax = 1.0f / (float)g_szMaxPrevFrame;
 
 #define CLAMP1(v) ((v) < -1.0f ? -1.0f : (v) > 1.0f ? 1.0f : (v))
-	vertex[0].z = CLAMP1(z0);
-	vertex[1].z = CLAMP1(z1);
-	vertex[2].z = CLAMP1(z2);
-	if (isQuad) {
-		float z3 = 1.0f - 2.0f * sv3 * rmax;
-		vertex[3].z = CLAMP1(z3);
-	}
+	vertex[0].z = CLAMP1(1.0f - 2.0f * sv0 * rmax);
+	vertex[1].z = CLAMP1(1.0f - 2.0f * sv1 * rmax);
+	vertex[2].z = CLAMP1(1.0f - 2.0f * sv2 * rmax);
+	if (isQuad)
+		vertex[3].z = CLAMP1(1.0f - 2.0f * sv3 * rmax);
 #undef CLAMP1
 }
 
