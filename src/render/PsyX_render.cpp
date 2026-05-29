@@ -731,7 +731,7 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 		"	gl_Position = fragPosition;\n"
 #else
 #define GTE_PERSPECTIVE_CORRECTION \
-		"	gl_Position = Projection * vec4(a_position.xy, 0.0, 1.0);\n"
+		"	gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"
 #endif
 
 #define GTE_VERTEX_SHADER \
@@ -2139,6 +2139,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_zw);
 #else
 	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
+	glVertexAttribPointer(a_zw, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
+	glEnableVertexAttribArray(a_zw);
 #endif
 	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->u);
 	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GrVertex), &((GrVertex*)NULL)->r);

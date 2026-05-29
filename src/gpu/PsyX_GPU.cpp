@@ -20,6 +20,9 @@
 
 OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
 
+int g_currentOTBucketCount = 0;
+float g_otBucketDepth = 0.0f;
+
 DISPENV currentDispEnv;
 DISPENV activeDispEnv;
 DRAWENV activeDrawEnv;
@@ -184,6 +187,8 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 
 #if USE_PGXP
 	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
+#else
+	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 #endif
 
 	ScreenCoordsToEmulator(vertex, 4);
@@ -259,6 +264,10 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	vertex[2].x = p2[0] + ofsX;
 	vertex[2].y = p2[1] + ofsY;
 
+#if !USE_PGXP
+	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
+#endif
+
 	ApplyVertexPGXP(&vertex[0], p0, ofsX, ofsY, gteidx, -2);
 	ApplyVertexPGXP(&vertex[1], p1, ofsX, ofsY, gteidx, -1);
 	ApplyVertexPGXP(&vertex[2], p2, ofsX, ofsY, gteidx, 0);
@@ -289,6 +298,10 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	vertex[3].x = p3[0] + ofsX;
 	vertex[3].y = p3[1] + ofsY;
+
+#if !USE_PGXP
+	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
+#endif
 
 	ApplyVertexPGXP(&vertex[0], p0, ofsX, ofsY, gteidx, -3);
 	ApplyVertexPGXP(&vertex[1], p1, ofsX, ofsY, gteidx, -2);
@@ -321,6 +334,8 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 
 #if USE_PGXP
 	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
+#else
+	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 #endif
 
 	ScreenCoordsToEmulator(vertex, 4);
@@ -876,6 +891,11 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 	}
 	else
 	{
+#if !USE_PGXP
+		const float otBucketStep = (g_currentOTBucketCount > 1)
+			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
+		g_otBucketDepth = 1.0f;
+#endif
 		// walk OT_TAG linked list with safety guards
 		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
 		for (int safety = 0; safety < 16384; safety++)
@@ -938,6 +958,10 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 
 			GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
 			lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
+
+#if !USE_PGXP
+			g_otBucketDepth -= otBucketStep;
+#endif
 
 			if (isendprim(basePacket))
 				break;

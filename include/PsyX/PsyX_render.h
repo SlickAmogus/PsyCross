@@ -123,6 +123,7 @@ typedef struct
 	float		z, scr_h, ofsX, ofsY;
 #else
 	short		x, y, page, clut;
+	float		z;
 #endif
 
 	u_char		u, v, bright, dither;
