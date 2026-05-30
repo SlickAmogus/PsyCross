@@ -52,23 +52,21 @@ extern SDL_Window* g_window;
 #define MAX_NUM_VERTEX_BUFFERS		(2)
 #define PSX_SCREEN_ASPECT	(240.0f / 320.0f)			// PSX screen is mapped always to this aspect
 
-/* PSX NTSC pixel aspect: a PSX 320×240 framebuffer displayed on a real
- * 4:3 NTSC CRT presents pixels that are ~1.094× taller than wide. The
- * 320×240 logical framebuffer therefore visually fills a vertical extent
- * that's 1.094× the "square pixel" assumption. Without compensating for
- * this, characters and assets look ~9% wider on a modern display than
- * the original artists intended (Harry's torso, arms, and legs visibly
- * thicker on PC vs CRT). Applied during Hor+ ortho setup so 1 horizontal
- * world unit on screen ≈ 1/1.094 the size of 1 vertical world unit.
+/* Pixel aspect ratio: 1 horizontal ortho unit / 1 vertical ortho unit
+ * ratio to apply on top of the Hor+ widening. PSX renders to a 320×240
+ * framebuffer; displayed on a 4:3 CRT (320/240 = 4/3 matches the CRT
+ * aspect exactly), each PSX pixel is SQUARE — so PAR=1.0 is the actual
+ * pixel aspect for 320×240 PSX content on a 4:3 NTSC CRT. The 1.09375
+ * value previously used here was over-correcting and making characters
+ * ~9% taller than they appear on a real PSX (visible on Harry's torso
+ * relative to a CRT screenshot at the same location).
  *
- * Now a runtime-settable global instead of a macro so the host
- * application can override it from config (see pc_port/config.cfg
- * pixel_aspect). The cull-bound sites in the game (vw_calc.c and
- * Gfx_MeshDraw in bodyprog_80055028.c) read this same global so
- * their bounds always track the active ortho. Default 1.09375 (CRT
- * NTSC); 1.0 = square pixels (modern emulator look); 1.143 = 8:7. */
+ * Runtime-settable so the host can override from config. Cull-bound
+ * sites (vw_calc.c, Gfx_MeshDraw) read this same global so culling
+ * tracks the active ortho. Default 1.0 = matches 320×240 PSX CRT;
+ * 1.094 = some emulators' approximation; 1.143 = 8:7 (overscan look). */
 extern "C" {
-float g_PsxPixelAspect = 1.09375f;
+float g_PsxPixelAspect = 1.0f;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
@@ -101,6 +99,20 @@ int g_dbg_texturelessMode = 0;
 // Set to 1 by game code only during states that render a 3D world (InGame, MapEvent).
 // When 0, GR_SetOffscreenState uses 4:3 ortho so 2D UI screens don't show VRAM garbage.
 int g_PcHorPlusEnabled = 1;
+
+/* Widescreen presentation mode for 3D gameplay (only used when g_PcHorPlusEnabled=1):
+ *   0 = Pillarbox (PSX-faithful): render 4:3 content centered in a 16:9 frame
+ *       with black bars on the sides. Characters and scene framing identical to
+ *       the original PSX game on a 4:3 CRT, just inside a wider window.
+ *   1 = Hor+ widescreen (default): keep vertical FOV, widen horizontal FOV to
+ *       fill the 16:9 frame with square pixels (correct character proportions).
+ *       Reveals scene content that was cropped on PSX (extra bar counter, walls
+ *       beyond the framebuffer edges); per-camera tuning in s_camCorrections[]
+ *       compensates per-shot to keep Harry framed like the PSX original.
+ *   2 = Stretch (anamorphic): no FOV change, no bars — 4:3 content stretched
+ *       to fill 16:9. Characters appear ~33% wider. Not recommended.
+ * Default 1 = Hor+ with square pixels. Override from config.cfg via widescreen_mode. */
+int g_PcWidescreenMode = 1;
 
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
@@ -1626,16 +1638,21 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		// setup default viewport
 
 		{
-			// Hor+ widescreen: expand x range so the vertical FOV is preserved and
-			// extra horizontal content fills the wider display instead of stretching.
-			// Only apply during 3D gameplay states (g_PcHorPlusEnabled=1); 2D UI
-			// screens use 4:3 ortho to avoid exposing adjacent VRAM as garbage.
+			// Widescreen presentation. Three modes (g_PcWidescreenMode):
+			//   0 = Pillarbox (PSX-faithful, default): 4:3 ortho rendered into
+			//       a centered 4:3 viewport of the window. Black bars on
+			//       sides. Characters and framing match PSX CRT exactly.
+			//   1 = Hor+: widen ortho horizontally so GTE-projected geometry
+			//       beyond the PSX framebuffer is visible. Reveals scene
+			//       content cropped on PSX (extra bar counter, walls etc.).
+			//   2 = Stretch (anamorphic): 4:3 content fills 16:9, chars wider.
 			//
-			// PSX NTSC pixel-aspect compensation: multiply the effective scale by
-			// PSX_NTSC_PIXEL_ASPECT (~1.094). PSX's 320×240 framebuffer on a 4:3
-			// CRT had pixels ~1.094× taller than wide; without this factor every
-			// character renders ~9% horizontally fatter than the original (most
-			// visible on Harry's torso/arms/legs).
+			// g_PcHorPlusEnabled=0 (2D UI screens) always uses the unwidened
+			// 4:3 ortho with full-window viewport — UI was authored stretched.
+			//
+			// The actual viewport for pillarbox is set in the !enable branch
+			// below (search "Pillarbox viewport"); ortho here is matched to
+			// whatever viewport that branch picks.
 			const float psxW = (float)activeDispEnv.disp.w;  // 320
 			const float psxH = (float)activeDispEnv.disp.h;  // 240
 			const float psxAspect = psxW / psxH;             // 4/3
@@ -1643,13 +1660,21 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
 			const float horScale = winAspect / psxAspect;
-			const float effectiveScale = (g_PcHorPlusEnabled && horScale > 1.0f)
-				? horScale * PSX_NTSC_PIXEL_ASPECT
-				: 1.0f;
-			const float margin = (effectiveScale > 1.0f)
-				? psxW * (effectiveScale - 1.0f) * 0.5f
-				: 0.0f;
-			GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
+			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
+				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
+				GR_Ortho2D(0.0f, psxW, psxH, 0.0f, -1.0f, 1.0f);
+			} else if (g_PcWidescreenMode == 1) {
+				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
+				 * preserves 1 H px = 1 V px scaling for character proportions. */
+				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
+				const float margin = psxW * (effectiveScale - 1.0f) * 0.5f;
+				GR_Ortho2D(-margin, psxW + margin, psxH, 0, -1.0f, 1.0f);
+			} else {
+				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
+				 * The viewport setup in the !enable branch handles the
+				 * pillarbox-vs-stretch difference (narrow viewport vs full). */
+				GR_Ortho2D(0.0f, psxW, psxH, 0.0f, -1.0f, 1.0f);
+			}
 		}
 
 	}
@@ -1682,7 +1707,27 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 	}
 	else
 	{
-		GR_SetViewPort(0, 0, g_windowWidth, g_windowHeight);
+		/* Pillarbox viewport: when g_PcWidescreenMode==0 (default) and we're
+		 * in 3D gameplay (g_PcHorPlusEnabled=1) on a widescreen window, restrict
+		 * the GL viewport to the central 4:3 region so 3D content renders only
+		 * there. Pixels outside stay at the GL clear color (black) — giving us
+		 * a true PSX-faithful 4:3 image centered in the 16:9 frame.
+		 *
+		 * Hor+ (mode 1) and stretch (mode 2), and 2D UI (HorPlusEnabled=0)
+		 * all use the full window viewport as before. */
+		bool pillarbox = false;
+		int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
+		if (g_PcHorPlusEnabled && g_PcWidescreenMode == 0 && g_windowHeight > 0) {
+			const float psxAspect = 4.0f / 3.0f;
+			const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
+			if (winAspect > psxAspect) {
+				vpW = (int)(g_windowHeight * psxAspect + 0.5f);
+				vpX = (g_windowWidth - vpW) / 2;
+				pillarbox = true;
+			}
+		}
+		(void)pillarbox;
+		GR_SetViewPort(vpX, vpY, vpW, vpH);
 
 		/* PC port: skip the offscreen-RT → VRAM writeback when a TIM-protect
 		 * screen is active. This branch fires whenever a draw split has
