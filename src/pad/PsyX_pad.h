@@ -7,6 +7,7 @@ extern "C" {
 
 extern void		PsyX_Pad_InitPad(int slot, u_char* padData);
 extern void		PsyX_Pad_Vibrate(int mtap, int slot, unsigned char* table, int len);
+extern void		PsyX_Pad_SetActBuffer(int slot, unsigned char* table, int len);
 extern int		PsyX_Pad_GetStatus(int mtap, int slot);
 extern void		PsyX_Pad_InternalPadUpdates();
 

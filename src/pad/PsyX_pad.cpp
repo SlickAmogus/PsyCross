@@ -29,6 +29,15 @@ int						g_cfg_controllerToSlotMapping[MAX_CONTROLLERS] = { -1, -1 };
 int						g_cfg_controllerMovement = 2;
 
 PsyXController			g_controllers[MAX_CONTROLLERS];
+
+/* PSX PadSetAct semantics: the game registers a LIVE actuator buffer once
+ * and the pad driver transmits its current bytes to the controller every
+ * vsync; the game then just mutates the bytes in place (Silent Hill's
+ * vibration engine repacks them per frame in func_8009E718). A fire-once
+ * PadSetAct loses every later value change, so register here and
+ * retransmit from PsyX_Pad_InternalPadUpdates. */
+static unsigned char*	g_actBufTable[MAX_CONTROLLERS];
+static int				g_actBufLen[MAX_CONTROLLERS];
 const u_char*			g_sdlKeyboardState = NULL;
 
 u_short PsyX_Pad_UpdateKeyboardInput();
@@ -214,6 +223,11 @@ void PsyX_Pad_InternalPadUpdates()
 			pad = (LPPADRAW)controller->padData;
 
 			PsyX_Pad_UpdateGameControllerInput(controller->gc, pad);
+
+			// Retransmit the registered actuator buffer (PSX pad driver
+			// behavior) so in-place value changes by the game reach SDL.
+			if (g_actBufTable[i] && g_actBufLen[i] > 0 && controller->gc)
+				PsyX_Pad_Vibrate(0, i, g_actBufTable[i], g_actBufLen[i]);
 
 			// PC port: analog mode is config-driven (controller_movement) rather
 			// than the original Select+Start manual toggle. analog/both -> 0x73
@@ -441,4 +455,20 @@ void PsyX_Pad_Vibrate(int mtap, int slot, unsigned char* table, int len)
 		freq_high = 4096;
 
 	SDL_GameControllerRumble(controller->gc, freq_low, freq_high, 200);
+}
+
+void PsyX_Pad_SetActBuffer(int slot, unsigned char* table, int len)
+{
+	if (slot < 0 || slot >= MAX_CONTROLLERS)
+		return;
+
+	g_actBufTable[slot] = table;
+	g_actBufLen[slot]   = (table != NULL) ? len : 0;
+
+	if (g_actBufLen[slot] == 0)
+	{
+		PsyXController* controller = &g_controllers[slot];
+		if (controller->gc)
+			SDL_GameControllerRumble(controller->gc, 0, 0, 0);
+	}
 }

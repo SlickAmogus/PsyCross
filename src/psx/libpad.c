@@ -30,8 +30,10 @@ void PadInitGun(unsigned char* unk00, int unk01)
 
 int PadChkVsync()
 {
-	PSYX_UNIMPLEMENTED();
-	return 0;
+	// Pad communication completes every frame on PC. Returning 0 made
+	// Silent Hill's vibration engine skip its DualShock detection and
+	// PadSetAct registration forever.
+	return 1;
 }
 
 void PadStartCom()
@@ -104,5 +106,8 @@ void PadSetAct(int port, unsigned char* table, int len)
 	mtap = port & 3;
 	slot = (mtap * 2) + (port >> 4) & 1;
 
+	// PSX semantics: registers a live buffer the driver retransmits every
+	// vsync (see PsyX_Pad_SetActBuffer). Also send once immediately.
+	PsyX_Pad_SetActBuffer(slot, table, len);
 	PsyX_Pad_Vibrate(mtap, slot, table, len);
 }
