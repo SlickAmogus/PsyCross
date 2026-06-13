@@ -37,20 +37,21 @@ float g_otBucketDepth = 0.0f;
  * u_pgxpEnabled gate keeps it on the legacy path — so nothing changes when off.
  * No prim fields, addPrim, or game-side store macros are touched.
  * -------------------------------------------------------------------------- */
-#define PGXP_RING_SIZE   8192          /* power of two */
+/* Ring large enough to hold a whole frame's transformed vertices (SH peaks
+ * ~150k vertex-transforms/frame): the GTE fills it while the game builds the
+ * ordering table, but GsDrawOt/MakeVertex* read it much LATER, so a prim's
+ * vertices must still be present at draw time. 262144 (>> 2 == 65536) so the
+ * ring position fits the prim's 16-bit pgxp_index when stored as (pos >> 2). */
+#define PGXP_RING_SIZE   262144
 #define PGXP_RING_MASK   (PGXP_RING_SIZE - 1)
-#define PGXP_SEARCH_BACK 96            /* recent entries scanned per vertex */
+#define PGXP_SEARCH_FWD  6             /* tolerate >>2 hint rounding */
+#define PGXP_SEARCH_BACK 40            /* prim verts sit just before the hint */
 
 struct PgxpRingEntry { int key; float x, y, w; };
 static PgxpRingEntry s_pgxpRing[PGXP_RING_SIZE];
 static unsigned int  s_pgxpRingPos = 0;
 
-extern "C" void PGXP_FrameReset(void)
-{
-	/* Optional: not strictly needed (ring is bounded + key-matched), but keeps
-	 * lookups from matching last frame's identical coords. Called at frame start. */
-	s_pgxpRingPos = 0;
-}
+extern "C" void PGXP_FrameReset(void) { /* monotonic ring; reset not required */ }
 
 extern "C" void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw)
 {
@@ -60,20 +61,37 @@ extern "C" void PGXP_PushVertex(int sx, int sy, float fx, float fy, float fw)
 	s_pgxpRingPos++;
 }
 
-/* Returns 1 + fills out_* on match. Searches newest-first so the current prim's
- * just-transformed vertices are found immediately. */
-static int PGXP_Lookup(int sx, int sy, float* ox, float* oy, float* ow)
+/* Stamp the prim with the ring position at addPrim time (>> 2 to fit 16 bits;
+ * the search window absorbs the rounding). Called from PsyX_CaptureGteDepths
+ * for EVERY prim — harmless when PGXP off (s_pgxpRingPos is frozen, the value
+ * is never read). prim points at a P_TAG. */
+extern "C" void PGXP_StampPrim(void* prim)
 {
+	((P_TAG*)prim)->pgxp_index = (unsigned short)((s_pgxpRingPos >> 2) & 0xFFFF);
+}
+
+/* Search the ring for the precise vertex matching integer (sx,sy), starting
+ * from the prim's stamped hint (its vertices were pushed just before it).
+ * hint16 == 0xFFFF => no hint (2D prim) => skip. */
+static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, float* oy, float* ow)
+{
+	if (hint16 == 0xFFFF)
+		return 0;
 	const int key = (sx & 0xFFFF) | (sy << 16);
-	unsigned int scan = (s_pgxpRingPos < PGXP_SEARCH_BACK) ? s_pgxpRingPos : PGXP_SEARCH_BACK;
-	for (unsigned int i = 1; i <= scan; i++)
+	const unsigned int start = (((unsigned int)hint16) << 2);
+	/* Backward-first: this prim's vertices were pushed in the few slots just
+	 * before its stamped hint, so prefer those over a later prim that happens
+	 * to share an integer screen coord. The small forward margin covers the
+	 * >>2 rounding in the stamped hint. */
+	for (int i = 0; i <= PGXP_SEARCH_BACK; i++)
 	{
-		const PgxpRingEntry* e = &s_pgxpRing[(s_pgxpRingPos - i) & PGXP_RING_MASK];
-		if (e->key == key)
-		{
-			*ox = e->x; *oy = e->y; *ow = e->w;
-			return 1;
-		}
+		const PgxpRingEntry* e = &s_pgxpRing[(start - i) & PGXP_RING_MASK];
+		if (e->key == key) { *ox = e->x; *oy = e->y; *ow = e->w; return 1; }
+	}
+	for (int i = 1; i <= PGXP_SEARCH_FWD; i++)
+	{
+		const PgxpRingEntry* e = &s_pgxpRing[(start + i) & PGXP_RING_MASK];
+		if (e->key == key) { *ox = e->x; *oy = e->y; *ow = e->w; return 1; }
 	}
 	return 0;
 }
@@ -81,11 +99,11 @@ static int PGXP_Lookup(int sx, int sy, float* ox, float* oy, float* ow)
 /* Fill a GrVertex's precise PGXP fields from the raw stored screen coord
  * (rawX,rawY = prim's stored x/y, the GTE output BEFORE the draw-env offset).
  * ofsX/ofsY are added so ppx/ppy line up with vertex.x/.y. pw=0 => shader
- * treats the vertex as affine. No-op (and never called) when PGXP is off. */
-static inline void PgxpFillVertex(GrVertex* v, int rawX, int rawY, float ofsX, float ofsY)
+ * treats the vertex as affine. Only called when PGXP is on. */
+static inline void PgxpFillVertex(GrVertex* v, int rawX, int rawY, float ofsX, float ofsY, unsigned short hint)
 {
 	float fx, fy, fw;
-	if (PGXP_Lookup(rawX, rawY, &fx, &fy, &fw))
+	if (PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw))
 	{
 		v->ppx = fx + ofsX;
 		v->ppy = fy + ofsY;
@@ -151,6 +169,10 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
+	/* PGXP: record the GTE ring position for this prim so MakeVertex* can find
+	 * its precise vertices at draw time. Harmless when PGXP off. */
+	PGXP_StampPrim(prim);
+
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
@@ -396,9 +418,9 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0[0], p0[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[1], p1[0], p1[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[2], p2[0], p2[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[0], p0[0], p0[1], ofsX, ofsY, gteidx);
+		PgxpFillVertex(&vertex[1], p1[0], p1[1], ofsX, ofsY, gteidx);
+		PgxpFillVertex(&vertex[2], p2[0], p2[1], ofsX, ofsY, gteidx);
 	}
 
 	ScreenCoordsToEmulator(vertex, 3);
@@ -432,10 +454,10 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	if (g_PsxUsePgxp)
 	{
-		PgxpFillVertex(&vertex[0], p0[0], p0[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[1], p1[0], p1[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[2], p2[0], p2[1], ofsX, ofsY);
-		PgxpFillVertex(&vertex[3], p3[0], p3[1], ofsX, ofsY);
+		PgxpFillVertex(&vertex[0], p0[0], p0[1], ofsX, ofsY, gteidx);
+		PgxpFillVertex(&vertex[1], p1[0], p1[1], ofsX, ofsY, gteidx);
+		PgxpFillVertex(&vertex[2], p2[0], p2[1], ofsX, ofsY, gteidx);
+		PgxpFillVertex(&vertex[3], p3[0], p3[1], ofsX, ofsY, gteidx);
 	}
 
 	ScreenCoordsToEmulator(vertex, 4);
@@ -1339,7 +1361,9 @@ static int ProcessGouraudLines(P_TAG* polyTag)
 
 static int ProcessFlatPoly(P_TAG* polyTag)
 {
-	const u_short gteIndex = 0xFFFF;
+	/* PGXP hint: the prim's stamped GTE ring position (0xFFFF / ignored when
+	 * PGXP off). 3D polygons only — sprites/tiles/lines stay 0xFFFF. */
+	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
 
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
 	const bool semiTrans = (polyTag->code & 2);
@@ -1482,7 +1506,8 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 static int ProcessGouraudPoly(P_TAG* polyTag)
 {
-	const u_short gteIndex = 0xFFFF;
+	/* PGXP hint (3D polygons only). 0xFFFF / ignored when PGXP off. */
+	const u_short gteIndex = g_PsxUsePgxp ? polyTag->pgxp_index : (u_short)0xFFFF;
 
 	const bool shadeTexOn = true;
 	const bool semiTrans = (polyTag->code & 2);
