@@ -185,11 +185,7 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 {
 	(void)arg3;
 	uint16_t avg   = (uint16_t)(((unsigned)s0 + s1 + s2 + s3) >> 2);
-	/* PGXP on: skip the 64-unit OT-bucket quantisation so affine/missed prims
-	 * share the continuous depth space the shader builds per-vertex from SZ3.
-	 * Without this, coplanar hit-vs-miss boundaries gap by up to 64 SZ and drop
-	 * triangles. OFF keeps quantisation → affine path byte-identical. */
-	uint16_t avg_q = g_PsxUsePgxp ? avg : (uint16_t)((avg >> 6) << 6);
+	uint16_t avg_q = (uint16_t)((avg >> 6) << 6);
 	// Calibrate with unquantised real max so character/item GL depths stay accurate.
 	uint32_t mx = s0 > s1 ? s0 : s1;
 	if (s2 > mx) mx = s2;
