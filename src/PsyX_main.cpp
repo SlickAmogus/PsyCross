@@ -19,7 +19,6 @@
 #include "psx/libgte.h"
 #include "psx/libgpu.h"
 #include "psx/libspu.h"
-#include "audio/PsyX_SPUAL.h"
 
 #include <assert.h>
 #include <string.h>
@@ -909,8 +908,6 @@ void PsyX_EndScene()
 	begin_scene_flag = 0;
 
 	PGXP_CoverageTick();
-
-	PsyX_SPUAL_Update(); // advance SPU ADSR envelopes (per-frame wall-clock dt)
 
 	GR_EndScene();
 

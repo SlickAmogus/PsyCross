@@ -73,15 +73,6 @@ static SDL_mutex* g_SpuMutex = NULL;
 static int g_spuInit = 0;
 static int s_spuMallocVal = 0;
 
-typedef enum
-{
-	ENV_OFF = 0,
-	ENV_ATTACK,
-	ENV_DECAY,
-	ENV_SUSTAIN,
-	ENV_RELEASE,
-} EnvPhase;
-
 typedef struct
 {
 	SpuVoiceAttr attr;	// .voice is Id of this channel
@@ -90,19 +81,6 @@ typedef struct
 	ALuint alSource;
 	ushort sampledirty;
 	ushort reverb;
-
-	// PSX SPU ADSR envelope (PC port). Only engaged for looping voices that
-	// programmed a real ADSR (adsr1/adsr2 != 0); one-shot SFX/voices keep the
-	// plain static-gain path so this never alters the large body of working
-	// sounds. Hardware runs the envelope at 44100Hz on a 0..0x7FFF level and
-	// multiplies the sample by it; without it a looping sample (e.g. the
-	// clock bell) rings forever.
-	int      envPhase;     // EnvPhase
-	int      envLevel;     // 0..0x7FFF
-	int      envCounter;   // accumulated 44100Hz samples toward next step
-	float    baseGain;     // volume-derived gain before envelope
-	ushort   hasEnvelope;  // adsr programmed + looping
-	ushort   looping;      // AL_LOOPING was set for the current sample
 } SPUALVoice;
 
 const int s_spuVoiceCount = 24;
@@ -572,197 +550,14 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		// pre-decoded ADPCM and matches the de-facto working behavior
 		// (the old bounds check almost always failed anyway).
 		alSourcei(alSource, AL_LOOPING, AL_TRUE);
-		voice->looping = 1;
 	}
 	else
 	{
 		alSourcei(alSource, AL_LOOPING, AL_FALSE);
-		voice->looping = 0;
 	}
 
 	// set the buffer
 	alSourcei(alSource, AL_BUFFER, alBuffer);
-}
-
-// ---- PSX SPU ADSR envelope ------------------------------------------------
-// Reference: nocash psx-spx "Envelope Operation". adsr1/adsr2 are the raw
-// hardware registers (the game programs them via SpuSetVoiceAttr mask
-// SPU_VOICE_ADSR_ADSR1/ADSR2). The envelope advances a 0..0x7FFF level at
-// 44100Hz; each "step" the level changes by AdsrStep every AdsrCycles samples.
-
-#define ADSR_MAX 0x7FFF
-
-static int adsr_sustain_level(u_short adsr1)
-{
-	int sl = adsr1 & 0x0F;                 // bits 0-3
-	int lvl = (sl + 1) << 11;              // (N+1)*0x800
-	return lvl > ADSR_MAX ? ADSR_MAX : lvl;
-}
-
-// Decompose a 0..0x7F rate into (cycles, step) at the current level.
-static void adsr_step_params(int rate, int increase, int exponential, int level,
-	int* outCycles, int* outStep)
-{
-	int shift = (rate >> 2) & 0x1F;
-	int sel   = rate & 3;
-	int step  = increase ? (7 - sel) : (-8 + sel);
-	int cycles = 1 << (shift > 11 ? shift - 11 : 0);
-
-	if (shift < 11)
-		step <<= (11 - shift);
-
-	if (exponential)
-	{
-		if (increase && level > 0x6000)
-			cycles <<= 2;                  // exponential attack slows near the top
-		if (!increase)
-			step = (step * level) >> 15;   // exponential decrease scales with level
-	}
-
-	if (cycles < 1)
-		cycles = 1;
-
-	*outCycles = cycles;
-	*outStep = step;
-}
-
-static void EnvelopeKeyOn(SPUALVoice* voice)
-{
-	voice->envPhase   = ENV_ATTACK;
-	voice->envLevel   = 0;
-	voice->envCounter = 0;
-}
-
-static void EnvelopeKeyOff(SPUALVoice* voice)
-{
-	if (voice->envPhase != ENV_OFF)
-		voice->envPhase = ENV_RELEASE;
-}
-
-// Advance one voice's envelope by `samples` 44100Hz ticks. Returns the
-// 0..0x7FFF level. Recomputes step params each step so phase/level changes
-// (exponential curves) track correctly.
-static int EnvelopeAdvance(SPUALVoice* voice, int samples)
-{
-	const u_short adsr1 = voice->attr.adsr1;
-	const u_short adsr2 = voice->attr.adsr2;
-
-	const int sustainLevel = adsr_sustain_level(adsr1);
-
-	voice->envCounter += samples;
-
-	for (int guard = 0; guard < 200000 && voice->envPhase != ENV_OFF; guard++)
-	{
-		int rate, increase, exponential;
-
-		switch (voice->envPhase)
-		{
-		case ENV_ATTACK:
-			rate        = (adsr1 >> 8) & 0x7F;
-			increase    = 1;
-			exponential = (adsr1 >> 15) & 1;
-			break;
-		case ENV_DECAY:
-			rate        = ((adsr1 >> 4) & 0x0F) << 2; // 4-bit, *4
-			increase    = 0;
-			exponential = 1;                          // decay is always exponential
-			break;
-		case ENV_SUSTAIN:
-			rate        = (adsr2 >> 6) & 0x7F;
-			increase    = !((adsr2 >> 14) & 1);       // bit14: 0=increase 1=decrease
-			exponential = (adsr2 >> 15) & 1;
-			break;
-		case ENV_RELEASE:
-		default:
-			rate        = (adsr2 & 0x1F) << 2;        // 5-bit, *4
-			increase    = 0;
-			exponential = (adsr2 >> 5) & 1;
-			break;
-		}
-
-		int cycles, step;
-		adsr_step_params(rate, increase, exponential, voice->envLevel, &cycles, &step);
-
-		if (voice->envCounter < cycles)
-			break;
-
-		voice->envCounter -= cycles;
-		voice->envLevel += step;
-
-		if (voice->envLevel > ADSR_MAX) voice->envLevel = ADSR_MAX;
-		if (voice->envLevel < 0)        voice->envLevel = 0;
-
-		switch (voice->envPhase)
-		{
-		case ENV_ATTACK:
-			if (voice->envLevel >= ADSR_MAX)
-				voice->envPhase = ENV_DECAY;
-			break;
-		case ENV_DECAY:
-			if (voice->envLevel <= sustainLevel)
-			{
-				voice->envLevel = sustainLevel;
-				voice->envPhase = ENV_SUSTAIN;
-			}
-			break;
-		case ENV_SUSTAIN:
-			// holds until key-off; a decreasing sustain naturally rings out
-			break;
-		case ENV_RELEASE:
-			if (voice->envLevel <= 0)
-				voice->envPhase = ENV_OFF;
-			break;
-		}
-	}
-
-	return voice->envLevel;
-}
-
-void PsyX_SPUAL_Update()
-{
-	if (!g_spuInit)
-		return;
-
-	static u_int s_lastTicks = 0;
-	u_int now = SDL_GetTicks();
-	if (s_lastTicks == 0)
-		s_lastTicks = now;
-
-	int dtMs = (int)(now - s_lastTicks);
-	s_lastTicks = now;
-
-	if (dtMs <= 0)
-		return;
-	if (dtMs > 100)
-		dtMs = 100; // clamp hitches so the envelope can't jump seconds at once
-
-	int samples = (dtMs * 44100) / 1000;
-
-	SDL_LockMutex(g_SpuMutex);
-	for (int i = 0; i < s_spuVoiceCount; i++)
-	{
-		SPUALVoice* voice = &g_SpuVoices[i];
-
-		if (!voice->hasEnvelope || voice->envPhase == ENV_OFF)
-			continue;
-
-		ALuint alSource = voice->alSource;
-		if (alSource == AL_NONE)
-			continue;
-
-		int level = EnvelopeAdvance(voice, samples);
-		float env = (float)level / (float)ADSR_MAX;
-
-		alSourcef(alSource, AL_GAIN, voice->baseGain * env);
-
-		if (voice->envPhase == ENV_OFF)
-		{
-			// release finished: silence the (looping) source for real
-			alSourceStop(alSource);
-			voice->hasEnvelope = 0;
-		}
-	}
-	SDL_UnlockMutex(g_SpuMutex);
 }
 
 int PsyX_SPUAL_SetMute(int on_off)
@@ -902,22 +697,8 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 			pan = 2.0f * pan - 1.0f; // convert to [-1, 1]
 			pan = pan * 0.5f; // 0.5 = sin(30') for a +/- 30 degree arc
 			alSource3f(alSource, AL_POSITION, pan * STEREO_FACTOR, 0, -sqrtf(1.0f - pan * pan));
-
-			voice->baseGain = (left_gain + right_gain) * 0.5f;
-
-			// While an envelope is running it owns the source gain (the tick
-			// applies baseGain*level); otherwise apply the volume directly.
-			float g = voice->baseGain;
-			if (voice->hasEnvelope && voice->envPhase != ENV_OFF)
-				g *= (float)voice->envLevel / (float)ADSR_MAX;
-			alSourcef(alSource, AL_GAIN, g);
+			alSourcef(alSource, AL_GAIN, (left_gain+right_gain)*0.5f);
 		}
-
-		// Capture the raw ADSR registers so SetKey can run the envelope.
-		if (psxAttrib->mask & SPU_VOICE_ADSR_ADSR1)
-			voice->attr.adsr1 = psxAttrib->adsr1;
-		if (psxAttrib->mask & SPU_VOICE_ADSR_ADSR2)
-			voice->attr.adsr2 = psxAttrib->adsr2;
 
 		// update pitch
 		if (psxAttrib->mask & SPU_VOICE_PITCH)
@@ -963,36 +744,11 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 			alSourceStop(alSource);
 			UpdateVoiceSample(voice);
 
-			// Engage the ADSR envelope only for looping voices that programmed
-			// a real envelope — those are the ones that otherwise ring forever
-			// (e.g. the clock bell). One-shot SFX/voices end on their own and
-			// keep the plain static-gain path untouched.
-			if (voice->looping && (voice->attr.adsr1 || voice->attr.adsr2))
-			{
-				voice->hasEnvelope = 1;
-				EnvelopeKeyOn(voice);
-				alSourcef(alSource, AL_GAIN, 0.0f); // attack ramps from silence
-			}
-			else
-			{
-				voice->hasEnvelope = 0;
-				voice->envPhase = ENV_OFF;
-			}
-
 			alSourcePlay(alSource);
 		}
 		else
 		{
-			if (voice->hasEnvelope && voice->envPhase != ENV_OFF)
-			{
-				// Let the release phase ring out; the tick stops the source
-				// once the envelope reaches zero.
-				EnvelopeKeyOff(voice);
-			}
-			else
-			{
-				alSourceStop(alSource);
-			}
+			alSourceStop(alSource);
 		}
 	}
 	SDL_UnlockMutex(g_SpuMutex);
