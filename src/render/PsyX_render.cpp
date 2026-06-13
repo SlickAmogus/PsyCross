@@ -763,21 +763,19 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 #endif
 
 /* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
- * build the ortho clip position from the precise float screen X/Y, replacing
- * the flat per-prim affine depth with a CONTINUOUS per-vertex depth derived
- * from this vertex's own SZ3 (a_pgxp.z), then scale xyzw by W so the GPU's
- * perspective divide restores the NDC position but interpolates varyings
- * (UV/colour) perspective-correctly. z_pv uses the SAME formula/scale as the
- * affine path (ApplyGtePerVertexDepth: 1 - 2*sz/szMax) so PGXP-hit and
- * affine/missed prims share one continuous depth space — but per-vertex and
- * un-quantised, so coplanar faces no longer collide in 64-unit SZ buckets.
- * Requires PsyX_SetNextPrimSz to skip quantisation while PGXP is on so the
- * affine flat depth matches this scale at prim boundaries.
- * The else-branch is byte-identical to the legacy affine path. */
+ * build the SAME ortho clip position from the precise float screen X/Y, then
+ * scale xyzw by W so the GPU's perspective divide returns the identical NDC
+ * position but interpolates varyings (UV/colour) perspective-correctly. Depth
+ * (a_zw.x) is left as the FLAT per-prim affine value so Z-ordering matches the
+ * painter/submission model this renderer relies on — true per-vertex depth was
+ * tried 3x (v1 67a852f / v2 f60aab4 / v3 99e5b18) and ALWAYS dropped/warped
+ * coplanar triangles, because depth here is one flat value per prim and ties
+ * resolve by OT order; a per-vertex subset is incompatible. Z-fight relief now
+ * comes purely from un-quantising that flat depth (PsyX_SetNextPrimSz) when
+ * PGXP is on. The else-branch is byte-identical to the legacy affine path. */
 #define GTE_PERSPECTIVE_CORRECTION \
 		"	if (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) {\n"\
-		"		float z_pv = clamp(1.0 - 2.0 * a_pgxp.z / u_szMax, -1.0, 1.0);\n"\
-		"		vec4 b = Projection * vec4(a_pgxp.xy, z_pv, 1.0);\n"\
+		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
 		"		float W = a_pgxp.z;\n"\
 		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
 		"	} else {\n"\
