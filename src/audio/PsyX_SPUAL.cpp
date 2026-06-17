@@ -1035,9 +1035,25 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 	SDL_UnlockMutex(g_SpuMutex);
 }
 
+// With the ADSR envelope engaged, a keyed-off voice keeps its OpenAL source
+// PLAYING while the release tail rings out. The game's libsd "wait until
+// SPU_OFF" / "wait for silence" logic (smf_snd/smf_io voice scans, the cutscene
+// dialogue gate) would then see the voice as busy for the whole audible
+// ringout -> the 30s end-of-dialogue freeze. PSX SpuGetKeyStatus reflects the
+// key on/off latch, which goes OFF immediately at key-off (the voice still
+// rings out in release but reads SPU_OFF). Mirror that: a keyed-off enveloped
+// voice (phase RELEASE/OFF) reads free at once, exactly as the ADSR-disabled
+// path does (key-off -> alSourceStop -> STOPPED), while the envelope fades the
+// audio out on its own.
+static int spual_voice_keyed_on(const SPUALVoice* voice)
+{
+	int ph = voice->envPhase;
+	return ph == ENV_ATTACK || ph == ENV_DECAY || ph == ENV_SUSTAIN;
+}
+
 int PsyX_SPUAL_GetKeyStatus(u_int voice_bit)
 {
-	int state = AL_STOPPED;
+	int playing = 0;
 	SDL_LockMutex(g_SpuMutex);
 
 	for (int i = 0; i < s_spuVoiceCount; i++)
@@ -1051,13 +1067,22 @@ int PsyX_SPUAL_GetKeyStatus(u_int voice_bit)
 		if (alSource == AL_NONE)
 			break; // SpuOff?
 
-		alGetSourcei(alSource, AL_SOURCE_STATE, &state);
+		if (g_SpuAdsrEnabled && voice->hasEnvelope)
+		{
+			playing = spual_voice_keyed_on(voice);
+		}
+		else
+		{
+			int state = AL_STOPPED;
+			alGetSourcei(alSource, AL_SOURCE_STATE, &state);
+			playing = (state == AL_PLAYING);
+		}
 		break;
 	}
 
 	SDL_UnlockMutex(g_SpuMutex);
 
-	return (state == AL_PLAYING);	// simple as this?
+	return playing;
 }
 
 void PsyX_SPUAL_GetAllKeysStatus(char* status)
@@ -1070,6 +1095,12 @@ void PsyX_SPUAL_GetAllKeysStatus(char* status)
 		if (alSource == AL_NONE)
 		{
 			status[i] = 0; // SpuOff?
+			continue;
+		}
+
+		if (g_SpuAdsrEnabled && voice->hasEnvelope)
+		{
+			status[i] = spual_voice_keyed_on(voice);
 			continue;
 		}
 
