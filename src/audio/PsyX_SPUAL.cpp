@@ -583,6 +583,10 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		// (the old bounds check almost always failed anyway).
 		alSourcei(alSource, AL_LOOPING, AL_TRUE);
 		voice->looping = 1;
+		// Diag: a Repeat=1 ADPCM sample loops forever until a key-off. Name the
+		// voice + sample addr so a never-stopped cutscene loop can be identified.
+		eprintf("[SPULOOP] key-on voice=%d addr=0x%x loopLen=%d (AL_LOOPING)\n",
+			(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr, loopLen);
 	}
 	else
 	{
@@ -993,6 +997,10 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 		}
 		else
 		{
+			if (voice->looping)
+				eprintf("[SPULOOP] key-off voice=%d addr=0x%x\n",
+					(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr);
+
 			if (g_SpuAdsrEnabled && voice->hasEnvelope && voice->envPhase != ENV_OFF)
 			{
 				// Let the release phase ring out; the tick stops the source
