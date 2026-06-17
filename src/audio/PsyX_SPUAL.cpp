@@ -595,8 +595,6 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		}
 		alSourcei(alSource, AL_LOOPING, AL_TRUE);
 		voice->looping = 1;
-		eprintf("[SPULOOP] key-on voice=%d addr=0x%x loopStart=%d loopLen=%d count=%d\n",
-			(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr, loopStart, loopLen, count);
 	}
 	else
 	{
@@ -1017,8 +1015,6 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 			// keyed off intentionally by the game, so stopping them here is right.
 			if (voice->looping)
 			{
-				eprintf("[SPULOOP] key-off voice=%d addr=0x%x -> AL_LOOPING cleared\n",
-					(int)(voice - g_SpuVoices), (unsigned)voice->attr.addr);
 				alSourcei(alSource, AL_LOOPING, AL_FALSE);
 				voice->looping = 0;
 			}
