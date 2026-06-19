@@ -148,7 +148,10 @@ extern "C" void PGXP_CoverageTick(void)
  * generation it was written in; a lookup only accepts a current-generation
  * entry, so a prim reusing last frame's address can never read a stale coord. */
 struct PgxpAddrEntry { uintptr_t key; unsigned gen; float x, y, w; };
-#define PGXP_ADDR_BITS 17
+/* Sized for the real load: SH transforms ~230k verts/frame, so 2^19 keeps the
+ * address map under ~50% so the deterministic tier resolves instead of evicting
+ * to the collision-prone ring (was 2^17 = 131072, ~1.7x OVER capacity). */
+#define PGXP_ADDR_BITS 19
 #define PGXP_ADDR_SIZE (1 << PGXP_ADDR_BITS)
 #define PGXP_ADDR_MASK (PGXP_ADDR_SIZE - 1)
 static PgxpAddrEntry s_pgxpAddr[PGXP_ADDR_SIZE];
@@ -306,7 +309,11 @@ extern "C" void PsyX_SetNextPrimSnapXY(void)
  * generation lets the parked set survive that mistimed clear: store and draw
  * happen in the same frame (same gen), and next frame's entries are rejected. */
 struct PgxpPrimEntry { uintptr_t key; unsigned gen; int n; int affine; int snapXY; PgxpVtx v[4]; };
-#define PGXP_PRIM_BITS 13
+/* One entry per bridged prim. SH draws ~60k such prims/frame, so 2^13 = 8192 was
+ * ~7x OVER capacity -> most parked sets evicted before draw -> prims fell to the
+ * collision-prone ring (the real cause of character wobble/seams). 2^17 keeps it
+ * under ~50%. */
+#define PGXP_PRIM_BITS 17
 #define PGXP_PRIM_SIZE (1 << PGXP_PRIM_BITS)
 #define PGXP_PRIM_MASK (PGXP_PRIM_SIZE - 1)
 static PgxpPrimEntry g_pgxpPrimTable[PGXP_PRIM_SIZE];
