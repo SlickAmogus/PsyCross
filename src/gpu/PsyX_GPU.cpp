@@ -197,13 +197,55 @@ struct PgxpVtx { float x, y, w; };
 static PgxpVtx g_primPgxpNext[4];
 static int     g_primPgxpNextCount = 0;
 static int     g_primPgxpNextValid = 0;
-static int     g_primPgxpSnapXY = 0;   /* per-prim: keep W, pin XY to affine (char bones) */
-/* Persistent "snap-XY" mode: while on, every bridged prim is flagged snap-XY.
- * The character bone-draw loop brackets its draws with it so all rigid bone
- * segments snap to the pixel grid (no joint seams) without touching the 4 emit
- * sites in the shared mesh drawer. */
+static int     g_primPgxpSnapXY = 0;   /* per-prim: a character vertex -> weld it */
+
+/* --- Character vertex weld (DuckStation-style seam fix) ---------------------
+ * PGXP is an enhancement, NOT PSX-faithful, so characters stay on FULL perspective
+ * PGXP (position AND W precise) — that's why flat faces don't facet. The only
+ * problem with full PGXP on characters is the bone-joint SEAM: each bone is a
+ * separate rigid mesh on its own matrix, so a joint shared by two bones projects
+ * to two verts a sub-pixel apart -> a thin gap. The earlier "snap-XY" hid it by
+ * pinning XY to the pixel grid, but mixing an affine position with a perspective
+ * W faceted the flat faces. Instead WELD: snap a character vertex onto a nearby
+ * earlier character vertex (same frame/character) so the shared joint verts
+ * coincide exactly. Both keep their precise position+W, so no faceting and no
+ * seam. A depth (W) ratio guard stops two different surfaces that merely overlap
+ * on screen from welding together. */
+struct WeldEntry { unsigned gen; float x, y, w; };
+#define WELD_BITS 14
+#define WELD_SIZE (1 << WELD_BITS)
+#define WELD_MASK (WELD_SIZE - 1)
+static WeldEntry s_weld[WELD_SIZE];
+static unsigned  s_weldGen = 0;
+float g_pgxpWeldDistPx = 2.5f;    /* tunable: max screen gap (px) to weld    */
+float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld    */
+
+static inline unsigned WeldHash(int ix, int iy) {
+	return ((unsigned)ix * 73856093u) ^ ((unsigned)iy * 19349663u);
+}
+static void WeldReset(void) { s_weldGen++; }   /* per character: stale all entries */
+static void WeldVertex(float* x, float* y, float* w) {
+	const float thr2 = g_pgxpWeldDistPx * g_pgxpWeldDistPx;
+	int ix = (int)(*x < 0 ? *x - 0.5f : *x + 0.5f);
+	int iy = (int)(*y < 0 ? *y - 0.5f : *y + 0.5f);
+	for (int dy = -1; dy <= 1; dy++)
+	for (int dx = -1; dx <= 1; dx++) {
+		WeldEntry* e = &s_weld[WeldHash(ix + dx, iy + dy) & WELD_MASK];
+		if (e->gen != s_weldGen) continue;
+		float ex = e->x - *x, ey = e->y - *y;
+		if (ex * ex + ey * ey > thr2) continue;
+		float lo = e->w < *w ? e->w : *w, hi = e->w < *w ? *w : e->w;
+		if (lo > 0.0f && hi <= lo * g_pgxpWeldWRatio) { *x = e->x; *y = e->y; *w = e->w; return; }
+	}
+	WeldEntry* e = &s_weld[WeldHash(ix, iy) & WELD_MASK];
+	e->gen = s_weldGen; e->x = *x; e->y = *y; e->w = *w;
+}
+
+/* Persistent "character" mode: while on, every bridged prim's verts are flagged
+ * for welding. The character bone-draw loop brackets its draws with it (and the
+ * enable resets the weld set) so welding is scoped to a single character. */
 static int     g_pgxpSnapMode = 0;
-extern "C" void PsyX_SetPgxpSnapMode(int on) { g_pgxpSnapMode = on ? 1 : 0; }
+extern "C" void PsyX_SetPgxpSnapMode(int on) { g_pgxpSnapMode = on ? 1 : 0; if (on) WeldReset(); }
 
 extern "C" void PsyX_SetNextPrimPgxp(void* a0, void* a1, void* a2, void* a3)
 {
@@ -236,13 +278,11 @@ extern "C" void PsyX_SetNextPrimAffine(void)
 	g_primPgxpNextValid = 1;   /* make PsyX_CaptureGteDepths park (store) the flag */
 }
 
-/* Force the NEXT addPrim to keep its perspective W (texture correction) but pin
- * each vertex's screen position to the affine integer coord. For rigid segmented
- * meshes (character bones): true per-vertex precision makes adjacent segments'
- * overlapping joint verts land sub-pixel apart -> a seam that affine hid by
- * pixel-snapping. Snapping XY back removes the seam while keeping the texture
- * perspective-correct. Captured per-prim, then cleared. (g_primPgxpSnapXY is
- * declared with the bridge globals above so PsyX_SetNextPrimPgxp can set it.) */
+/* Mark the NEXT addPrim's verts as character verts to be welded (see WeldVertex):
+ * full perspective PGXP is kept, but coincident bone-joint verts snap together so
+ * the joints don't seam. Per-prim form; the bone loop normally uses the persistent
+ * PsyX_SetPgxpSnapMode instead. (g_primPgxpSnapXY is declared with the bridge
+ * globals above so PsyX_SetNextPrimPgxp can set it.) */
 extern "C" void PsyX_SetNextPrimSnapXY(void)
 {
 	if (!g_PsxUsePgxp) return;
@@ -370,14 +410,12 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 
 	if (got)
 	{
-		/* snap-XY (rigid characters): keep the perspective W so the texture stays
-		 * perspective-correct, but pin the screen position to the affine integer
-		 * coord. Each bone segment is a separate rigid mesh on its own matrix, so
-		 * overlapping joint verts land sub-pixel apart with true precision and show
-		 * a seam; snapping XY back to the pixel grid makes the segments meet exactly
-		 * as they did on PSX while still correcting the texture. */
-		if (s_curPgxpSnapXY) { v->ppx = (float)v->x; v->ppy = (float)v->y; }
-		else                 { v->ppx = hx; v->ppy = hy; }
+		/* Character verts (snap mode): weld coincident bone-joint verts to a common
+		 * precise position so the seam closes — while keeping FULL perspective
+		 * (position+W stay precise, so flat faces don't facet). See WeldVertex. */
+		if (s_curPgxpSnapXY) WeldVertex(&hx, &hy, &hw);
+		v->ppx = hx;
+		v->ppy = hy;
 		v->ppw = hw;
 	}
 	else
