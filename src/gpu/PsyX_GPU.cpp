@@ -105,8 +105,10 @@ static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, f
  * or fall back to affine (miss)? Dumped ~once a second when PGXP is on. Also
  * bumps the address-map generation once per frame (see s_pgxpGen). */
 static unsigned int s_pgxpDet = 0, s_pgxpRingHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
-/* Per-character coverage (verts drawn during the character snap bracket). */
-static unsigned s_charGot = 0, s_charMiss = 0;
+/* Per-character coverage (verts drawn during the character snap bracket).
+ * miss breakdown: noBridge = prim never parked (un-bridged draw path);
+ * slotUnres = prim parked but this vertex's scratch addr never resolved (w<0). */
+static unsigned s_charGot = 0, s_charMiss = 0, s_charMissNoBridge = 0, s_charMissSlotUnres = 0;
 extern "C" void PGXP_BumpGen(void);
 extern "C" void PGXP_CoverageTick(void)
 {
@@ -123,11 +125,13 @@ extern "C" void PGXP_CoverageTick(void)
 				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot);
 		unsigned ctot = s_charGot + s_charMiss;
 		if (ctot)
-			eprintinfo("[PGXPCHAR] char verts: precise=%u(%.0f%%) miss/affine=%u(%.0f%%)\n",
+			eprintinfo("[PGXPCHAR] char verts: precise=%u(%.0f%%) miss=%u(%.0f%%) [noBridge=%u slotUnres=%u other=%u]\n",
 				s_charGot,  100.0 * (double)s_charGot  / (double)ctot,
-				s_charMiss, 100.0 * (double)s_charMiss / (double)ctot);
+				s_charMiss, 100.0 * (double)s_charMiss / (double)ctot,
+				s_charMissNoBridge, s_charMissSlotUnres,
+				s_charMiss - s_charMissNoBridge - s_charMissSlotUnres);
 		s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = s_pgxpFrames = 0;
-		s_charGot = s_charMiss = 0;
+		s_charGot = s_charMiss = s_charMissNoBridge = s_charMissSlotUnres = 0;
 	}
 }
 
@@ -394,24 +398,25 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	float hx = 0.0f, hy = 0.0f, hw = 0.0f;
 	int got = 0;
 
-	/* 1) deterministic by prim-field address: direct-to-prim geometry
-	 *    (effect quads via gte_stsxy3_g3, character models via libgs_stub) */
-	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
+	/* 1) deterministic by prim-field address (EXACT-key, collision-free): this is
+	 *    provably this vertex's own precise coord, so NO 2px guard — an off-screen
+	 *    vertex (whose prim stores the GTE's CLAMPED integer) keeps its true
+	 *    unclamped position instead of being rejected to affine and snapped back to
+	 *    the clamp edge. That rejection was a big part of the character "miss" and
+	 *    the classic off-screen warp; trusting the exact match fixes both. */
+	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw))
 	{
 		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
 	}
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
 	 *    The drawer parks verts in poly x0..x3 order and MakeVertex draws them in
 	 *    that same order, so parked slot `slot` IS this drawn vertex's own precise
-	 *    coord — use it directly (exact W). The old closest-(x,y) match grabbed a
-	 *    DIFFERENT slot's W when two corners shared a pixel (dense foliage), and
-	 *    since the shader scales position by W that warped them into spikes.
-	 *    Closest-(x,y) stays as the fallback for any emit site whose park order
-	 *    doesn't line up with the draw order (slot coord would then fail Accept). */
+	 *    coord — trust it directly with NO 2px guard (same off-screen reasoning as
+	 *    tier 1). The closest-(x,y) fallback below keeps its guard, since that one
+	 *    is heuristic and could grab a different vertex. */
 	else if (s_curPgxpN)
 	{
-		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
-		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
+		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f)
 		{
 			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
 		}
@@ -473,7 +478,13 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		v->ppy = (float)v->y;
 		v->ppw = 0.0f; /* miss -> affine */
 		s_pgxpMiss++;
-		if (s_curPgxpSnapXY) s_charMiss++;
+		if (s_curPgxpSnapXY) {
+			s_charMiss++;
+			if (s_curPgxpN == 0)
+				s_charMissNoBridge++;
+			else if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w < 0.0f)
+				s_charMissSlotUnres++;
+		}
 	}
 }
 
