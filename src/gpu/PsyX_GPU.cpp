@@ -419,20 +419,20 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
 	}
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
-	 *    DuckStation-faithful: match the drawn vertex to the parked vertex whose
-	 *    stored integer value EQUALS this one (rawx==rawX && rawy==rawY), then accept
-	 *    only if its precise coord is within tolerance (garbage guard). No slot-index
-	 *    (can misalign) and no closest-(x,y) (fused two corners onto one vertex ->
-	 *    flat collapsed faces). An unmatched vertex stays affine, never collapsed. */
+	 *    DuckStation keys on a UNIQUE address and only validates with the value; our
+	 *    unique per-vertex key is the SLOT (slot i == this drawn vertex, since the
+	 *    drawer copies scratch[field_10..13] into poly->x0..x3 in that order). So:
+	 *    take parked slot `slot`, VALIDATE it with the exact value (catches a
+	 *    misaligned drawer -> affine, never a wrong precise), then the tolerance
+	 *    garbage-guard. Keying by value instead would FUSE two corners that share a
+	 *    pixel (rampant on dense distant meshes like Harry's legs) into a flat face. */
 	else if (s_curPgxpN)
 	{
-		for (int i = 0; i < s_curPgxpN; i++) {
-			if (s_curPgxp[i].w < 0.0f) continue;                 /* unresolved slot */
-			if (s_curPgxp[i].rawx != rawX || s_curPgxp[i].rawy != rawY) continue;
-			if (PgxpAccept(s_curPgxp[i].x, s_curPgxp[i].y, rawX, rawY)) {
-				hx = s_curPgxp[i].x + ofsX; hy = s_curPgxp[i].y + ofsY; hw = s_curPgxp[i].w; got = 1; s_pgxpDet++;
-			}
-			break;                                               /* exact value found -> done */
+		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
+		    s_curPgxp[slot].rawx == rawX && s_curPgxp[slot].rawy == rawY &&
+		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
+		{
+			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
 		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
