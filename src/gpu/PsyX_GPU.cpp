@@ -410,18 +410,28 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
 	 *    The drawer parks verts in poly x0..x3 order and MakeVertex draws them in
 	 *    that same order, so parked slot `slot` IS this drawn vertex's own precise
-	 *    coord — use it (exact W), with the guard (garbage-precise reason as tier 1).
-	 *    NO closest-(x,y) fallback: it picked the NEAREST parked vert when the slot
-	 *    failed, and two corners of a triangle could grab the SAME one, fusing them
-	 *    into a flat, detail-less face (pews / the crucifix figure / Harry's face +
-	 *    legs). It only got exercised once the bigger hash tables pushed most prims
-	 *    through this tier instead of the ring. A failed slot now drops to the ring/
-	 *    affine — the pre-parked-table behaviour where the environment looked perfect. */
-	else if (s_curPgxpN &&
-	         slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
-	         PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
+	 *    coord — use it (exact W), but keep the guard (same garbage-precise reason
+	 *    as tier 1). Closest-(x,y) is the fallback when the slot fails. */
+	else if (s_curPgxpN)
 	{
-		hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
+		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
+		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
+		{
+			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
+		}
+		else
+		{
+			int best = -1; float bestD = 1e30f;
+			for (int i = 0; i < s_curPgxpN; i++) {
+				if (s_curPgxp[i].w < 0.0f) continue;       /* unresolved slot */
+				float dx = s_curPgxp[i].x - (float)rawX, dy = s_curPgxp[i].y - (float)rawY;
+				float d = dx * dx + dy * dy;
+				if (d < bestD) { bestD = d; best = i; }
+			}
+			if (best >= 0 && bestD <= 4.0f) {   /* within 2px -> this vertex's own precise */
+				hx = s_curPgxp[best].x + ofsX; hy = s_curPgxp[best].y + ofsY; hw = s_curPgxp[best].w; got = 1; s_pgxpDet++;
+			}
+		}
 	}
 	/* 3) heuristic (x,y)-key ring — immediate prims, fallback */
 	if (!got && PGXP_LookupHinted(rawX, rawY, hint, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
