@@ -231,8 +231,9 @@ static unsigned  s_weldGen  = 0;
 static unsigned  s_weldBone = 0;  /* current bone within the character (see PsyX_PgxpNextBone) */
 float g_pgxpWeldDistPx = 3.0f;    /* tunable (console WELD): 0 = weld OFF      */
 float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld     */
-int   g_pgxpCharPersp  = 1;       /* 1 = full perspective PGXP on chars (default,
-                                   * no faceting/swim); 0 = affine texture     */
+int   g_pgxpCharPersp  = 1;       /* 1 = full perspective PGXP on chars; 0 = affine tex */
+int   g_pgxpCharSnap   = 1;       /* 1 = release pixel-snap chars (no joint seams);
+                                   * 0 = full PGXP (for the identity-weld follow-up) */
 
 /* Bumped once per bone mesh by the character draw loop. The weld only fuses two
  * verts from DIFFERENT bones (a real shared joint) and never within one bone, so
@@ -439,16 +440,25 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		if (s_curPgxpSnapXY)
 		{
 			s_charGot++;
-			/* Character vertex. Default = full perspective PGXP (g_pgxpCharPersp=1):
-			 * precise position (no pixel-snap wobble) + perspective texture (no
-			 * faceting/swim) — same as the world. Optional WELD (console WELD>0)
-			 * snaps coincident bone-joint verts to close seams; CHARTEX 0 forces
-			 * affine texture on chars. Both off by default (net-negative in testing;
-			 * the real char issue looks like missed verts, see the coverage probe). */
-			if (g_pgxpWeldDistPx > 0.0f) WeldVertex(&hx, &hy, &hw);
-			v->ppx = hx;
-			v->ppy = hy;
-			v->ppw = g_pgxpCharPersp ? hw : 1.0f;
+			if (g_pgxpCharSnap)
+			{
+				/* RELEASE-SAFE pixel-snap (the prior release's character look): pin XY
+				 * to the affine integer grid so adjacent bone segments meet on the same
+				 * pixel — no joint seams — and keep the perspective W. The proper
+				 * full-PGXP-with-no-seams fix (per-vertex identity tracking so the 18%
+				 * miss resolves) is the planned follow-up; CHARSNAP 0 selects it. */
+				v->ppx = (float)v->x;
+				v->ppy = (float)v->y;
+				v->ppw = hw;
+			}
+			else
+			{
+				/* Full perspective PGXP + optional cross-bone WELD (console WELD>0). */
+				if (g_pgxpWeldDistPx > 0.0f) WeldVertex(&hx, &hy, &hw);
+				v->ppx = hx;
+				v->ppy = hy;
+				v->ppw = g_pgxpCharPersp ? hw : 1.0f;
+			}
 		}
 		else
 		{
