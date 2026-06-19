@@ -398,25 +398,24 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	float hx = 0.0f, hy = 0.0f, hw = 0.0f;
 	int got = 0;
 
-	/* 1) deterministic by prim-field address (EXACT-key, collision-free): this is
-	 *    provably this vertex's own precise coord, so NO 2px guard — an off-screen
-	 *    vertex (whose prim stores the GTE's CLAMPED integer) keeps its true
-	 *    unclamped position instead of being rejected to affine and snapped back to
-	 *    the clamp edge. That rejection was a big part of the character "miss" and
-	 *    the classic off-screen warp; trusting the exact match fixes both. */
-	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw))
+	/* 1) deterministic by prim-field address. The 2px guard is REQUIRED: for verts
+	 *    behind the camera / at extreme depth the GTE divide (H/SZ3) diverges and
+	 *    the unclamped precise float is garbage (the GTE clamps the integer to
+	 *    survive it). PgxpAccept rejects that garbage back to affine; without it the
+	 *    whole scene shatters. So the guard is not optional, even on exact matches. */
+	if (PGXP_MapGet((void*)addr, &fx, &fy, &fw) && PgxpAccept(fx, fy, rawX, rawY))
 	{
 		hx = fx + ofsX; hy = fy + ofsY; hw = fw; got = 1; s_pgxpDet++;
 	}
 	/* 2) deterministic per-prim parked set (scratch-copied world + characters).
 	 *    The drawer parks verts in poly x0..x3 order and MakeVertex draws them in
 	 *    that same order, so parked slot `slot` IS this drawn vertex's own precise
-	 *    coord — trust it directly with NO 2px guard (same off-screen reasoning as
-	 *    tier 1). The closest-(x,y) fallback below keeps its guard, since that one
-	 *    is heuristic and could grab a different vertex. */
+	 *    coord — use it (exact W), but keep the guard (same garbage-precise reason
+	 *    as tier 1). Closest-(x,y) is the fallback when the slot fails. */
 	else if (s_curPgxpN)
 	{
-		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f)
+		if (slot >= 0 && slot < s_curPgxpN && s_curPgxp[slot].w >= 0.0f &&
+		    PgxpAccept(s_curPgxp[slot].x, s_curPgxp[slot].y, rawX, rawY))
 		{
 			hx = s_curPgxp[slot].x + ofsX; hy = s_curPgxp[slot].y + ofsY; hw = s_curPgxp[slot].w; got = 1; s_pgxpDet++;
 		}
