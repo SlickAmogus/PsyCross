@@ -105,6 +105,8 @@ static int PGXP_LookupHinted(int sx, int sy, unsigned short hint16, float* ox, f
  * or fall back to affine (miss)? Dumped ~once a second when PGXP is on. Also
  * bumps the address-map generation once per frame (see s_pgxpGen). */
 static unsigned int s_pgxpDet = 0, s_pgxpRingHit = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
+/* Per-character coverage (verts drawn during the character snap bracket). */
+static unsigned s_charGot = 0, s_charMiss = 0;
 extern "C" void PGXP_BumpGen(void);
 extern "C" void PGXP_CoverageTick(void)
 {
@@ -119,7 +121,13 @@ extern "C" void PGXP_CoverageTick(void)
 				s_pgxpDet,     100.0 * (double)s_pgxpDet     / (double)tot,
 				s_pgxpRingHit, 100.0 * (double)s_pgxpRingHit / (double)tot,
 				s_pgxpMiss,    100.0 * (double)s_pgxpMiss    / (double)tot);
+		unsigned ctot = s_charGot + s_charMiss;
+		if (ctot)
+			eprintinfo("[PGXPCHAR] char verts: precise=%u(%.0f%%) miss/affine=%u(%.0f%%)\n",
+				s_charGot,  100.0 * (double)s_charGot  / (double)ctot,
+				s_charMiss, 100.0 * (double)s_charMiss / (double)ctot);
 		s_pgxpDet = s_pgxpRingHit = s_pgxpMiss = s_pgxpFrames = 0;
+		s_charGot = s_charMiss = 0;
 	}
 }
 
@@ -217,10 +225,10 @@ struct WeldEntry { unsigned gen; float x, y, w; };
 #define WELD_MASK (WELD_SIZE - 1)
 static WeldEntry s_weld[WELD_SIZE];
 static unsigned  s_weldGen = 0;
-float g_pgxpWeldDistPx = 2.5f;    /* tunable: max screen gap (px) to weld    */
-float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld    */
-int   g_pgxpCharPersp  = 0;       /* 0 = affine texture on characters (looks like
-                                   * affine, no swim); 1 = perspective texture    */
+float g_pgxpWeldDistPx = 0.0f;    /* tunable (console WELD): 0 = weld OFF      */
+float g_pgxpWeldWRatio = 1.30f;   /* tunable: max W (depth) ratio to weld     */
+int   g_pgxpCharPersp  = 1;       /* 1 = full perspective PGXP on chars (default,
+                                   * no faceting/swim); 0 = affine texture     */
 
 static inline unsigned WeldHash(int ix, int iy) {
 	return ((unsigned)ix * 73856093u) ^ ((unsigned)iy * 19349663u);
@@ -414,13 +422,14 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	{
 		if (s_curPgxpSnapXY)
 		{
-			/* Character vertex. Weld coincident bone-joint verts so the joints don't
-			 * seam (positions stay PRECISE -> no pixel-snap wobble), but interpolate
-			 * the varyings AFFINELY (ppw=1) by default: perspective interpolation on
-			 * big flat character polys is what swims/facets. Precise position + affine
-			 * texture = "looks like affine, just no wobble" (the DuckStation look).
-			 * Set CHARTEX 1 to give characters perspective texture instead. */
-			WeldVertex(&hx, &hy, &hw);
+			s_charGot++;
+			/* Character vertex. Default = full perspective PGXP (g_pgxpCharPersp=1):
+			 * precise position (no pixel-snap wobble) + perspective texture (no
+			 * faceting/swim) — same as the world. Optional WELD (console WELD>0)
+			 * snaps coincident bone-joint verts to close seams; CHARTEX 0 forces
+			 * affine texture on chars. Both off by default (net-negative in testing;
+			 * the real char issue looks like missed verts, see the coverage probe). */
+			if (g_pgxpWeldDistPx > 0.0f) WeldVertex(&hx, &hy, &hw);
 			v->ppx = hx;
 			v->ppy = hy;
 			v->ppw = g_pgxpCharPersp ? hw : 1.0f;
@@ -438,6 +447,7 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 		v->ppy = (float)v->y;
 		v->ppw = 0.0f; /* miss -> affine */
 		s_pgxpMiss++;
+		if (s_curPgxpSnapXY) s_charMiss++;
 	}
 }
 
