@@ -257,8 +257,14 @@ static void WeldVertex(float* x, float* y, float* w) {
 	const float thr2 = g_pgxpWeldDistPx * g_pgxpWeldDistPx;
 	int ix = (int)(*x < 0 ? *x - 0.5f : *x + 0.5f);
 	int iy = (int)(*y < 0 ? *y - 0.5f : *y + 0.5f);
-	for (int dy = -1; dy <= 1; dy++)
-	for (int dx = -1; dx <= 1; dx++) {
+	/* Cells are 1px, so the search neighbourhood MUST cover the full weld radius
+	 * or distant joints are inside thr2 but never examined (the old fixed 3x3 =
+	 * +/-1px capped the effective radius at ~1.5px regardless of g_pgxpWeldDistPx,
+	 * which is why raising WELD did nothing). Cap to keep the cost bounded. */
+	int r = (int)(g_pgxpWeldDistPx + 0.999f);
+	if (r < 1) r = 1; else if (r > 8) r = 8;
+	for (int dy = -r; dy <= r; dy++)
+	for (int dx = -r; dx <= r; dx++) {
 		WeldEntry* e = &s_weld[WeldHash(ix + dx, iy + dy) & WELD_MASK];
 		if (e->gen != s_weldGen) continue;
 		if (e->bone == s_weldBone) continue;        /* same bone -> don't fuse (face detail) */
