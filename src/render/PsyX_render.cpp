@@ -73,6 +73,14 @@ float g_PsxPixelAspect = 1.0f;
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
 float g_PsxWorldVScale = 0.872f;
+/* Vertical view shift (amount, PSX screen-Y units) applied to FIXED-ANGLE camera shots
+ * only — gated by g_PsxFixedCamActive, which the game sets when cur_cam_mv_type ==
+ * VC_MV_FIX_ANG. Those shots frame the top of the scene clipped vs PSX (e.g. a medkit
+ * off the top); the GTE projects geometry up to screen_y ~ -78, so shifting the ortho
+ * window up brings it into frame. + = view up. Console `vshift`. Chase/settle/etc. are
+ * unaffected. */
+float g_PsxWorldVShift = 20.0f;
+int   g_PsxFixedCamActive = 0;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
@@ -1762,8 +1770,9 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * g_PsxWorldVScale of the buffer, top-anchored (keep ceiling, clip foreground),
 				 * which also zooms objects ~1/scale taller. psxH (aspect) stays full so the
 				 * horizontal + Hor+ logic is unchanged. Console `vfov` tunes it. */
-				orthoTop = 0.0f;
-				orthoBot = psxH * g_PsxWorldVScale;        // 224 * 0.872 ~= 195
+				const float vshift = g_PsxFixedCamActive ? g_PsxWorldVShift : 0.0f;
+				orthoTop = 0.0f                    - vshift;   // +shift = show higher content
+				orthoBot = psxH * g_PsxWorldVScale - vshift;
 			}
 			const float psxAspect = psxW / psxH;
 			const float winAspect = (g_windowHeight > 0)
