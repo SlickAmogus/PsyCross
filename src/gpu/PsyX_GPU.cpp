@@ -1105,35 +1105,12 @@ void DrawSplit(const GPUDrawSplit& split)
 		 * geometry chunks have many more verts; log the first 40 big splits so
 		 * the gameplay world's dfe (-> enable=!dfe -> which GR_SetOffscreenState
 		 * branch / ortho) is visible in one in-game capture. */
-		extern int g_PcHorPlusEnabled;
 		static int bigSplitLog = 0;
-		/* Gate on HorPlus (3D gameplay InGame) so we capture the GAMEPLAY world, not the
-		 * loading screen (which renders at disp=448 HorPlus=0). */
-		if (bigSplitLog < 24 && split.numVerts >= 60 && g_PcHorPlusEnabled) {
-			eprintf("[WORLDSPLIT] verts=%d dfe=%d fmt=%d blend=%d texId=%u clip=(%d,%d,%d,%d) HorPlus=%d\n",
+		if (bigSplitLog < 40 && split.numVerts >= 60) {
+			eprintf("[WORLDSPLIT] verts=%d dfe=%d fmt=%d blend=%d texId=%u clip=(%d,%d,%d,%d)\n",
 				split.numVerts, split.drawenv.dfe, split.texFormat, split.blendMode,
 				(unsigned)split.textureId, split.drawenv.clip.x, split.drawenv.clip.y,
-				split.drawenv.clip.w, split.drawenv.clip.h, g_PcHorPlusEnabled);
-			/* [VSCALE] Vertical-scale ground truth (#aspect): the world draws into a
-			 * 448-line clip while disp/ortho is 224 and the GTE uses H=240 — log the
-			 * pieces that actually decide on-screen vertical mapping so one capture
-			 * resolves the interlace math. ofs = draw-env centering; ymin/ymax = the
-			 * post-offset screen-Y span of this split's verts (what the 224 ortho then
-			 * maps into the viewport). */
-			extern int g_windowWidth, g_windowHeight;
-			float ymin = 1e9f, ymax = -1e9f, xmin = 1e9f, xmax = -1e9f;
-			for (int vi = 0; vi < split.numVerts; vi++) {
-				const GrVertex* v = &g_vertexBuffer[split.startVertex + vi];
-				if (v->y < ymin) ymin = v->y; if (v->y > ymax) ymax = v->y;
-				if (v->x < xmin) xmin = v->x; if (v->x > xmax) xmax = v->x;
-			}
-			eprintf("[VSCALE]   splitDisp=(%d,%d,%d,%d) drawOfs=(%d,%d) liveDisp=(%d,%d,%d,%d) liveScreenH=%d liveOfsY=%d win=%dx%d vertX=[%.0f..%.0f] vertY=[%.0f..%.0f]\n",
-				split.dispenv.disp.x, split.dispenv.disp.y, split.dispenv.disp.w, split.dispenv.disp.h,
-				split.drawenv.ofs[0], split.drawenv.ofs[1],
-				activeDispEnv.disp.x, activeDispEnv.disp.y, activeDispEnv.disp.w, activeDispEnv.disp.h,
-				(int)activeDispEnv.screen.h, (int)activeDrawEnv.ofs[1],
-				g_windowWidth, g_windowHeight,
-				xmin, xmax, ymin, ymax);
+				split.drawenv.clip.w, split.drawenv.clip.h);
 			bigSplitLog++;
 		}
 	}
