@@ -375,65 +375,66 @@ void PsyX_Pad_UpdateGameControllerInput(SDL_GameController* cont, LPPADRAW pad)
 	pad->analog[3] = (leftY / 256) + 128;
 }
 
-u_short PsyX_Pad_UpdateKeyboardInput()
+static u_short PsyX_Pad_BuildKbWord(const PsyXKeyboardMapping& mapping)
 {
 	u_short ret = 0xFFFF;
 
+	if (g_sdlKeyboardState[mapping.kc_square])     ret &= ~0x8000;//Square
+	if (g_sdlKeyboardState[mapping.kc_circle])     ret &= ~0x2000;//Circle
+	if (g_sdlKeyboardState[mapping.kc_triangle])   ret &= ~0x1000;//Triangle
+	if (g_sdlKeyboardState[mapping.kc_cross])      ret &= ~0x4000;//Cross
+	if (g_sdlKeyboardState[mapping.kc_l1])         ret &= ~0x400; //L1
+	if (g_sdlKeyboardState[mapping.kc_l2])         ret &= ~0x100; //L2
+	if (g_sdlKeyboardState[mapping.kc_l3])         ret &= ~0x2;   //L3
+	if (g_sdlKeyboardState[mapping.kc_r1])         ret &= ~0x800; //R1
+	if (g_sdlKeyboardState[mapping.kc_r2])         ret &= ~0x200; //R2
+	if (g_sdlKeyboardState[mapping.kc_r3])         ret &= ~0x4;   //R3
+	if (g_sdlKeyboardState[mapping.kc_dpad_up])    ret &= ~0x10;  //UP
+	if (g_sdlKeyboardState[mapping.kc_dpad_down])  ret &= ~0x40;  //DOWN
+	if (g_sdlKeyboardState[mapping.kc_dpad_left])  ret &= ~0x80;  //LEFT
+	if (g_sdlKeyboardState[mapping.kc_dpad_right]) ret &= ~0x20;  //RIGHT
+	if (g_sdlKeyboardState[mapping.kc_select])     ret &= ~0x1;   //SELECT
+	if (g_sdlKeyboardState[mapping.kc_start])      ret &= ~0x8;   //START
+
+	return ret;
+}
+
+/* Mouse buttons -> PSX button word (active-low). Each pressed SDL mouse button
+ * 1..5 clears whatever PSX bits the config bound it to (g_cfg_mouseButtonMask). */
+static u_short PsyX_Pad_BuildMouseWord()
+{
+	u_short ret = 0xFFFF;
+	Uint32  mb  = SDL_GetMouseState(NULL, NULL);
+	int     b;
+
+	for (b = 1; b <= 5; b++)
+	{
+		if ((mb & SDL_BUTTON(b)) && g_cfg_mouseButtonMask[b])
+			ret &= ~g_cfg_mouseButtonMask[b];
+	}
+	return ret;
+}
+
+u_short PsyX_Pad_UpdateKeyboardInput()
+{
+	u_short ret;
+
 	//Not initialised yet
 	if (g_sdlKeyboardState == NULL)
-		return ret;
+		return 0xFFFF;
 
 	SDL_PumpEvents();
 
-	const PsyXKeyboardMapping& mapping = g_cfg_keyboardMapping;
+	ret = PsyX_Pad_BuildKbWord(g_cfg_keyboardMapping);
 
-	if (g_sdlKeyboardState[mapping.kc_square])//Square
-		ret &= ~0x8000;
-
-	if (g_sdlKeyboardState[mapping.kc_circle])//Circle
-		ret &= ~0x2000;
-
-	if (g_sdlKeyboardState[mapping.kc_triangle])//Triangle
-		ret &= ~0x1000;
-
-	if (g_sdlKeyboardState[mapping.kc_cross])//Cross
-		ret &= ~0x4000;
-
-	if (g_sdlKeyboardState[mapping.kc_l1])//L1
-		ret &= ~0x400;
-
-	if (g_sdlKeyboardState[mapping.kc_l2])//L2
-		ret &= ~0x100;
-
-	if (g_sdlKeyboardState[mapping.kc_l3])//L3
-		ret &= ~0x2;
-
-	if (g_sdlKeyboardState[mapping.kc_r1])//R1
-		ret &= ~0x800;
-
-	if (g_sdlKeyboardState[mapping.kc_r2])//R2
-		ret &= ~0x200;
-
-	if (g_sdlKeyboardState[mapping.kc_r3])//R3
-		ret &= ~0x4;
-
-	if (g_sdlKeyboardState[mapping.kc_dpad_up])//UP
-		ret &= ~0x10;
-
-	if (g_sdlKeyboardState[mapping.kc_dpad_down])//DOWN
-		ret &= ~0x40;
-
-	if (g_sdlKeyboardState[mapping.kc_dpad_left])//LEFT
-		ret &= ~0x80;
-
-	if (g_sdlKeyboardState[mapping.kc_dpad_right])//RIGHT
-		ret &= ~0x20;
-
-	if (g_sdlKeyboardState[mapping.kc_select])//SELECT
-		ret &= ~0x1;
-
-	if (g_sdlKeyboardState[mapping.kc_start])//START
-		ret &= ~0x8;
+	/* Secondary key binds + mouse buttons (gated by allow_mouse_secondary,
+	 * forced on in TPS). Active-low: a button is pressed if clear in ANY
+	 * source, so the layers combine with AND. */
+	if (g_cfg_allowMouseSecondary)
+	{
+		ret &= PsyX_Pad_BuildKbWord(g_cfg_keyboardMapping2);
+		ret &= PsyX_Pad_BuildMouseWord();
+	}
 
 	return ret;
 }

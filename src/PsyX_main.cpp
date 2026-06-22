@@ -51,7 +51,10 @@ timerCtx_t g_vblTimer;
 
 int							g_cfg_swapInterval = 0;
 PsyXKeyboardMapping			g_cfg_keyboardMapping;
+PsyXKeyboardMapping			g_cfg_keyboardMapping2 = {0};	/* secondary binds; 0 = SDL_SCANCODE_UNKNOWN (unset) */
 PsyXControllerMapping		g_cfg_controllerMapping;
+int							g_cfg_allowMouseSecondary = 0;
+unsigned short				g_cfg_mouseButtonMask[8] = {0};	/* [SDL button 1..5] -> PSX button bitmask */
 GameOnTextInputHandler		g_cfg_gameOnTextInput = NULL;
 
 GameDebugKeysHandlerFunc	g_dbg_gameDebugKeys = NULL;

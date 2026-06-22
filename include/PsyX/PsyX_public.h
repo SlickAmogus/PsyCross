@@ -51,8 +51,11 @@ extern "C" {
 /* Mapped inputs */
 extern PsyXControllerMapping		g_cfg_controllerMapping;
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping;
+extern PsyXKeyboardMapping			g_cfg_keyboardMapping2;		/* PC: secondary keyboard binds (active w/ allow_mouse_secondary) */
 extern int							g_cfg_controllerToSlotMapping[2];
 extern int							g_cfg_controllerMovement;	/* PC: 0=analog 1=dpad 2=both */
+extern int							g_cfg_allowMouseSecondary;	/* PC: 1 = secondary + mouse-button binds active */
+extern unsigned short				g_cfg_mouseButtonMask[8];	/* PC: [SDL button 1..5] -> PSX button bitmask */
 
 /* Game inputs */
 extern GameOnTextInputHandler		g_cfg_gameOnTextInput;
