@@ -594,6 +594,7 @@ typedef struct
 	GLint pixelScaleLoc;
 	GLint texelSizeLoc;
 	GLint fogColorLoc;
+	GLint fogToBlackLoc;
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
 #endif
@@ -613,10 +614,16 @@ GLint u_ditherForceLoc;
 GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
 GLint u_fogColorLoc;
+GLint u_fogToBlackLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
 
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
+/* Fog mode for the CURRENT blend: 1 = fade additive/subtractive prims (blood, muzzle
+ * flash, etc.) toward black so they fade OUT in fog, instead of blending toward the
+ * light fog color — which whitened their edges/faded pixels in daytime. Set by
+ * GR_SetBlendMode; pushed to the shader as u_fogToBlack. */
+int g_PsxFogToBlack = 0;
 
 #define GPU_PACK_RG\
 	"		float color_16 = (color_rg.y * 256.0 + color_rg.x) * 255.0;\n"
@@ -859,13 +866,17 @@ float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 	"	uniform float u_ditherForce;\n"\
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec3 u_fogColor;\n"\
+	"	uniform int u_fogToBlack;\n"\
 	"	void main() {\n"\
 	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
 	"		fragColor *= v_color;\n"\
-	"		fragColor.rgb = mix(fragColor.rgb, u_fogColor, v_fogAmount);\n"\
+	"		if (u_fogToBlack > 0)\n"\
+	"			fragColor.rgb *= (1.0 - v_fogAmount);\n"\
+	"		else\n"\
+	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, v_fogAmount);\n"\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
 
@@ -1145,6 +1156,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
+	sh->fogToBlackLoc = glGetUniformLocation(sh->shader, "u_fogToBlack");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
 #endif
@@ -1430,6 +1442,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
+		u_fogToBlackLoc = g_gte_shader_4.fogToBlackLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
 		break;
@@ -1442,6 +1455,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
+		u_fogToBlackLoc = g_gte_shader_8.fogToBlackLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
 		break;
@@ -1454,6 +1468,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
+		u_fogToBlackLoc = g_gte_shader_16.fogToBlackLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
 		break;
@@ -1466,6 +1481,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
 		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
+		u_fogToBlackLoc = g_gte_shader_32_rgba.fogToBlackLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
 		break;
@@ -1487,6 +1503,9 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
+
+	if (u_fogToBlackLoc != -1)
+		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
 
 	/* Push the dither-force uniform every shader bind. Cheap (single
 	 * float upload) and ensures runtime config changes (if we add a
@@ -2332,6 +2351,14 @@ void GR_SetBlendMode(BlendMode blendMode)
 		return;
 
 #if USE_OPENGL
+	/* Fog mode for this blend: additive/subtractive prims (blood, muzzle flash) must fade
+	 * toward black under fog, not blend toward the light fog color (which whitened their
+	 * edges/faded pixels in daytime). Push now — the fog shader is the bound program here —
+	 * and again at every shader bind, so it's correct regardless of bind/blend order. */
+	g_PsxFogToBlack = (blendMode == BM_ADD || blendMode == BM_SUBTRACT ||
+	                   blendMode == BM_ADD_QUATER_SOURCE) ? 1 : 0;
+	if (u_fogToBlackLoc != -1)
+		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
 	if (blendMode == BM_NONE)
 	{
 		if (g_PreviousBlendMode != BM_NONE)
