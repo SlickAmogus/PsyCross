@@ -8,7 +8,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 
 #ifdef _WIN32
 #include <direct.h>

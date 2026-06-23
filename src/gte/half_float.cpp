@@ -55,7 +55,7 @@ short to_half_float(const float x)
 
 float from_half_float(const short x)
 {
-	FP16 h = { x };
+	FP16 h = { (unsigned short)x };
 
 	static const FP32 magic = { 113 << 23 };
 	static const uint shifted_exp = 0x7c00 << 13; // exponent mask after shift
