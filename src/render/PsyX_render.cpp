@@ -92,6 +92,10 @@ int   g_PsxCutsceneActive = 0;
  * cutscenes — is unchanged. This replaces the old g_PsxCutsceneActive vscale skip
  * (which un-cropped the whole cutscene frame and looked stretched). */
 int   g_PsxUIOrthoPass = 0;
+/* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
+ * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
+ * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
+float g_PsxWorldHScale = 1.0f;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
@@ -1853,7 +1857,13 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * preserves 1 H px = 1 V px scaling for character proportions. */
 				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
 				const float margin = psxW * (effectiveScale - 1.0f) * 0.5f;
-				GR_Ortho2D(-margin, psxW + margin, orthoBot, orthoTop, -1.0f, 1.0f);
+				/* hfov: scale the horizontal world extent around center (g_PsxWorldHScale).
+				 * 1.0 = identity (-margin..psxW+margin); >1 shrinks the ortho width = wider
+				 * models. Skipped for the UI pass so 2D UI stays aligned. */
+				const float hscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldHScale;
+				const float cx     = psxW * 0.5f;
+				const float halfW  = (psxW * 0.5f + margin) / hscale;
+				GR_Ortho2D(cx - halfW, cx + halfW, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
 				 * The viewport (below) handles pillarbox vs full-window. */
