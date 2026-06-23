@@ -634,8 +634,9 @@ GLint u_szMaxLoc;
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
 /* World fog density multiplier. 1.0 = native PC shader fog; >1 deepens it toward the
  * PSX double-poly fog look the single-pass shader drops. Console `fogstr`; pushed as
- * u_fogStrength and applied against v_fogAmount in the fragment shader. Default neutral. */
-float g_PsyX_FogStrength = 1.0f;
+ * u_fogStrength and applied against v_fogAmount in the fragment shader. Default 1.1 to
+ * match the PSX/DuckStation fog depth (was the value baked in the original PR). */
+float g_PsyX_FogStrength = 1.1f;
 /* Fog mode for the CURRENT blend: 1 = fade additive/subtractive prims (blood, muzzle
  * flash, etc.) toward black so they fade OUT in fog, instead of blending toward the
  * light fog color — which whitened their edges/faded pixels in daytime. Set by
