@@ -68,17 +68,17 @@ extern SDL_Window* g_window;
  * 1.094 = some emulators' approximation; 1.143 = 8:7 (overscan look). */
 extern "C" {
 float g_PsxPixelAspect = 1.0f;
-/* Vertical FOV scale for the 3D gameplay world (see GR_SetOffscreenState). Our render
- * shows ~14.7%% too much vertical world vs PSX/DuckStation (measured 0.872 vertical /
- * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
- * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
-float g_PsxWorldVScale = 0.872f;
-/* Vertical view shift (amount, PSX screen-Y units) applied to FIXED-ANGLE camera shots
+/* 3D world vertical-ortho scale (smaller = taller/narrower world). Console
+ * `vfov <pct>`. 0.90 reads best for overall vertical framing/proportions. */
+float g_PsxWorldVScale = 0.90f;
+/* 3D world HORIZONTAL width scale (larger = wider models). Independent of vfov
+ * so the model body can be widened (bigger chest, less "lanky") without
+ * changing the vfov height. Applied to the Hor+ ortho margin. Console
+ * `hfov <pct>`; 1.0 = the plain Hor+ widening. 0.97 matches DuckStation. */
+float g_PsxWorldHScale = 0.97f;
+/* Vertical view shift (amount, PSX screen-Y units) for fixed-angle camera shots.
  * only — gated by g_PsxFixedCamActive, which the game sets when cur_cam_mv_type ==
- * VC_MV_FIX_ANG. Those shots frame the top of the scene clipped vs PSX (e.g. a medkit
- * off the top); the GTE projects geometry up to screen_y ~ -78, so shifting the ortho
- * window up brings it into frame. + = view up. Console `vshift`. Chase/settle/etc. are
- * unaffected. */
+ * VC_MV_FIX_ANG. + = view up. Console `vshift`. */
 float g_PsxWorldVShift = 20.0f;
 int   g_PsxFixedCamActive = 0;
 /* Set by the game while a cutscene is active. Cutscenes frame themselves with letterbox
@@ -1800,12 +1800,9 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			float psxH = (float)activeDispEnv.disp.h;   // 224 — aspect/horizontal only
 			float orthoTop = 0.0f, orthoBot = psxH;
 			if (g_PcHorPlusEnabled) {
-				/* 3D gameplay world renders ~14.7% too much vertical world (measured: vertical
-				 * scale 0.872 vs DuckStation at a fixed 4:3 spot, horizontal 1.0, top-aligned
-				 * with the extra at the BOTTOM = near foreground). Crop the world ortho to
-				 * g_PsxWorldVScale of the buffer, top-anchored (keep ceiling, clip foreground),
-				 * which also zooms objects ~1/scale taller. psxH (aspect) stays full so the
-				 * horizontal + Hor+ logic is unchanged. Console `vfov` tunes it. */
+				/* Crop the 3D world vertical ortho by the measured DuckStation
+				 * scale so models are not wide/short in Hor+ gameplay. The
+				 * `vfov` console command can adjust this for comparisons. */
 				/* Cutscenes frame themselves with letterbox bars — skip the crop there
 				 * (vscale 1.0) so the bars + subtitles aren't scaled/clipped off-screen.
 				 * Also skip the fixed-cam vshift during cutscenes: a fixed-angle cutscene
@@ -1824,7 +1821,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				orthoTop = 0.0f          - vshift;   // +shift = show higher content
 				orthoBot = psxH * vscale - vshift;
 			}
-			const float psxAspect = psxW / psxH;
+			/* The gameplay field is 320x224 in VRAM, but the PS1 presents it
+			 * as a 4:3 picture. Use display aspect for Hor+ widening so 3D
+			 * models keep DuckStation proportions instead of square-pixel
+			 * framebuffer proportions. */
+			const float psxAspect = 4.0f / 3.0f;
 			const float winAspect = (g_windowHeight > 0)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
@@ -1833,10 +1834,13 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
 				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else if (g_PcWidescreenMode == 1) {
-				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
-				 * preserves 1 H px = 1 V px scaling for character proportions. */
-				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
-				const float margin = psxW * (effectiveScale - 1.0f) * 0.5f;
+				/* Hor+ widescreen: widen ortho, full-window viewport. The 4:3
+				 * psxAspect carries the PS1 display correction; g_PsxWorldHScale
+				 * (console `hfov`) lets the model body be widened independently —
+				 * higher hscale shrinks the ortho width => larger on-screen x
+				 * scale => wider models (bigger chest, less lanky). */
+				const float hscale = (g_PsxWorldHScale > 0.01f) ? g_PsxWorldHScale : 1.0f;
+				const float margin = psxW * (horScale / hscale - 1.0f) * 0.5f;
 				GR_Ortho2D(-margin, psxW + margin, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
@@ -1867,7 +1871,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 					dbgVpX = (g_windowWidth - dbgVpW) / 2;
 				}
 				const float dbgMargin = (g_PcHorPlusEnabled && horScale > 1.0f && g_PcWidescreenMode == 1)
-					? psxW * (horScale * PSX_NTSC_PIXEL_ASPECT - 1.0f) * 0.5f : 0.0f;
+					? psxW * (horScale - 1.0f) * 0.5f : 0.0f;
 				unsigned key = ((unsigned)(activeDispEnv.disp.w & 0x3FF) << 22) ^
 					((unsigned)(activeDispEnv.disp.h & 0x3FF) << 12) ^
 					((unsigned)(g_windowWidth & 0xFFF)) ^
