@@ -925,6 +925,12 @@ char PsyX_BeginScene()
 
 uint PsyX_CalcFPS();
 
+/* PC port: optional hook the game registers (DbgOverlay_Render) to draw the dev console
+ * AFTER the freeze-frame is captured, so the console is never baked into a frozen
+ * pause / "no map" image (which would ghost the live console against the frozen copy).
+ * NULL = nothing extra drawn. */
+extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
+
 void PsyX_EndScene()
 {
 	if (!begin_scene_flag)
@@ -951,6 +957,12 @@ void PsyX_EndScene()
 		extern void GR_CaptureLastFrame(void);
 		GR_CaptureLastFrame();
 	}
+
+	/* PC port: draw overlays that must NOT be baked into the freeze-frame (the dev
+	 * console) — AFTER the capture, BEFORE the swap, so the console is a true live
+	 * overlay and never doubles against a frozen copy on pause / "no map" screens. */
+	if (g_PsyX_PostCaptureHook)
+		g_PsyX_PostCaptureHook();
 
 	GR_SwapWindow();
 }
