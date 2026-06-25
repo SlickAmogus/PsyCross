@@ -131,6 +131,12 @@ typedef struct
 	 * unchanged — the affine path never reads these, and the shader only uses
 	 * them when the u_pgxpEnabled uniform is set (never when PGXP is off). */
 	float		ppx, ppy, ppw;
+
+	/* Per-pixel flashlight (optional): view-space unit normal, written from the
+	 * GTE normal shadow when g_PsyX_UsePerPixelFlashlight is on; left zero
+	 * otherwise. Appended at the END so all existing field offsets are unchanged
+	 * — the shader only reads it under the u_flashlightOn uniform (off = unused). */
+	float		nx, ny, nz;
 } GrVertex;
 #pragma pack(pop)
 
@@ -142,6 +148,7 @@ typedef enum
 	a_color,
 	a_extra,
 	a_pgxp,
+	a_normal,
 } ShaderAttrib;
 
 typedef enum

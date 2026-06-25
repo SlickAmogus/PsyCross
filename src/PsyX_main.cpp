@@ -313,6 +313,10 @@ static void PsyX_Sys_InitialiseInput()
 }
 
 #ifdef __GNUC__
+/* strcasecmp lives in <strings.h>, but in this TU an earlier include locks
+ * the glibc feature-test macros before <strings.h> is reached, leaving it
+ * undeclared under -std=gnu++17. Declare it directly (POSIX signature). */
+extern "C" int strcasecmp(const char* s1, const char* s2);
 #define _stricmp(s1, s2) strcasecmp(s1, s2)
 #endif
 
