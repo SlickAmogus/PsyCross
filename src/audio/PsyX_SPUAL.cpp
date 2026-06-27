@@ -15,6 +15,18 @@
 #include <AL/efx.h>
 #endif
 
+/* This TU is compiled with -fvisibility=hidden on ELF so its global OpenAL
+ * EFX function-pointer variables do not interpose libopenal for other
+ * modules (see PsyCross/CMakeLists.txt). The PsyX_SPUAL_ API below, however,
+ * is called directly by map overlay .so's, which on Linux now import the host
+ * exe's single PsyCross instance instead of linking their own copy, so these
+ * entry points must stay default-visibility to be exported via -rdynamic. */
+#if defined(__GNUC__) && !defined(_WIN32)
+#  define PSX_API_EXPORT __attribute__((visibility("default")))
+#else
+#  define PSX_API_EXPORT
+#endif
+
 // TODO: implement XA, implement ADSR
 
 static const char* getALCErrorString(int err)
@@ -80,8 +92,8 @@ static int s_spuMallocVal = 0;
  * Update all take their pre-envelope code paths. */
 int g_SpuAdsrEnabled = 0;
 
-void PsyX_SPUAL_SetAdsrEnabled(int on) { g_SpuAdsrEnabled = on ? 1 : 0; }
-int  PsyX_SPUAL_GetAdsrEnabled(void)   { return g_SpuAdsrEnabled; }
+PSX_API_EXPORT void PsyX_SPUAL_SetAdsrEnabled(int on) { g_SpuAdsrEnabled = on ? 1 : 0; }
+PSX_API_EXPORT int  PsyX_SPUAL_GetAdsrEnabled(void)   { return g_SpuAdsrEnabled; }
 
 typedef enum
 {
