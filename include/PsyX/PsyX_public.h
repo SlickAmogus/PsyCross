@@ -69,6 +69,15 @@ extern int							g_cfg_affineTextures;
 extern int							g_cfg_psxDither;
 extern int							g_cfg_pgxpTextureCorrection;
 
+/* PC port: MSAA sample count for the default framebuffer (0 = off, 2/4/8). Must
+ * be set BEFORE PsyX_Initialise — it drives the SDL multisample GL attributes at
+ * context-creation time. */
+extern int							g_cfg_msaaSamples;
+
+/* PC port: full-screen post-process look (0 = off, 1.. = a built-in filter).
+ * Safe to change at runtime (launcher config + F2 in-game cycle). */
+extern int							g_cfg_postProcess;
+
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
  * USE_PGXP=1 but this is 0, the prim emitters write a_zw=0 so the shader takes

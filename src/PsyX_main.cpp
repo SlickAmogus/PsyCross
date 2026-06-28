@@ -974,6 +974,14 @@ void PsyX_EndScene()
 	if (g_PsyX_PostCaptureHook)
 		g_PsyX_PostCaptureHook();
 
+	/* PC port: apply the selected full-screen post-process look (color grade,
+	 * CRT, scanlines, vignette, grain, sharpen, PSX downsample, ...) to the
+	 * fully composed frame just before presenting. No-op when off. */
+	{
+		extern void GR_PostProcess(void);
+		GR_PostProcess();
+	}
+
 	GR_SwapWindow();
 }
 
