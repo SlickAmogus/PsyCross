@@ -210,7 +210,7 @@ float g_PsyX_FlashlightRange    = 4000.0f;
 /* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
  * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
  * commands. Persisted to config. */
-float g_PsyX_FlashlightIntensity = 1.0f; /* cone brightness scale, 0..3 */
+float g_PsyX_FlashlightIntensity = 1.90f; /* cone brightness scale, 0..3 */
 float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
 float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
 
