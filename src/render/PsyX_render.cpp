@@ -207,6 +207,13 @@ float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
 float g_PsyX_FlashlightOuterCos = 0.82f;  /* ~35 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
 
+/* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
+ * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
+ * commands. Persisted to config. */
+float g_PsyX_FlashlightIntensity = 1.0f; /* cone brightness scale, 0..3 */
+float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
+float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
+
 /* Defined later in the file (post-process module); called from GR_InitialisePSX
  * and PsyX_EndScene. */
 void GR_InitPostProcess(void);
@@ -1712,8 +1719,13 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
 	if (u_flDirLoc != -1)
 		glUniform3fv(u_flDirLoc, 1, g_PsyX_FlashlightDir);
-	if (u_flColorLoc != -1)
-		glUniform3fv(u_flColorLoc, 1, g_PsyX_FlashlightColor);
+	if (u_flColorLoc != -1) {
+		float flCol[3];
+		flCol[0] = g_PsyX_FlashlightColor[0] * g_PsyX_FlashlightIntensity;
+		flCol[1] = g_PsyX_FlashlightColor[1] * g_PsyX_FlashlightIntensity;
+		flCol[2] = g_PsyX_FlashlightColor[2] * g_PsyX_FlashlightIntensity;
+		glUniform3fv(u_flColorLoc, 1, flCol);
+	}
 	if (u_flInnerCosLoc != -1)
 		glUniform1f(u_flInnerCosLoc, g_PsyX_FlashlightInnerCos);
 	if (u_flOuterCosLoc != -1)
@@ -2233,6 +2245,8 @@ static GLint    g_postLoc_mode = -1;
 static GLint    g_postLoc_texSize = -1;
 static GLint    g_postLoc_time = -1;
 static GLint    g_postLoc_tonemap = -1;
+static GLint    g_postLoc_postInt = -1;
+static GLint    g_postLoc_tmInt = -1;
 static GLuint   g_postVAO = 0;
 static GLuint   g_postFBO = 0;
 static TextureID g_postTex = (TextureID)-1;
@@ -2254,6 +2268,8 @@ static const char* s_postShaderSrc =
 	"uniform vec2  u_texSize;\n"  /* (1/width, 1/height) of the source */
 	"uniform float u_time;\n"
 	"uniform int   u_tonemap;\n"
+	"uniform float u_postIntensity;\n"
+	"uniform float u_tmIntensity;\n"
 	"float hash(vec2 p) {\n"
 	"	p = fract(p * vec2(123.34, 456.21));\n"
 	"	p += dot(p, p + 45.32);\n"
@@ -2287,6 +2303,7 @@ static const char* s_postShaderSrc =
 	"void main() {\n"
 	"	vec2 uv = v_uv;\n"
 	"	vec3 col;\n"
+	"	vec3 origCol = texture2D(s_texture, v_uv).rgb;\n"
 	"	if (u_postMode == 1) {\n"                            /* CRT */
 	"		uv = curve(uv);\n"
 	"		if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
@@ -2331,7 +2348,8 @@ static const char* s_postShaderSrc =
 	"	} else {\n"                                          /* passthrough */
 	"		col = texture2D(s_texture, uv).rgb;\n"
 	"	}\n"
-	"	col = tonemap(col);\n"
+	"	col = mix(origCol, col, u_postIntensity);\n"
+	"	col = mix(col, tonemap(col), u_tmIntensity);\n"
 	"	fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n"
 	"}\n"
 	"#endif\n";
@@ -2346,6 +2364,8 @@ void GR_InitPostProcess(void)
 	g_postLoc_texSize = glGetUniformLocation(g_postShader, "u_texSize");
 	g_postLoc_time    = glGetUniformLocation(g_postShader, "u_time");
 	g_postLoc_tonemap = glGetUniformLocation(g_postShader, "u_tonemap");
+	g_postLoc_postInt = glGetUniformLocation(g_postShader, "u_postIntensity");
+	g_postLoc_tmInt   = glGetUniformLocation(g_postShader, "u_tmIntensity");
 
 	glGenVertexArrays(1, &g_postVAO);
 }
@@ -2402,6 +2422,10 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 		glUniform1f(g_postLoc_time, (float)(g_postFrame & 1023));
 	if (g_postLoc_tonemap != -1)
 		glUniform1i(g_postLoc_tonemap, g_cfg_tonemap);
+	if (g_postLoc_postInt != -1)
+		glUniform1f(g_postLoc_postInt, g_cfg_postProcessIntensity);
+	if (g_postLoc_tmInt != -1)
+		glUniform1f(g_postLoc_tmInt, g_cfg_tonemapIntensity);
 
 	glBindTexture(GL_TEXTURE_2D, tex);
 	glBindVertexArray(g_postVAO);
