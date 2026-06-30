@@ -206,6 +206,10 @@ float g_PsyX_FlashlightColor[3] = { 1.0f, 0.95f, 0.85f };  /* warm white; per-fr
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
 float g_PsyX_FlashlightOuterCos = 0.82f;  /* ~35 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
+/* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
+ * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
+ * [ / ] + backslash and persisted as config key flashlight_size. */
+float g_PsyX_FlashlightSize     = 1.5f;
 
 /* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
  * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
@@ -1726,10 +1730,20 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		flCol[2] = g_PsyX_FlashlightColor[2] * g_PsyX_FlashlightIntensity;
 		glUniform3fv(u_flColorLoc, 1, flCol);
 	}
-	if (u_flInnerCosLoc != -1)
-		glUniform1f(u_flInnerCosLoc, g_PsyX_FlashlightInnerCos);
-	if (u_flOuterCosLoc != -1)
-		glUniform1f(u_flOuterCosLoc, g_PsyX_FlashlightOuterCos);
+	/* Scale cone coverage by g_PsyX_FlashlightSize: a cone's solid angle is
+	 * ~proportional to (1 - cos(halfAngle)), so scaling that term scales the lit
+	 * area ~linearly (size 1.0 = base, 1.5 = ~1.5x). Inner stays the tighter
+	 * (higher-cos) angle; the 0.05 floor keeps the half-angle under 90 deg. */
+	{
+		float flInner = 1.0f - g_PsyX_FlashlightSize * (1.0f - g_PsyX_FlashlightInnerCos);
+		float flOuter = 1.0f - g_PsyX_FlashlightSize * (1.0f - g_PsyX_FlashlightOuterCos);
+		if (flInner < 0.05f) flInner = 0.05f;
+		if (flOuter < 0.05f) flOuter = 0.05f;
+		if (u_flInnerCosLoc != -1)
+			glUniform1f(u_flInnerCosLoc, flInner);
+		if (u_flOuterCosLoc != -1)
+			glUniform1f(u_flOuterCosLoc, flOuter);
+	}
 	if (u_flRangeLoc != -1)
 		glUniform1f(u_flRangeLoc, g_PsyX_FlashlightRange);
 
