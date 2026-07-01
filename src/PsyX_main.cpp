@@ -888,7 +888,10 @@ char PsyX_BeginScene()
 		if (SDL_GetWindowDisplayMode(g_window, &curMode) == 0)
 		{
 			const int mode_frequency = g_vmode == MODE_NTSC ? VBLANK_FREQUENCY_NTSC : VBLANK_FREQUENCY_PAL;
-			if (curMode.refresh_rate < mode_frequency)
+			/* refresh_rate == 0 means "unknown" (common for a windowed window on
+			 * some drivers); do NOT treat that as a low-refresh screen or it
+			 * decrements a requested vsync=1 down to 0 and vsync appears stuck off. */
+			if (curMode.refresh_rate > 0 && curMode.refresh_rate < mode_frequency)
 				swapInterval--;
 		}
 
@@ -1133,15 +1136,24 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	if (!g_window)
 		return;
 
+	/* Always drop to windowed first: SDL will not switch DIRECTLY between two
+	 * fullscreen states (exclusive<->desktop) or re-apply a new exclusive mode
+	 * while already fullscreen, so a naked SetWindowFullscreen from the menu
+	 * silently no-ops. Clearing the flag first makes every transition apply. */
+	SDL_SetWindowFullscreen(g_window, 0);
+
 	if (fullscreen == 1) /* exclusive fullscreen at the requested resolution */
 	{
-		SDL_DisplayMode mode;
-		if (SDL_GetWindowDisplayMode(g_window, &mode) == 0)
-		{
-			mode.w = width;
-			mode.h = height;
-			SDL_SetWindowDisplayMode(g_window, &mode);
-		}
+		SDL_DisplayMode want, got;
+		SDL_zero(want);
+		want.w = width;
+		want.h = height;
+		int disp = SDL_GetWindowDisplayIndex(g_window);
+		if (disp < 0)
+			disp = 0;
+		if (SDL_GetClosestDisplayMode(disp, &want, &got) != NULL)
+			SDL_SetWindowDisplayMode(g_window, &got);
+		SDL_SetWindowSize(g_window, width, height);
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN);
 	}
 	else if (fullscreen == 2) /* borderless = desktop mode, resolution ignored */
@@ -1150,7 +1162,6 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	}
 	else /* windowed */
 	{
-		SDL_SetWindowFullscreen(g_window, 0);
 		SDL_SetWindowSize(g_window, width, height);
 		SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	}
