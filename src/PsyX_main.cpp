@@ -100,7 +100,11 @@ extern void GR_BeginScene();
 extern void GR_EndScene();
 extern void GR_UpdateSwapIntervalState(int swapInterval);
 
-int g_vmode = -1;
+/* Default NTSC: the USA disc never calls SetVideoMode, so g_vmode stayed -1
+ * (!= MODE_NTSC) and every vblank-rate decision fell through to PAL 50Hz —
+ * making the frame limiter miss by 5/6 (a 60fps cap ran 50, 30 ran 25) and
+ * frame-locked sequence audio play ~17% slow. */
+int g_vmode = MODE_NTSC;
 int g_frameSkip = 0;
 
 #ifdef __EMSCRIPTEN__
