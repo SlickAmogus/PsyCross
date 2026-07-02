@@ -209,12 +209,19 @@ float g_PsyX_FlashlightRange    = 4000.0f;
 /* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
  * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
  * [ / ] + backslash and persisted as config key flashlight_size. */
-float g_PsyX_FlashlightSize     = 1.5f;
+float g_PsyX_FlashlightSize     = 2.4f;
 
 /* PC port: live per-effect intensity -- [ lowers, ] raises, backslash switches
  * which effect (among the enabled ones); also the FLINT/POSTINT/TMINT console
  * commands. Persisted to config. */
-float g_PsyX_FlashlightIntensity = 1.90f; /* cone brightness scale, 0..3 */
+float g_PsyX_FlashlightIntensity = 2.10f; /* cone brightness scale, 0..3 */
+/* FPS-mode flashlight overrides: a head-mounted light wants a tighter, dimmer
+ * cone than the third-person one. g_PsyX_FlashlightFpsMode is set by the game
+ * each frame (= g_PcFpsCam); when 1 the shader uses these instead of the values
+ * above. Separately config/console-tunable (flashlight_*_fps). */
+float g_PsyX_FlashlightSizeFps      = 1.30f;
+float g_PsyX_FlashlightIntensityFps = 2.10f;
+int   g_PsyX_FlashlightFpsMode      = 0;
 float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
 float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
 
@@ -1723,11 +1730,14 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
 	if (u_flDirLoc != -1)
 		glUniform3fv(u_flDirLoc, 1, g_PsyX_FlashlightDir);
+	/* FPS mode swaps in its own (tighter/dimmer) cone size + brightness. */
+	float flIntensityActive = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightIntensityFps : g_PsyX_FlashlightIntensity;
+	float flSizeActive      = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightSizeFps      : g_PsyX_FlashlightSize;
 	if (u_flColorLoc != -1) {
 		float flCol[3];
-		flCol[0] = g_PsyX_FlashlightColor[0] * g_PsyX_FlashlightIntensity;
-		flCol[1] = g_PsyX_FlashlightColor[1] * g_PsyX_FlashlightIntensity;
-		flCol[2] = g_PsyX_FlashlightColor[2] * g_PsyX_FlashlightIntensity;
+		flCol[0] = g_PsyX_FlashlightColor[0] * flIntensityActive;
+		flCol[1] = g_PsyX_FlashlightColor[1] * flIntensityActive;
+		flCol[2] = g_PsyX_FlashlightColor[2] * flIntensityActive;
 		glUniform3fv(u_flColorLoc, 1, flCol);
 	}
 	/* Scale cone coverage by g_PsyX_FlashlightSize: a cone's solid angle is
@@ -1735,8 +1745,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * area ~linearly (size 1.0 = base, 1.5 = ~1.5x). Inner stays the tighter
 	 * (higher-cos) angle; the 0.05 floor keeps the half-angle under 90 deg. */
 	{
-		float flInner = 1.0f - g_PsyX_FlashlightSize * (1.0f - g_PsyX_FlashlightInnerCos);
-		float flOuter = 1.0f - g_PsyX_FlashlightSize * (1.0f - g_PsyX_FlashlightOuterCos);
+		float flInner = 1.0f - flSizeActive * (1.0f - g_PsyX_FlashlightInnerCos);
+		float flOuter = 1.0f - flSizeActive * (1.0f - g_PsyX_FlashlightOuterCos);
 		if (flInner < 0.05f) flInner = 0.05f;
 		if (flOuter < 0.05f) flOuter = 0.05f;
 		if (u_flInnerCosLoc != -1)
