@@ -794,12 +794,11 @@ int g_PsxFogToBlack = 0;
  * framebuffer. We match the matrix the original game's GPU uses (values
  * in [-4..+3]) divided by 255 so it lands in 24-bit color space.
  *
- * `v_texcoord.w` carries the per-primitive dither flag from the prim's
- * tpage. `u_ditherForce` is a global override the PC config exposes —
- * when non-zero, dither is applied to every fragment regardless of the
- * per-prim flag. We combine via max() so a prim that requests dither
- * still gets it even when force is 0, and a prim that didn't request
- * dither gets the global override when force is 1.
+ * `u_ditherForce` is the master enable the PC config exposes: 1 when the
+ * user selects "PSX dither", 0 for both "off" and "bilinear". When 0 we
+ * emit NO dither at all — the per-primitive `v_texcoord.w` tpage flag is
+ * deliberately NOT OR'd in here, because otherwise prims whose tpage sets
+ * the DTD bit would still show a dither pattern with the setting off.
  *
  * After adding the dither offset we quantize to 5 bits per channel
  * (PSX framebuffer depth) so the noise translates to actual color
@@ -813,7 +812,7 @@ int g_PsxFogToBlack = 0;
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 4.0) * 4.0);\n"\
-		"		float dStrength = max(v_texcoord.w, u_ditherForce) * v_is3d;\n"\
+		"		float dStrength = u_ditherForce * v_is3d;\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
 		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
@@ -840,7 +839,7 @@ int g_PsxFogToBlack = 0;
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
-		"		float dStrength = max(v_texcoord.w, u_ditherForce) * v_is3d * (1.0 - float(u_fogToBlack));\n"\
+		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack));\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
 		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
