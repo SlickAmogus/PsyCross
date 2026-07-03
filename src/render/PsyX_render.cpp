@@ -2619,11 +2619,13 @@ void GR_PostProcess(void) {}
 static const char* s_shadowDepthShaderSrc =
 	"#ifdef VERTEX\n"
 	"attribute vec3 a_viewpos;\n"
+	"attribute vec3 a_normal;\n"
 	"uniform mat4 u_shadowMatrix;\n"
 	"void main() {\n"
-	/* Untracked (2D/UI) verts have vsz==0; push them outside clip so they
-	 * never write shadow depth. Matches the cone shader's flP.z>0 gate. */
-	"	if (a_viewpos.z <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
+	/* Untracked (2D/UI) verts have vsz==0; push them outside clip so they never
+	 * write shadow depth (matches the cone shader's flP.z>0 gate). a_normal.x is
+	 * the per-vertex no-cast flag (Harry's body) -> also excluded. */
+	"	if (a_viewpos.z <= 0.0 || a_normal.x > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
 	"	gl_Position = u_shadowMatrix * vec4(a_viewpos, 1.0);\n"
 	"}\n"
 	"#else\n"

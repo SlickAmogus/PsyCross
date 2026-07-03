@@ -91,6 +91,9 @@ extern int							g_PsyX_UsePerPixelFlashlight;
  * console). Bias is the light-clip depth-compare epsilon (`shadowbias`). */
 extern int							g_PsyX_UseFlashlightShadows;
 extern float						g_PsyX_FlashlightShadowBias;
+/* Set 1 by game code around a draw whose geometry should NOT cast a flashlight
+ * shadow (Harry's own body); reset to 0 after. Per-vertex, rides the view-space FIFO. */
+extern int							g_PsyX_NoShadowCast;
 
 /* PC port: per-pixel flashlight cone parameters, pushed once per frame by game
  * code (bodyprog world-lighting setup). Position and direction are in VIEW

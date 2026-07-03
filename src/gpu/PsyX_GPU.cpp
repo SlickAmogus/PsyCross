@@ -104,20 +104,26 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * position of each projected vertex and is propagated along the SAME copy path
  * as PGXP (Shadow_Copy below). Entirely gated by g_PsyX_UsePerPixelFlashlight;
  * the off path never reads or writes it. */
-struct VsEntry { uintptr_t key; unsigned gen; float vx, vy, vz; };
+/* Per-vertex "does not cast a flashlight shadow" flag (see g_PsyX_UseFlashlightShadows).
+ * Set by game code (world_draw.c) around Harry's skeleton draw so the player never
+ * shadows the scene he's standing in; rides the same address-keyed view-space FIFO as
+ * the position and lands in GrVertex.nx, read by the shadow depth shader. */
+extern "C" int g_PsyX_NoShadowCast = 0;
+
+struct VsEntry { uintptr_t key; unsigned gen; float vx, vy, vz; float nocast; };
 static VsEntry s_vshadow[SHADOW_SIZE];
 
-static void Vs_Put(void* addr, float vx, float vy, float vz) {
+static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = ShadowHash(k);
 	for (int i = 0; i < 16; i++) {
 		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz; return;
+			e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast; return;
 		}
 	}
 	VsEntry* e = &s_vshadow[s];
-	e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz;
+	e->key = k; e->gen = s_pgxpGen; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
 }
 
 static const VsEntry* Vs_Get(const void* addr) {
@@ -134,7 +140,7 @@ static const VsEntry* Vs_Get(const void* addr) {
 /* GTE store hook for the flashlight view-space FIFO (PsyX_GTE.cpp PGXP_StoreAddr,
  * fired when g_PsyX_UsePerPixelFlashlight). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz) {
-	Vs_Put(addr, vx, vy, vz);
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -150,7 +156,7 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	}
 	if (g_PsyX_UsePerPixelFlashlight) {
 		const VsEntry* ve = Vs_Get(src);
-		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz);
+		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast);
 	}
 }
 
@@ -380,7 +386,10 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
 	const VsEntry* e = Vs_Get(addr);
-	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; }
+	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
+	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
+	 * memset-0 default = casts normally. */
+	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; }
 }
 
 DISPENV currentDispEnv;
