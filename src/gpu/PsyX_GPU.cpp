@@ -105,10 +105,18 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * as PGXP (Shadow_Copy below). Entirely gated by g_PsyX_UsePerPixelFlashlight;
  * the off path never reads or writes it. */
 /* Per-vertex "does not cast a flashlight shadow" flag (see g_PsyX_UseFlashlightShadows).
- * Set by game code (world_draw.c) around Harry's skeleton draw so the player never
- * shadows the scene he's standing in; rides the same address-keyed view-space FIFO as
- * the position and lands in GrVertex.nx, read by the shadow depth shader. */
-extern "C" int g_PsyX_NoShadowCast = 0;
+ * Rides the same address-keyed view-space FIFO as the position and lands in
+ * GrVertex.nx, read by the shadow depth shader.
+ *
+ * DEFAULT 1 = suppress: only monsters cast flashlight shadows. The flashlight sits
+ * at Harry's HAND height (the light bone), which is ~the same height as tabletop
+ * props, so their (physically-correct) shadow projects nearly horizontally onto the
+ * wall behind them — a tall silhouette "growing out of" the object rather than a
+ * shadow on the surface it rests on. Monsters stand on the floor well below the
+ * light, so their shadows fall normally and look right. So map/scenery geometry is
+ * left as non-caster (this default) and world_draw.c re-enables casting (=0) only
+ * around the non-Harry character skeleton draw. */
+extern "C" int g_PsyX_NoShadowCast = 1;
 
 struct VsEntry { uintptr_t key; unsigned gen; float vx, vy, vz; float nocast; };
 static VsEntry s_vshadow[SHADOW_SIZE];
