@@ -1922,7 +1922,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * shader only samples the shadow texture on frames one was actually rendered. */
 	{
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
-		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0) ? 1 : 0;
+		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
+		                !g_PsxPresentLastFrame) ? 1 : 0;
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
@@ -2839,7 +2840,13 @@ static void GR_BuildShadowMatrix(void)
 
 int GR_FlashlightShadowActive(void)
 {
-	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight && g_PsyX_FlashlightActive) ? 1 : 0;
+	/* Never during frozen/menu/transition frames (g_PsxPresentLastFrame): those
+	 * re-present a captured frame and their split list is 2D UI / a stale world,
+	 * so running the light-POV depth pre-pass there corrupts unrelated rendering
+	 * (white flash on room/inventory/map transitions, Harry's face dropping out on
+	 * the options screen). Shadows are a live-gameplay-only effect. */
+	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
+	        g_PsyX_FlashlightActive && !g_PsxPresentLastFrame) ? 1 : 0;
 }
 
 static GLint s_shadowPrevFBO = 0;
@@ -2883,6 +2890,7 @@ void GR_ShadowPassEnd(void)
 	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)s_shadowPrevFBO);
 	glViewport(s_shadowPrevViewport[0], s_shadowPrevViewport[1],
 	           s_shadowPrevViewport[2], s_shadowPrevViewport[3]);
+	glDepthFunc(GL_LEQUAL);  /* restore the renderer default; the pass set GL_LESS */
 
 	/* We changed program/depth/blend/scissor/stencil. Sentinels that never equal a
 	 * real mode force the first color split to fully re-establish GL state. */
