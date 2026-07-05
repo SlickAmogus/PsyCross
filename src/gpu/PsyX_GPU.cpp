@@ -513,7 +513,18 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 {
 	g_szMaxPrevFrame = g_szMaxThisFrame;
 	g_szMaxThisFrame = 0;
-	memset(g_szTable, 0, sizeof(g_szTable));
+	/* Inventory item pass only: the item's precise per-prim SZ was captured into
+	 * g_szTable during the GsSortObject4J sort earlier THIS frame, and the item's
+	 * own GsDrawOt(OT0) is the first draw after that sort (no intervening GsDrawOt),
+	 * so wiping the table here would drop it before ApplyGtePerVertexDepth reads it —
+	 * collapsing every item poly to one bucket depth (radio antenna through the body).
+	 * Skip the wipe while g_PsyX_ForceItemDepth is set (scoped by game code to the
+	 * item-only OT0 draw in GameState_InventoryScreen); every world/pickup draw has
+	 * the flag == 0 and clears normally. g_szMaxPrevFrame still swaps to the item's
+	 * own max above, so the item's depth normalizes against itself. */
+	extern int g_PsyX_ForceItemDepth;
+	if (!g_PsyX_ForceItemDepth)
+		memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
 	/* s_shadow / s_affine are gen-stamped, NOT cleared here: this runs at the start
 	 * of GsDrawOt, after addPrim filled them but before DrawOTag reads them, so a
