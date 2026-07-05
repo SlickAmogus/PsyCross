@@ -228,6 +228,14 @@ static float g_shadowZFar  = 5200.0f;
  * The shader consumes them only when (g_PsyX_UsePerPixelFlashlight &&
  * g_PsyX_FlashlightActive). Defaults make the cone inert (active=0). */
 int   g_PsyX_FlashlightActive   = 0;
+/* PC port: shadow depth pre-pass master gate. The game re-arms this to 1 only
+ * during settled gameplay (SysState_Gameplay, no screen fade / cutscene) and it
+ * is reset to 0 at the top of every frame. The flashlight CONE is fine outside
+ * gameplay, but the light-POV depth pre-pass + its GL-state churn corrupt
+ * unrelated rendering on menu / room-load / transition frames (white flash on
+ * transitions, dropped geometry on the options screen). Shadows are a
+ * live-gameplay-only effect, so gate the whole effect on this. */
+int   g_PsyX_ShadowsAllowed     = 0;
 float g_PsyX_FlashlightPos[3]   = { 0.0f, 0.0f, 0.0f };
 float g_PsyX_FlashlightDir[3]   = { 0.0f, 0.0f, 1.0f };
 float g_PsyX_FlashlightColor[3] = { 1.0f, 0.95f, 0.85f };  /* warm white; per-fragment N.L + screen-blend keep facing/near surfaces a bright hotspot while angled/far surfaces fall off naturally */
@@ -1923,7 +1931,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	{
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
-		                !g_PsxPresentLastFrame) ? 1 : 0;
+		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
@@ -2840,13 +2848,15 @@ static void GR_BuildShadowMatrix(void)
 
 int GR_FlashlightShadowActive(void)
 {
-	/* Never during frozen/menu/transition frames (g_PsxPresentLastFrame): those
-	 * re-present a captured frame and their split list is 2D UI / a stale world,
-	 * so running the light-POV depth pre-pass there corrupts unrelated rendering
-	 * (white flash on room/inventory/map transitions, Harry's face dropping out on
-	 * the options screen). Shadows are a live-gameplay-only effect. */
+	/* g_PsyX_ShadowsAllowed is re-armed by the game only during settled gameplay
+	 * (see its definition). Outside that — menus, room-load fades, cutscenes and
+	 * frozen/transition frames (g_PsxPresentLastFrame) — the light-POV depth
+	 * pre-pass corrupts unrelated rendering (white flash on room/inventory/map
+	 * transitions, Harry's face dropping out on the options screen). Shadows are a
+	 * live-gameplay-only effect. */
 	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
-	        g_PsyX_FlashlightActive && !g_PsxPresentLastFrame) ? 1 : 0;
+	        g_PsyX_FlashlightActive && g_PsyX_ShadowsAllowed &&
+	        !g_PsxPresentLastFrame) ? 1 : 0;
 }
 
 static GLint s_shadowPrevFBO = 0;
