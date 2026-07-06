@@ -404,15 +404,19 @@ static const char* currentSplitDebugText = nullptr;
 TextureID overrideTexture = 0;
 int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
+int overrideTextureOffsetX = 0;
+int overrideTextureOffsetY = 0;
 
 /* Hi-res texture overrides (host side, pc_port/src/hires_override.c).
- * Returns a GL texture + the ORIGINAL TIM's native pixel size when the
- * host registered a replacement for this tpage/clut, else 0. Weak stub so
- * PsyCross still links for hosts that don't provide the table. */
+ * Returns a GL texture + the ORIGINAL TIM's native pixel size + the
+ * tpage-origin offset inside that TIM when the host registered a
+ * replacement for this tpage/clut, else 0. Weak stub so PsyCross still
+ * links for hosts that don't provide the table. */
 extern "C" unsigned int __attribute__((weak))
-HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH)
+HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
+                                int* outOffX, int* outOffY)
 {
-    (void)tpage; (void)clut; (void)outW; (void)outH;
+    (void)tpage; (void)clut; (void)outW; (void)outH; (void)outOffX; (void)outOffY;
     return 0;
 }
 
@@ -420,18 +424,26 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH)
  * path when the host has a hi-res replacement for its tpage/clut. AddSplit
  * keys splits on textureId, so batches open/close exactly at matching
  * prims; overrideTextureWidth/Height feed texelSize with the NATIVE size,
- * so the prim's tpage-relative UVs map 0..1 across any upscale factor. */
+ * so the prim's tpage-relative UVs map 0..1 across any upscale factor.
+ * The offset shifts those UVs when the prim's tpage sits partway into the
+ * replaced TIM (surfaces wider than one tpage draw as several prims whose
+ * UVs restart at each tpage — without it every chunk showed the image
+ * from x=0). */
 static inline void ApplyHiresOverride(short tpage, short clut)
 {
-    int nW = 0, nH = 0;
-    unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH);
+    int nW = 0, nH = 0, offX = 0, offY = 0;
+    unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY);
     if (hi != 0) {
-        overrideTexture       = (TextureID)hi;
-        overrideTextureWidth  = nW;
-        overrideTextureHeight = nH;
+        overrideTexture        = (TextureID)hi;
+        overrideTextureWidth   = nW;
+        overrideTextureHeight  = nH;
+        overrideTextureOffsetX = offX;
+        overrideTextureOffsetY = offY;
     }
     else {
         overrideTexture = 0;
+        overrideTextureOffsetX = 0;
+        overrideTextureOffsetY = 0;
     }
 }
 
@@ -648,6 +660,8 @@ void ClearSplits()
 	overrideTexture = 0;
 	overrideTextureWidth = 0;
 	overrideTextureHeight = 0;
+	overrideTextureOffsetX = 0;
+	overrideTextureOffsetY = 0;
 }
 
 template<class T>
@@ -1277,6 +1291,11 @@ static void AddSplit(bool semiTrans, bool textured)
 	if (curSplit.blendMode == blendMode &&
 		curSplit.texFormat == texFormat &&
 		curSplit.textureId == textureId &&
+		/* tw.x/y carry the hi-res override UV offset: two chunks of the same
+		 * override texture with different tpage origins must NOT batch
+		 * together (same textureId!) or they'd share one offset uniform. */
+		curSplit.drawenv.tw.x == overrideTextureOffsetX &&
+		curSplit.drawenv.tw.y == overrideTextureOffsetY &&
 		curSplit.drawPrimMode == g_DrawPrimMode &&
 		curSplit.drawenv.clip.x == activeDrawEnv.clip.x &&
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
@@ -1307,6 +1326,8 @@ static void AddSplit(bool semiTrans, bool textured)
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
+	split.drawenv.tw.x = overrideTextureOffsetX;
+	split.drawenv.tw.y = overrideTextureOffsetY;
 
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
@@ -1348,7 +1369,8 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
-		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h);
+		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
+		                          split.drawenv.tw.x, split.drawenv.tw.y);
 
 	const bool drawOnScreen = split.drawenv.dfe;
 	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
