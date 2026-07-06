@@ -405,6 +405,36 @@ TextureID overrideTexture = 0;
 int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
 
+/* Hi-res texture overrides (host side, pc_port/src/hires_override.c).
+ * Returns a GL texture + the ORIGINAL TIM's native pixel size when the
+ * host registered a replacement for this tpage/clut, else 0. Weak stub so
+ * PsyCross still links for hosts that don't provide the table. */
+extern "C" unsigned int __attribute__((weak))
+HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH)
+{
+    (void)tpage; (void)clut; (void)outW; (void)outH;
+    return 0;
+}
+
+/* Route a textured prim through the (otherwise dormant) overrideTexture
+ * path when the host has a hi-res replacement for its tpage/clut. AddSplit
+ * keys splits on textureId, so batches open/close exactly at matching
+ * prims; overrideTextureWidth/Height feed texelSize with the NATIVE size,
+ * so the prim's tpage-relative UVs map 0..1 across any upscale factor. */
+static inline void ApplyHiresOverride(short tpage, short clut)
+{
+    int nW = 0, nH = 0;
+    unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH);
+    if (hi != 0) {
+        overrideTexture       = (TextureID)hi;
+        overrideTextureWidth  = nW;
+        overrideTextureHeight = nH;
+    }
+    else {
+        overrideTexture = 0;
+    }
+}
+
 int g_GPUDisabledState = 0;
 int g_DrawPrimMode = 0;
 
@@ -614,6 +644,10 @@ void ClearSplits()
 	g_vertexIndex = 0;
 	g_splitIndex = 0;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
+	/* Don't let a hi-res override leak across frames. */
+	overrideTexture = 0;
+	overrideTextureWidth = 0;
+	overrideTextureHeight = 0;
 }
 
 template<class T>
@@ -1780,6 +1814,8 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
 		if (!IsNull(poly))
 		{
+			ApplyHiresOverride(poly->tpage, poly->clut);
+
 			AddSplit(semiTrans, true);
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -1864,6 +1900,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			}
 		}
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -1927,6 +1964,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT3* poly = (POLY_GT3*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -1979,6 +2017,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+		ApplyHiresOverride(poly->tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2040,6 +2079,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x64:
 	{
 		SPRT* poly = (SPRT*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2100,6 +2140,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x74:
 	{
 		SPRT_8* poly = (SPRT_8*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
@@ -2140,6 +2181,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x7C:
 	{
 		SPRT_16* poly = (SPRT_16*)polyTag;
+		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
 		AddSplit(semiTrans, true);
 
