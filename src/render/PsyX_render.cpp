@@ -73,12 +73,12 @@ float g_PsxPixelAspect = 1.0f;
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
 float g_PsxWorldVScale = 0.872f;
-/* Vertical view shift (amount, PSX screen-Y units) applied to FIXED-ANGLE camera shots
- * only — gated by g_PsxFixedCamActive, which the game sets when cur_cam_mv_type ==
- * VC_MV_FIX_ANG. Those shots frame the top of the scene clipped vs PSX (e.g. a medkit
- * off the top); the GTE projects geometry up to screen_y ~ -78, so shifting the ortho
- * window up brings it into frame. + = view up. Console `vshift`. Chase/settle/etc. are
- * unaffected. */
+/* Vertical view shift (amount, PSX screen-Y units) for FIXED-ANGLE camera shots, which
+ * frame the top of the scene clipped vs PSX (e.g. a medkit off the top). The GAME applies
+ * it (MainLoop, game_main.c) by shifting the GTE projection center down (SetGeomOffset)
+ * while g_PsxFixedCamActive is set — NOT by shifting the ortho window here: the ortho
+ * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
+ * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
 float g_PsxWorldVShift = 20.0f;
 int   g_PsxFixedCamActive = 0;
 /* Set by the game while a cutscene is active. Cutscenes frame themselves with letterbox
@@ -2255,12 +2255,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * 3D framing matches PSX/DuckStation (the old cutscene vscale-skip un-cropped
 				 * the whole frame and read as stretched). The 2D UI pass (g_PsxUIOrthoPass:
 				 * OT2 — subtitles, fade, cutscene letterbox bars) instead gets full vertical
-				 * ortho so it isn't scaled/clipped off the bottom. vshift is a gameplay
-				 * framing aid only (skipped for cutscenes and for the UI pass). */
+				 * ortho so it isn't scaled/clipped off the bottom. The FIX_ANG framing shift
+				 * (g_PsxWorldVShift) is applied at the GTE projection center by the game, not
+				 * here — an ortho-window shift reveals rows overlay prims never cover. */
 				const float vscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldVScale;
-				const float vshift = (g_PsxFixedCamActive && !g_PsxCutsceneActive && !g_PsxUIOrthoPass) ? g_PsxWorldVShift : 0.0f;
-				orthoTop = 0.0f          - vshift;   // +shift = show higher content
-				orthoBot = psxH * vscale - vshift;
+				orthoTop = 0.0f;
+				orthoBot = psxH * vscale;
 			}
 			const float psxAspect = psxW / psxH;
 			const float winAspect = (g_windowHeight > 0)
