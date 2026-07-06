@@ -1205,6 +1205,12 @@ const char* gte_shader_32_rgba =
 	"	void main() {\n"\
 	"		vec2 tc = v_texcoord.xy * texelSize + texelSize * 0.5;\n"\
 	"		fragColor = texture2D(s_texture, tc);\n"\
+	/* PSX colour-0 transparency for hi-res overrides: alpha 0 texels are
+	 * holes on ANY prim (opaque prims ignore blending, so without the
+	 * discard they'd render solid). 0.5 cutoff keeps authored soft-alpha
+	 * edges blending on semi-transparent prims while opaque cutouts
+	 * (foliage/UI) stay clean. */
+	"		if (fragColor.a < 0.5) discard;\n"\
 	GPU_DITHERING\
 	"	}\n"
 	"#endif\n";
