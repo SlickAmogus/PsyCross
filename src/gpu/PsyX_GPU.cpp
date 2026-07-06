@@ -165,7 +165,9 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 		const ShadowEntry* e = Shadow_Get(src);
 		if (e) Shadow_Put(dst, e->x, e->y, e->w, *(const unsigned*)dst);
 	}
-	if (g_PsyX_UsePerPixelFlashlight) {
+	/* View-space propagates whenever PGXP is on too — the near-plane clipper
+	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
 		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst);
 	}
@@ -182,6 +184,22 @@ extern "C" { float g_PgxpEdgeMax = 8192.0f; }
  * SZ3 register; coincident edges then get a matching 1/W so seams stop widening with
  * distance. 0 = original quantized SZ3 (for A/B). Live-tunable via console `pgxpdepth`. */
 extern "C" { int g_PgxpUseUnquantizedDepth = 1; }
+
+/* PGXP near-plane clipping (docs/PGXP_NearClip_Design.md). A poly that straddles
+ * the camera plane has behind-the-eye vertices with no valid projection (SZ3==0 ->
+ * W=0); PSX hardware — and this port until now — fell back to affine for them,
+ * mixing per-vertex modes across the poly and smearing it whenever the FPS camera
+ * leans into geometry. When on, such polys are clipped against z=NEAR in view
+ * space (positions from the VsEntry shadow, which PGXP now also fills) and the
+ * clip vertices re-projected with the GTE's own projection constants. OFF path is
+ * byte-identical to before. Console `pgxpnearclip` / `pgxpnearz`. */
+extern "C" { int g_PsxPgxpNearClip = 1; }
+/* Clip plane view-space depth, GTE SZ units. Small enough to be an invisible cut
+ * right at the eye, large enough that H/z and 1/W stay numerically tame. */
+extern "C" { float g_PgxpNearZ = 16.0f; }
+/* GTE projection registers captured at RTPS time (PsyX_GTE.cpp): OFX/OFY as float
+ * pixels, H the projection distance. Per-frame constants in SH1. */
+extern "C" { float g_PgxpGteOfx = 0.0f, g_PgxpGteOfy = 0.0f, g_PgxpGteH = 1.0f; }
 
 /* GPU draw resolve (DuckStation GetPreciseVertex): shadow at the prim-field
  * address, validated by exact value. Miss / behind-near-plane (W=0) -> affine
@@ -258,20 +276,21 @@ extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void
 
 /* Coverage instrumentation: precise (det) vs affine (miss) per 3D vertex, dumped
  * ~once a second when PGXP is on. Also bumps the frame generation. */
-static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0;
+static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0, s_pgxpClip = 0;
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
-	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = 0; return; }
+	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%)\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
-				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot);
-		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = 0;
+				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
+				s_pgxpClip);
+		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = 0;
 	}
 }
 
@@ -393,14 +412,34 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 /* Fill a GrVertex's view-space position (vsx/vsy/vsz) from the flashlight shadow
  * at the vertex's prim-field address (same address-keyed lookup as PGXP). A miss
  * leaves the memset-0 default, which the shader treats as "untracked" (vsz<=0,
- * not lit). Called only when g_PsyX_UsePerPixelFlashlight. */
+ * not lit). Called when g_PsyX_UsePerPixelFlashlight or g_PsxUsePgxp (near clip). */
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
 	const VsEntry* e = Vs_Get(addr, *(const unsigned*)addr);
 	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
 	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
-	 * memset-0 default = casts normally. */
-	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; }
+	 * memset-0 default = casts normally. ny doubles as the "view-space entry valid"
+	 * marker for the near clipper: a behind-the-eye vertex legitimately has vsz<=0,
+	 * so presence can't be inferred from the position itself. No shader reads ny. */
+	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f; }
+}
+
+/* True when the near clipper will take this poly: every vertex carries a
+ * validated view-space entry (ny marker) and the poly straddles the near plane.
+ * MakeVertexTriangle/Quad consult this to keep per-vertex precise data intact —
+ * their whole-poly affine drop would otherwise destroy the in-front vertices'
+ * projections before the clipper runs. Callers ensure g_PsxUsePgxp. */
+static inline bool PgxpNearClipEligible(const GrVertex* v, int n)
+{
+	if (!g_PsxPgxpNearClip || s_curPgxpAffine)
+		return false;
+	int front = 0, behind = 0;
+	for (int i = 0; i < n; i++) {
+		if (v[i].ny < 0.5f)
+			return false;
+		if (v[i].vsz >= g_PgxpNearZ) front++; else behind++;
+	}
+	return front > 0 && behind > 0;
 }
 
 DISPENV currentDispEnv;
@@ -741,6 +780,15 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
 
+	/* Before the PGXP block: the near-clip eligibility test below reads the
+	 * view-space data these fill. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	{
+		VsFillVertex(&vertex[0], p0);
+		VsFillVertex(&vertex[1], p1);
+		VsFillVertex(&vertex[2], p2);
+	}
+
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
@@ -749,16 +797,12 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		/* Per-poly consistency: if ANY vertex fell to affine (ppw<=0 — at/behind the
 		 * near plane, where there's no valid perspective projection), drop the WHOLE
 		 * poly to affine. A poly with some verts perspective and some affine shears at
-		 * the screen edge (the grazing-angle case); consistent affine matches PSX. */
-		if (vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f)
+		 * the screen edge (the grazing-angle case); consistent affine matches PSX.
+		 * EXCEPT when the near clipper will split this straddling poly — it needs the
+		 * in-front vertices' precise projections kept intact. */
+		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
+		    !PgxpNearClipEligible(vertex, 3))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = 0.0f;
-	}
-
-	if (g_PsyX_UsePerPixelFlashlight)
-	{
-		VsFillVertex(&vertex[0], p0);
-		VsFillVertex(&vertex[1], p1);
-		VsFillVertex(&vertex[2], p2);
 	}
 
 	ScreenCoordsToEmulator(vertex, 3);
@@ -790,24 +834,27 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
+	/* Before the PGXP block: near-clip eligibility reads the view-space data. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	{
+		VsFillVertex(&vertex[0], p0);
+		VsFillVertex(&vertex[1], p1);
+		VsFillVertex(&vertex[2], p2);
+		VsFillVertex(&vertex[3], p3);
+	}
+
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
-		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly affine. */
-		if (vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
-		    vertex[2].ppw <= 0.0f || vertex[3].ppw <= 0.0f)
+		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
+		 * affine — unless the near clipper will split this straddling poly. */
+		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
+		     vertex[2].ppw <= 0.0f || vertex[3].ppw <= 0.0f) &&
+		    !PgxpNearClipEligible(vertex, 4))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = vertex[3].ppw = 0.0f;
-	}
-
-	if (g_PsyX_UsePerPixelFlashlight)
-	{
-		VsFillVertex(&vertex[0], p0);
-		VsFillVertex(&vertex[1], p1);
-		VsFillVertex(&vertex[2], p2);
-		VsFillVertex(&vertex[3], p3);
 	}
 
 	ScreenCoordsToEmulator(vertex, 4);
@@ -1226,6 +1273,123 @@ void TriangulateQuad()
 	g_vertexBuffer[g_vertexIndex + 5] = g_vertexBuffer[g_vertexIndex + 2];
 	g_vertexBuffer[g_vertexIndex + 2] = g_vertexBuffer[g_vertexIndex + 3];
 	g_vertexBuffer[g_vertexIndex + 3] = g_vertexBuffer[g_vertexIndex + 1];
+}
+
+/* ---- PGXP near-plane clipping (docs/PGXP_NearClip_Design.md) -----------------
+ * Runs on the freshly-built triangle list of ONE 3D poly (3 verts, or 6 after
+ * TriangulateQuad) before g_vertexIndex advances, and only for polys where every
+ * vertex has a validated view-space entry and at least one sits on each side of
+ * z = g_PgxpNearZ. Each triangle is Sutherland-Hodgman clipped against that plane
+ * in view space; attributes interpolate along the crossing edges (linear in view
+ * space = perspective-correct for UV/position; RGB differs slightly from PSX
+ * screen-space Gouraud, acceptable — PSX never drew these polys correctly at
+ * all); the resulting 0..4-vertex polygon is fan-triangulated back in place.
+ * Only the GL vertex stream changes: the prim's integer data, OT position and
+ * split (texture/blend state) are untouched, so painter's order is unaffected. */
+
+/* Build the clip vertex where edge a->b crosses z = g_PgxpNearZ. Non-interpolated
+ * fields (page/clut/bright/dither/tcx/tcy, flat prim z, nocast) copy from a. */
+static void PgxpNearClipLerp(const GrVertex* a, const GrVertex* b, GrVertex* out, float ofsX, float ofsY)
+{
+	const float t = (g_PgxpNearZ - a->vsz) / (b->vsz - a->vsz);
+
+	*out = *a;
+	out->vsx = a->vsx + (b->vsx - a->vsx) * t;
+	out->vsy = a->vsy + (b->vsy - a->vsy) * t;
+	out->vsz = g_PgxpNearZ;
+
+	/* Re-project with the GTE's own formula (sx = OFX + x*H/z), landing in the
+	 * same space PgxpFillVertex stores (draw-env offset included). W = view z,
+	 * the same unquantized scale pgxpW uses, so 1/W interpolation lines up with
+	 * the kept vertices. No g_PgxpEdgeMax clamp: with a true W the GPU clips
+	 * far-off-screen positions exactly in homogeneous space; clamping would drag
+	 * the vertex and distort the visible part. */
+	const float hz = g_PgxpGteH / g_PgxpNearZ;
+	out->ppx = g_PgxpGteOfx + out->vsx * hz + ofsX;
+	out->ppy = g_PgxpGteOfy + out->vsy * hz + ofsY;
+	out->ppw = g_PgxpNearZ;
+
+	/* Integer x/y are unread on the PGXP shader path (ppw>0) — keep them sane
+	 * for debug views; a raw float->short cast of a huge coord is UB. */
+	out->x = (short)(out->ppx < -32767.0f ? -32767.0f : (out->ppx > 32767.0f ? 32767.0f : out->ppx));
+	out->y = (short)(out->ppy < -32767.0f ? -32767.0f : (out->ppy > 32767.0f ? 32767.0f : out->ppy));
+
+	out->u = (u_char)((float)a->u + ((float)b->u - (float)a->u) * t + 0.5f);
+	out->v = (u_char)((float)a->v + ((float)b->v - (float)a->v) * t + 0.5f);
+	out->r = (u_char)((float)a->r + ((float)b->r - (float)a->r) * t + 0.5f);
+	out->g = (u_char)((float)a->g + ((float)b->g - (float)a->g) * t + 0.5f);
+	out->b = (u_char)((float)a->b + ((float)b->b - (float)a->b) * t + 0.5f);
+	out->a = (u_char)((float)a->a + ((float)b->a - (float)a->a) * t + 0.5f);
+	/* Per-vertex fog rides _p0 (0..127). */
+	out->_p0 = (char)((float)a->_p0 + ((float)b->_p0 - (float)a->_p0) * t + 0.5f);
+}
+
+/* A kept in-front vertex normally keeps its GTE-precise projection (bit-identical
+ * to the unclipped case, so shared edges with neighbouring unclipped polys can't
+ * crack). If the PGXP shadow missed it (ppw==0) but view-space is valid,
+ * reconstruct the projection the same way the clip vertices get theirs. */
+static void PgxpNearClipReproject(GrVertex* v, float ofsX, float ofsY)
+{
+	if (v->ppw > 0.0f)
+		return;
+	const float hz = g_PgxpGteH / v->vsz;
+	v->ppx = g_PgxpGteOfx + v->vsx * hz + ofsX;
+	v->ppy = g_PgxpGteOfy + v->vsy * hz + ofsY;
+	v->ppw = v->vsz;
+}
+
+/* Clip the poly's triangle list in place; returns the new vertex count (a
+ * multiple of 3; unchanged when the poly isn't eligible). Worst case growth is
+ * 6 -> 12 verts (each straddling triangle yields up to 2). */
+static int PgxpNearClipEmit(GrVertex* v, int count)
+{
+	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
+		return count;
+
+	/* Growth headroom: never write past the vertex buffer; keeping the
+	 * unclipped poly stays within the pre-existing envelope. */
+	if (g_vertexIndex + 12 > MAX_VERTEX_BUFFER_SIZE)
+		return count;
+
+	GrVertex out[12];
+	int outCount = 0;
+
+	float ofsX, ofsY;
+	DrawEnvOffset(ofsX, ofsY);
+
+	for (int tri = 0; tri + 2 < count; tri += 3)
+	{
+		GrVertex clipped[4];
+		int m = 0;
+
+		for (int i = 0; i < 3; i++)
+		{
+			const GrVertex* a = &v[tri + i];
+			const GrVertex* b = &v[tri + (i + 1) % 3];
+			const bool aIn = a->vsz >= g_PgxpNearZ;
+			const bool bIn = b->vsz >= g_PgxpNearZ;
+
+			if (aIn)
+				clipped[m++] = *a;
+			if (aIn != bIn)
+				PgxpNearClipLerp(a, b, &clipped[m++], ofsX, ofsY);
+		}
+
+		for (int i = 0; i < m; i++)
+			PgxpNearClipReproject(&clipped[i], ofsX, ofsY);
+
+		/* Fan-triangulate (m is 0, 3 or 4; winding preserved by the clip). */
+		for (int i = 2; i < m; i++)
+		{
+			out[outCount++] = clipped[0];
+			out[outCount++] = clipped[i - 1];
+			out[outCount++] = clipped[i];
+		}
+	}
+
+	memcpy(v, out, outCount * sizeof(GrVertex));
+	s_pgxpClip++;
+	return outCount;
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -1772,7 +1936,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		MakeTexcoordTriangleZero(firstVertex, 0);
 		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
 
-		g_vertexIndex += 3;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -1795,7 +1959,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
 
-			g_vertexIndex += 3;
+			g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -1817,7 +1981,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += 6;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
@@ -1882,7 +2046,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += 6;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -1923,7 +2087,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[1]._p0 = poly->pad1;
 		firstVertex[2]._p0 = poly->pad2;
 
-		g_vertexIndex += 3;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -1948,7 +2112,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[1]._p0 = poly->p1;  // v1
 		firstVertex[2]._p0 = poly->p2;  // v2
 
-		g_vertexIndex += 3;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -1975,7 +2139,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += 6;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2003,7 +2167,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += 6;
+		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;

@@ -293,6 +293,8 @@ static float s_pgxpFifoX[3], s_pgxpFifoY[3], s_pgxpFifoW[3];
 static float s_vsFifoX[3], s_vsFifoY[3], s_vsFifoZ[3];
 
 extern "C" int g_PgxpUseUnquantizedDepth; /* defined in PsyX_GPU.cpp */
+extern "C" int g_PsxPgxpNearClip;         /* PsyX_GPU.cpp */
+extern "C" float g_PgxpGteOfx, g_PgxpGteOfy, g_PgxpGteH; /* PsyX_GPU.cpp */
 extern "C" void VShadow_Store(void* addr, float x, float y, float z); /* PsyX_GPU.cpp */
 
 /* Called from the gte_stsxy* store macros (only when g_PsxUsePgxp): the macro
@@ -309,7 +311,10 @@ extern "C" void PGXP_StoreAddr(void* addr, int slot)
 	 * off, both off => not called at all (byte-identical legacy path). */
 	if (g_PsxUsePgxp)
 		Shadow_Store(addr, s_pgxpFifoX[slot], s_pgxpFifoY[slot], s_pgxpFifoW[slot], *(unsigned*)addr);
-	if (g_PsyX_UsePerPixelFlashlight)
+	/* View-space shadow also feeds the PGXP near-plane clipper, so it must be
+	 * recorded whenever PGXP is on, not just for the per-pixel flashlight. Gate
+	 * matches the vs FIFO fill in GTE_RotTransPers below. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
 		VShadow_Store(addr, s_vsFifoX[slot], s_vsFifoY[slot], s_vsFifoZ[slot]);
 }
 
@@ -372,12 +377,21 @@ int GTE_RotTransPers(int idx, int lm)
 		s_pgxpFifoX[0] = s_pgxpFifoX[1]; s_pgxpFifoX[1] = s_pgxpFifoX[2]; s_pgxpFifoX[2] = (float)fx;
 		s_pgxpFifoY[0] = s_pgxpFifoY[1]; s_pgxpFifoY[1] = s_pgxpFifoY[2]; s_pgxpFifoY[2] = (float)fy;
 		s_pgxpFifoW[0] = s_pgxpFifoW[1]; s_pgxpFifoW[1] = s_pgxpFifoW[2]; s_pgxpFifoW[2] = pgxpW;
+
+		/* Near-clip reprojection constants: the projection registers active when
+		 * this vertex was transformed. The GL near-plane clipper re-projects the
+		 * clip vertices it creates with the exact same formula (sx = OFX + x*H/z).
+		 * Per-frame constants in SH1, so plain globals suffice. */
+		g_PgxpGteOfx = (float)((double)C2_OFX / 65536.0);
+		g_PgxpGteOfy = (float)((double)C2_OFY / 65536.0);
+		g_PgxpGteH   = (float)C2_H;
 	}
 
-	/* Flashlight view-space FIFO: stash this vertex's camera-space position
-	 * (RTPS MAC1/MAC2/MAC3, same units the light is pushed in). Mirrors the SXY
-	 * FIFO shift above so gte_stsxy* can resolve address->view-pos. Off = no cost. */
-	if (g_PsyX_UsePerPixelFlashlight)
+	/* View-space FIFO: stash this vertex's camera-space position (RTPS
+	 * MAC1/MAC2/MAC3). Source data for the per-pixel flashlight AND the PGXP
+	 * near-plane clipper, so it runs when either is on. Mirrors the SXY FIFO
+	 * shift above so gte_stsxy* can resolve address->view-pos. Off = no cost. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
 	{
 		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)C2_MAC1;
 		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)C2_MAC2;
