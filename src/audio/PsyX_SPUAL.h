@@ -38,6 +38,10 @@ extern int PsyX_SPUAL_SetReverb(int on_off);
 extern int PsyX_SPUAL_GetReverbState();
 extern u_int PsyX_SPUAL_SetReverbVoice(int on_off, u_int voice_bit);
 extern u_int PsyX_SPUAL_GetReverbVoice();
+extern void PsyX_SPUAL_SetReverbDepthMasked(int maskL, int maskR, short depthL, short depthR);
+extern int PsyX_SPUAL_SetReverbMode(int mode);
+extern void PsyX_SPUAL_SetReverbDepthScale(float scale);
+extern float PsyX_SPUAL_GetReverbDepthScale(void);
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }

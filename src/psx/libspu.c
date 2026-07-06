@@ -151,7 +151,20 @@ int SpuGetReverb(void)
 
 int SpuSetReverbModeParam(SpuReverbAttr* attr)
 {
-	PSYX_UNIMPLEMENTED();
+	/* The game drives reverb through this constantly: per-track depths on BGM
+	 * bank loads, the per-tick depth RAMP on sequence (re)start (libsd
+	 * replay_reverb_set — the PSX "music fades in with its echo"), and the
+	 * boot-time mode set. Returns 0 = success (a nonzero return makes
+	 * SdUtSetReverbType report failure to the game). */
+	if (attr->mask & SPU_REV_MODE)
+		PsyX_SPUAL_SetReverbMode(attr->mode & 0xFF);
+
+	if (attr->mask & (SPU_REV_DEPTHL | SPU_REV_DEPTHR))
+		PsyX_SPUAL_SetReverbDepthMasked(
+			(attr->mask & SPU_REV_DEPTHL) != 0,
+			(attr->mask & SPU_REV_DEPTHR) != 0,
+			attr->depth.left, attr->depth.right);
+
 	return 0;
 }
 
@@ -162,7 +175,11 @@ void SpuGetReverbModeParam(SpuReverbAttr* attr)
 
 int SpuSetReverbDepth(SpuReverbAttr* attr)
 {
-	PSYX_UNIMPLEMENTED();
+	if (attr->mask & (SPU_REV_DEPTHL | SPU_REV_DEPTHR))
+		PsyX_SPUAL_SetReverbDepthMasked(
+			(attr->mask & SPU_REV_DEPTHL) != 0,
+			(attr->mask & SPU_REV_DEPTHR) != 0,
+			attr->depth.left, attr->depth.right);
 	return 0;
 }
 
@@ -234,13 +251,13 @@ void SpuSetCommonMasterVolume(short mvol_left, short mvol_right)// (F)
 
 int SpuSetReverbModeType(int mode)
 {
-	PSYX_UNIMPLEMENTED();
+	PsyX_SPUAL_SetReverbMode(mode);
 	return 0;
 }
 
 void SpuSetReverbModeDepth(short depth_left, short depth_right)
 {
-	PSYX_UNIMPLEMENTED();
+	PsyX_SPUAL_SetReverbDepthMasked(1, 1, depth_left, depth_right);
 }
 
 void SpuGetVoiceVolume(int vNum, short* volL, short* volR)

@@ -85,12 +85,14 @@ static SDL_mutex* g_SpuMutex = NULL;
 static int g_spuInit = 0;
 static int s_spuMallocVal = 0;
 
-/* SPU ADSR envelope master gate. Default OFF: the envelope path is the same
- * feature that previously deadlocked when ticked from the render thread, so it
- * ships disabled (audio byte-identical to known-good) and is opt-in via the
- * `adsr 1` console command until validated. When OFF, SetKey/SetVoiceAttr/
- * Update all take their pre-envelope code paths. */
-int g_SpuAdsrEnabled = 0;
+/* SPU ADSR envelope master gate. Default ON since 2026-07-06: the historical
+ * render-thread deadlock was fixed by moving the tick to the audio-timing
+ * thread, the key-status release-tail hang was fixed (keyed-off enveloped
+ * voices report free immediately), and side-by-side PSX comparison confirmed
+ * envelopes are required for the sequenced BGM's instrument fades. Opt-out via
+ * the `adsr 0` console command or `adsr = 0` in config.cfg. When OFF,
+ * SetKey/SetVoiceAttr/Update all take their pre-envelope code paths. */
+int g_SpuAdsrEnabled = 1;
 
 PSX_API_EXPORT void PsyX_SPUAL_SetAdsrEnabled(int on) { g_SpuAdsrEnabled = on ? 1 : 0; }
 PSX_API_EXPORT int  PsyX_SPUAL_GetAdsrEnabled(void)   { return g_SpuAdsrEnabled; }
@@ -148,8 +150,35 @@ LPALEFFECTF alEffectf = NULL;
 LPALGENAUXILIARYEFFECTSLOTS alGenAuxiliaryEffectSlots = NULL;
 LPALDELETEAUXILIARYEFFECTSLOTS alDeleteAuxiliaryEffectSlots = NULL;
 LPALAUXILIARYEFFECTSLOTI alAuxiliaryEffectSloti = NULL;
+LPALAUXILIARYEFFECTSLOTF alAuxiliaryEffectSlotf = NULL;
 
 #endif // __EMSCRIPTEN__
+
+/* SPU reverb depth (wet level). The game drives this constantly: a per-track
+ * depth on every BGM bank load (g_Sd_ReverbDepths), a per-tick RAMP from 0 to
+ * the track target on sequence (re)start (libsd replay_reverb_set — the PSX
+ * "music fades in with its echo"), and SdSetRVol/SdUtSetReverbDepth one-shots.
+ * PSX depth is s16 (typical game values (u8 depth)<<8, i.e. 2560..30720);
+ * mapped to the OpenAL aux effect SLOT gain so it applies live to every
+ * routed voice without touching the effect parameters. */
+static short g_reverbDepthL = 0;
+static short g_reverbDepthR = 0;
+static int   g_reverbMode = 1;
+float g_SpuReverbDepthScale = 2.0f; /* wet = |depth|/32768 * scale; `revscale` console knob */
+
+static void ApplyReverbWet(void)
+{
+#ifndef __EMSCRIPTEN__
+	if (!g_ALEffectsSupported || !alAuxiliaryEffectSlotf)
+		return;
+	int dl = g_reverbDepthL < 0 ? -g_reverbDepthL : g_reverbDepthL;
+	int dr = g_reverbDepthR < 0 ? -g_reverbDepthR : g_reverbDepthR;
+	float wet = (float)(dl > dr ? dl : dr) / 32768.0f * g_SpuReverbDepthScale;
+	if (wet < 0.0f) wet = 0.0f;
+	if (wet > 1.0f) wet = 1.0f;
+	alAuxiliaryEffectSlotf(g_ALEffectSlots[g_currEffectSlotIdx], AL_EFFECTSLOT_GAIN, wet);
+#endif
+}
 
 static void InitOpenAlEffects()
 {
@@ -168,6 +197,7 @@ static void InitOpenAlEffects()
 	alGenAuxiliaryEffectSlots = (LPALGENAUXILIARYEFFECTSLOTS)alGetProcAddress("alGenAuxiliaryEffectSlots");
 	alDeleteAuxiliaryEffectSlots = (LPALDELETEAUXILIARYEFFECTSLOTS)alGetProcAddress("alDeleteAuxiliaryEffectSlots");
 	alAuxiliaryEffectSloti = (LPALAUXILIARYEFFECTSLOTI)alGetProcAddress("alAuxiliaryEffectSloti");
+	alAuxiliaryEffectSlotf = (LPALAUXILIARYEFFECTSLOTF)alGetProcAddress("alAuxiliaryEffectSlotf");
 
 	int max_sends = 0;
 	alcGetIntegerv(g_ALCdevice, ALC_MAX_AUXILIARY_SENDS, 1, &max_sends);
@@ -1152,6 +1182,43 @@ int PsyX_SPUAL_SetReverb(int on_off)
 int PsyX_SPUAL_GetReverbState()
 {
 	return g_enableSPUReverb;
+}
+
+/* Reverb depth (wet level), from SpuSetReverbModeParam / SpuSetReverbDepth.
+ * maskL/maskR say which sides the caller set; the other keeps its value
+ * (matches the PSX per-side mask semantics). Called from BOTH the game
+ * thread (bank loads) and the interrupt thread (the per-tick replay ramp). */
+void PsyX_SPUAL_SetReverbDepthMasked(int maskL, int maskR, short depthL, short depthR)
+{
+	SDL_LockMutex(g_SpuMutex);
+	if (maskL) g_reverbDepthL = depthL;
+	if (maskR) g_reverbDepthR = depthR;
+	ApplyReverbWet();
+	SDL_UnlockMutex(g_SpuMutex);
+}
+
+/* Reverb mode (preset type). SH1 only ever sets mode 1 (Room) at boot and the
+ * current effect parameters were tuned for this game, so the mode is stored
+ * for readback but does not retune the effect. */
+int PsyX_SPUAL_SetReverbMode(int mode)
+{
+	int old = g_reverbMode;
+	g_reverbMode = mode;
+	return old;
+}
+
+/* Console calibration knob (`revscale`): scales depth -> wet mapping. */
+void PsyX_SPUAL_SetReverbDepthScale(float scale)
+{
+	SDL_LockMutex(g_SpuMutex);
+	g_SpuReverbDepthScale = scale;
+	ApplyReverbWet();
+	SDL_UnlockMutex(g_SpuMutex);
+}
+
+float PsyX_SPUAL_GetReverbDepthScale(void)
+{
+	return g_SpuReverbDepthScale;
 }
 
 u_int PsyX_SPUAL_SetReverbVoice(int on_off, u_int voice_bit)
