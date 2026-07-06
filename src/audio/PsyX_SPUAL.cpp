@@ -741,6 +741,14 @@ static int EnvelopeAdvance(SPUALVoice* voice, int samples)
 			break;
 		case ENV_SUSTAIN:
 			// holds until key-off; a decreasing sustain naturally rings out
+			if (!increase && voice->envLevel <= 0)
+			{
+				// Fully rung out: free the voice. Left in SUSTAIN at level 0 it
+				// reads keyed-on forever, so libsd's free-voice scan sees a
+				// silent-but-busy channel — each re-strike of the same sample
+				// (grandfather clock) would pin a fresh voice until all 24 drain.
+				voice->envPhase = ENV_OFF;
+			}
 			break;
 		case ENV_RELEASE:
 			if (voice->envLevel <= 0)
@@ -996,6 +1004,31 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 		{
 			alSourceStop(alSource);
 			UpdateVoiceSample(voice);
+
+			// Anti-stacking: PSX hardware freed a re-struck looping sample via
+			// its ADSR release; without an engaged envelope, a re-trigger of
+			// the same looping VAG (e.g. each grandfather-clock strike) leaves
+			// the previous instance ringing at full static gain on another
+			// voice — instances pile up toward all 24 voices and swell into an
+			// endless crescendo. When a new looping instance keys on, silence
+			// any OTHER non-enveloped voice still looping the same sample
+			// address; enveloped instances are already ringing out on their
+			// own and may overlap naturally.
+			if (voice->looping)
+			{
+				for (int j = 0; j < s_spuVoiceCount; j++)
+				{
+					SPUALVoice* other = &g_SpuVoices[j];
+					if (other == voice || !other->looping || other->alSource == AL_NONE)
+						continue;
+					if (other->attr.addr != voice->attr.addr)
+						continue;
+					if (other->hasEnvelope && other->envPhase != ENV_OFF)
+						continue;
+					alSourceStop(other->alSource);
+					other->looping = 0;
+				}
+			}
 
 			// Engage the ADSR envelope only for looping voices that programmed
 			// a real envelope — those are the ones that otherwise ring forever
