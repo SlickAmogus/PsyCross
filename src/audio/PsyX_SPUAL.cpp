@@ -115,18 +115,20 @@ typedef struct
 	ushort sampledirty;
 	ushort reverb;
 
-	// PSX SPU ADSR envelope (PC port). Only engaged for looping voices that
-	// programmed a real ADSR (adsr1/adsr2 != 0); one-shot SFX/voices keep the
-	// plain static-gain path so this never alters the large body of working
-	// sounds. Hardware runs the envelope at 44100Hz on a 0..0x7FFF level and
-	// multiplies the sample by it; without it a looping sample (e.g. the
-	// clock bell) rings forever.
+	// PSX SPU ADSR envelope (PC port). Engaged for EVERY keyed voice that
+	// programmed a real ADSR (adsr1/adsr2 != 0), looping or not — the SPU
+	// hardware doesn't distinguish. One-shot melodic voices (bells, chimes)
+	// need the release ring-out and the decay/sustain shaping just as much
+	// as loops; gating on looping made every sequencer note-off a hard cut.
+	// Hardware runs the envelope at 44100Hz on a 0..0x7FFF level and
+	// multiplies the sample by it.
 	int      envPhase;     // EnvPhase
 	int      envLevel;     // 0..0x7FFF
 	int      envCounter;   // accumulated 44100Hz samples toward next step
 	float    baseGain;     // volume-derived gain before envelope
-	ushort   hasEnvelope;  // adsr programmed + looping
+	ushort   hasEnvelope;  // adsr programmed
 	ushort   looping;      // AL_LOOPING was set for the current sample
+	u_int    relStartMs;   // SDL tick at key-off; caps pathological release tails
 } SPUALVoice;
 
 const int s_spuVoiceCount = 24;
@@ -814,10 +816,36 @@ void PsyX_SPUAL_Update()
 		if (alSource == AL_NONE)
 			continue;
 
+		// A non-looping voice whose buffer ran out (never keyed off) must not
+		// stay in SUSTAIN forever — the phase-based key status would read it
+		// busy for good and starve the voice allocator. Real SPU hardware
+		// forces the envelope to zero at sample end (END+MUTE); mirror it.
+		{
+			ALint state = AL_STOPPED;
+			alGetSourcei(alSource, AL_SOURCE_STATE, &state);
+			if (state != AL_PLAYING && state != AL_PAUSED)
+			{
+				voice->envLevel    = 0;
+				voice->envPhase    = ENV_OFF;
+				voice->hasEnvelope = 0;
+				continue;
+			}
+		}
+
 		int level = EnvelopeAdvance(voice, samples);
 		float env = (float)level / (float)ADSR_MAX;
 
 		alSourcef(alSource, AL_GAIN, voice->baseGain * env);
+
+		// Since key-off keeps AL_LOOPING (the SPU loops the sustain block
+		// through release), a near-infinite programmed release would ring a
+		// looped source forever. Nothing musical needs more than a few
+		// seconds; cap the tail.
+		if (voice->envPhase == ENV_RELEASE && (now - voice->relStartMs) > 10000)
+		{
+			voice->envLevel = 0;
+			voice->envPhase = ENV_OFF;
+		}
 
 		if (voice->envPhase == ENV_OFF)
 		{
@@ -1027,15 +1055,22 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 			alSourceStop(alSource);
 			UpdateVoiceSample(voice);
 
-			// Engage the ADSR envelope only for looping voices that programmed
-			// a real envelope — those are the ones that otherwise ring forever
-			// (e.g. the clock bell). One-shot SFX/voices end on their own and
-			// keep the plain static-gain path untouched.
-			if (g_SpuAdsrEnabled && voice->looping && (voice->attr.adsr1 || voice->attr.adsr2))
+			// Engage the ADSR envelope for ANY voice that programmed one —
+			// the SPU applies it regardless of the sample's loop flag. Gating
+			// on looping voices made every one-shot sequencer note (bells,
+			// chimes, most melodic instruments) stop dead at key-off instead
+			// of ringing out through release, and skipped their decay/sustain
+			// shaping ("sudden stops", chimes cutting abruptly vs PSX).
+			if (g_SpuAdsrEnabled && (voice->attr.adsr1 || voice->attr.adsr2))
 			{
 				voice->hasEnvelope = 1;
 				EnvelopeKeyOn(voice);
-				alSourcef(alSource, AL_GAIN, 0.0f); // attack ramps from silence
+				// Pre-charge ~2ms of envelope (the tick thread's worst-case
+				// latency) so instant attacks (rate 0, MAX within 3 samples)
+				// keep their transient punch — a gunshot must not start
+				// silent. Slow ramps lose only an inaudible 2ms of curve.
+				int lvl = EnvelopeAdvance(voice, 44100 / 500);
+				alSourcef(alSource, AL_GAIN, voice->baseGain * ((float)lvl / (float)ADSR_MAX));
 			}
 			else
 			{
@@ -1047,29 +1082,27 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 		}
 		else
 		{
-			// Key-off means "stop sustaining the loop." Clear AL_LOOPING so a
-			// Repeat=1 sample can't keep repeating forever — without this, a
-			// one-shot SFX whose VAG carries a sustain-tail loop (e.g. a cutscene
-			// grunt/boss sound) loops endlessly because the release path below
-			// only ramps gain while the buffer keeps looping under it. With it,
-			// the voice plays out its current buffer once and stops; the release
-			// envelope still fades it naturally. Genuine ambient loops are also
-			// keyed off intentionally by the game, so stopping them here is right.
-			if (voice->looping)
-			{
-				alSourcei(alSource, AL_LOOPING, AL_FALSE);
-				voice->looping = 0;
-			}
-
 			if (g_SpuAdsrEnabled && voice->hasEnvelope && voice->envPhase != ENV_OFF)
 			{
-				// Let the release phase ring out; the tick stops the source
-				// once the envelope reaches zero (or the buffer ends, now that
-				// looping is off).
+				// Enter the release phase and let it ring out; the tick stops
+				// the source once the envelope reaches zero. AL_LOOPING is
+				// deliberately KEPT: the SPU keeps looping a sample's sustain
+				// block while release fades it — clearing it here ended
+				// looped-sustain instruments at their loop-block boundary,
+				// mid-release (the sewer "moaning" that never faded out).
+				// Pathological tails are capped by the tick via relStartMs.
 				EnvelopeKeyOff(voice);
+				voice->relStartMs = SDL_GetTicks();
 			}
 			else
 			{
+				// No envelope: PSX-less hard stop, and clear AL_LOOPING so a
+				// Repeat=1 sample can't keep repeating under a stopped voice.
+				if (voice->looping)
+				{
+					alSourcei(alSource, AL_LOOPING, AL_FALSE);
+					voice->looping = 0;
+				}
 				alSourceStop(alSource);
 			}
 		}
