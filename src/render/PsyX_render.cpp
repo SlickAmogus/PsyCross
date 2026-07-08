@@ -237,6 +237,12 @@ int   g_PsyX_FlashlightActive   = 0;
  * live-gameplay-only effect, so gate the whole effect on this. */
 int   g_PsyX_ShadowsAllowed     = 0;
 float g_PsyX_FlashlightPos[3]   = { 0.0f, 0.0f, 0.0f };
+/* View-space PHYSICAL flashlight position for the shadow map (Harry's chest/hand
+ * light bone). Equals g_PsyX_FlashlightPos in third person, but in FPS the cone
+ * is pinned at the eye while THIS stays at the real light — a shadow is a
+ * world-space fact of light+occluder, so using the true light position makes FPS
+ * shadows land exactly where the third-person camera shows them. */
+float g_PsyX_FlashlightShadowPos[3] = { 0.0f, 0.0f, 0.0f };
 float g_PsyX_FlashlightDir[3]   = { 0.0f, 0.0f, 1.0f };
 float g_PsyX_FlashlightColor[3] = { 1.0f, 0.95f, 0.85f };  /* warm white; per-fragment N.L + screen-blend keep facing/near surfaces a bright hotspot while angled/far surfaces fall off naturally */
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
@@ -266,8 +272,10 @@ int   g_PsyX_FlashlightFpsMode      = 0;
  * throw their shadow forward onto the wall/floor; the cone still originates at
  * the eye. (Earlier this dropped straight DOWN, which sat the light below
  * waist-high props and threw their silhouette up out of the object's top.) TPS
- * is unaffected (FpsMode 0). Tunable via `shadowfpsdrop`. */
-float g_PsyX_FlashlightShadowFpsDrop = 250.0f;
+ * is unaffected (FpsMode 0). Tunable via `shadowfpsdrop`. Default 0: the shadow
+ * now originates at the real chest/hand light (g_PsyX_FlashlightShadowPos), so no
+ * artificial offset is needed; this is just an optional extra-parallax nudge. */
+float g_PsyX_FlashlightShadowFpsDrop = 0.0f;
 float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
 float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
 
@@ -2829,18 +2837,19 @@ static void GR_BuildShadowMatrix(void)
 	g_shadowZNear = zn;
 	g_shadowZFar  = zf;
 
-	float eye[3] = { g_PsyX_FlashlightPos[0], g_PsyX_FlashlightPos[1], g_PsyX_FlashlightPos[2] };
+	/* FPS pins the CONE at the eye (so the beam follows the view), but the shadow
+	 * must originate at the REAL light (chest/hand) — else the depth map is the
+	 * camera's own view and the shadow either vanishes or floats beside the object.
+	 * g_PsyX_FlashlightShadowPos carries that true light position (== FlashlightPos
+	 * in TPS). */
+	const float* srcPos = g_PsyX_FlashlightFpsMode ? g_PsyX_FlashlightShadowPos : g_PsyX_FlashlightPos;
+	float eye[3] = { srcPos[0], srcPos[1], srcPos[2] };
 	float dir[3] = { g_PsyX_FlashlightDir[0], g_PsyX_FlashlightDir[1], g_PsyX_FlashlightDir[2] };
 	sh_normalize3(dir);
-	/* FPS: the game pins the flashlight at the eye, so the shadow light would sit
-	 * ON the camera (depth map == camera depth, nothing reads shadowed). Pull it
-	 * BACK along -viewDir (behind the camera) to restore parallax. This is
-	 * deliberately backward, not straight down: the eye rides above the waist-high
-	 * props, so a light behind-and-above them throws their shadow FORWARD onto the
-	 * far wall/floor. The old straight-down drop put the light BELOW those props,
-	 * projecting their silhouette steeply upward out of the top of the object
-	 * instead of onto the surface behind them. */
-	if (g_PsyX_FlashlightFpsMode)
+	/* Optional fine-tune: nudge the shadow light back along -viewDir. Default 0
+	 * (pure physical light position); `shadowfpsdrop` lets the user dial extra
+	 * parallax if a scene wants it. */
+	if (g_PsyX_FlashlightFpsMode && g_PsyX_FlashlightShadowFpsDrop != 0.0f)
 	{
 		eye[0] -= dir[0] * g_PsyX_FlashlightShadowFpsDrop;
 		eye[1] -= dir[1] * g_PsyX_FlashlightShadowFpsDrop;

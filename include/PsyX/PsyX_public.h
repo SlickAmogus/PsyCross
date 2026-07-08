@@ -117,6 +117,7 @@ extern int							g_PsyX_NoShadowCast;
  * until the game pushes a valid light for the frame. */
 extern int							g_PsyX_FlashlightActive;     /* 1 = push light this frame */
 extern float						g_PsyX_FlashlightPos[3];     /* view-space xyz */
+extern float						g_PsyX_FlashlightShadowPos[3]; /* view-space physical light pos for the shadow map (chest/hand); == FlashlightPos in TPS */
 extern float						g_PsyX_FlashlightDir[3];     /* view-space unit dir the cone points along */
 extern float						g_PsyX_FlashlightColor[3];   /* additive RGB at full strength */
 extern float						g_PsyX_FlashlightInnerCos;   /* cos(inner half-angle) */
