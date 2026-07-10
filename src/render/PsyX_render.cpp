@@ -1098,10 +1098,11 @@ int g_PsxFogToBlack = 0;
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
 	"				fragColor.rgb *= 0.49;\n"\
-	"				vec3 L = u_flLightPos - flP;\n"\
+	"				vec3 flDir = normalize(u_flDir);\n"\
+	"				vec3 L = (u_flLightPos - flDir * 39.0) - flP;\n"\
 	"				float d = length(L);\n"\
 	"				L /= max(d, 0.0001);\n"\
-	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, normalize(u_flDir)));\n"\
+	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, flDir));\n"\
 	"				cone = cone * (2.0 - cone);\n"\
 	/* Center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
 	"				float attenD = d * 2.0;\n"\
