@@ -1104,7 +1104,7 @@ int g_PsxFogToBlack = 0;
 	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, normalize(u_flDir)));\n"\
 	"				cone = cone * (2.0 - cone);\n"\
 	/* Center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
-	"				float attenD = d * 1.25;\n"\
+	"				float attenD = d * 2.0;\n"\
 	"				float invD = 1.0 / max(attenD, 1.0);\n"\
 	"				float atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
 	"				atten += min(48.0, 32768.0 * invD);\n"\
