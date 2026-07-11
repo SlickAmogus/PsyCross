@@ -1655,14 +1655,7 @@ void DrawAllSplits()
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
-			/* Per-triangle caster filtering (PR#8) is classic-style only;
-			 * Modern keeps the per-vertex depth-shader rejection it shipped
-			 * with. */
-			extern int g_PsyX_FlashlightStyle;
-			if (g_PsyX_FlashlightStyle)
-				DrawShadowCasters(s);
-			else
-				GR_ShadowPassDraw(s.startVertex, s.numVerts);
+			DrawShadowCasters(s);
 		}
 		GR_ShadowPassEnd();
 	}

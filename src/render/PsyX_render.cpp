@@ -1140,8 +1140,8 @@ int g_PsxFogToBlack = 0;
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
-	/* Perspective-correct receiver (PR#8) is classic-style only; Modern keeps the plain v_viewpos receiver it always had. */\
-	"					vec3 flShadowP = (u_flStyle > 0) ? (v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9)) : flP;\n"\
+	/* Perspective-correct shadow receiver (PR#8): correctness for BOTH styles -- same shadow shapes, just stable under motion. */\
+	"					vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
 	"					vec3 flPs = flShadowP + L * (u_shadowNormalOffset * d);\n"\
 	"					vec4 lp = u_shadowMatrix * vec4(flPs, 1.0);\n"\
 	"					if (lp.w > 0.0) {\n"\
