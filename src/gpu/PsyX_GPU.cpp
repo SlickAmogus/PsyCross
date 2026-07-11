@@ -1571,6 +1571,37 @@ void DrawSplit(const GPUDrawSplit& split)
 
 extern int g_dbg_polygonSelected;
 
+static bool ShadowTriangleCanCast(const GrVertex* vertex)
+{
+	for (int i = 0; i < 3; i++)
+	{
+		if (vertex[i].ny < 0.5f || vertex[i].nx > 0.5f || !(vertex[i].vsz > 0.0f))
+			return false;
+	}
+	return true;
+}
+
+static void DrawShadowCasters(const GPUDrawSplit& split)
+{
+	int runStart = -1;
+	for (int offset = 0; offset + 2 < split.numVerts; offset += 3)
+	{
+		if (ShadowTriangleCanCast(&g_vertexBuffer[split.startVertex + offset]))
+		{
+			if (runStart < 0)
+				runStart = offset;
+		}
+		else if (runStart >= 0)
+		{
+			GR_ShadowPassDraw(split.startVertex + runStart, offset - runStart);
+			runStart = -1;
+		}
+	}
+
+	if (runStart >= 0)
+		GR_ShadowPassDraw(split.startVertex + runStart, split.numVerts - runStart);
+}
+
 //
 // Draws all polygons after AggregatePTAG
 //
@@ -1611,8 +1642,9 @@ void DrawAllSplits()
 	 * don't throw hard shadows: additive/subtractive (fire, blood) AND the 50/50
 	 * BM_AVERAGE the PC muzzle flash uses (a quad at the muzzle, right next to the
 	 * close flashlight, was flashing a huge gun/magazine silhouette on the wall
-	 * for the frame or two it existed). Untracked 2D/UI verts self-cull in the
-	 * depth shader (vsz<=0). */
+	 * for the frame or two it existed). Caster eligibility is checked per
+	 * triangle so an invalid or suppressed vertex cannot stretch the remaining
+	 * vertices into a false shadow. */
 	if (GR_FlashlightShadowActive())
 	{
 		GR_ShadowPassBegin();
@@ -1623,7 +1655,7 @@ void DrawAllSplits()
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
-			GR_ShadowPassDraw(s.startVertex, s.numVerts);
+			DrawShadowCasters(s);
 		}
 		GR_ShadowPassEnd();
 	}

@@ -1059,6 +1059,13 @@ int g_PsxFogToBlack = 0;
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
+	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
+	 * perspective-correct there. Encode receiver position over view Z, adjusted
+	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
+	 * shader. This also stays coherent for mixed PGXP/fallback triangles. */\
+	"		float shadowInvZ = (a_viewpos.z > 0.0) ? (1.0 / a_viewpos.z) : 0.0;\n"\
+	"		float shadowClipW = (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) ? a_pgxp.z : 1.0;\n"\
+	"		v_shadowViewPos = vec4(a_viewpos * shadowInvZ, shadowInvZ) * shadowClipW;\n"\
 	"	}\n"
 
 /* Fog + per-pixel flashlight + shadow uniforms shared by every shader that
@@ -1133,7 +1140,8 @@ int g_PsxFogToBlack = 0;
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
-	"					vec3 flPs = flP + L * (u_shadowNormalOffset * d);\n"\
+	"					vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
+	"					vec3 flPs = flShadowP + L * (u_shadowNormalOffset * d);\n"\
 	"					vec4 lp = u_shadowMatrix * vec4(flPs, 1.0);\n"\
 	"					if (lp.w > 0.0) {\n"\
 	"						vec3 luv = lp.xyz / lp.w * 0.5 + 0.5;\n"\
@@ -1214,6 +1222,7 @@ const char* gte_shader_4 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -1228,6 +1237,7 @@ const char* gte_shader_8 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -1242,6 +1252,7 @@ const char* gte_shader_16 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
@@ -1256,6 +1267,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
 	"#else\n"
