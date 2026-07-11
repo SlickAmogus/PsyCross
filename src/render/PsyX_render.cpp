@@ -196,6 +196,13 @@ int g_cfg_tonemap = 0;
  * per-vertex lighting. 0=off (per-vertex), 1=on. F4 toggles it in-game. */
 int g_PsyX_UsePerPixelFlashlight = 0;
 
+/* Per-pixel flashlight STYLE. 0 = MODERN: the stylized spotlight (per-fragment
+ * Lambert, hard dark surround, linear falloff, warm color — the pre-PR#7 look).
+ * 1 = CLASSIC: PSX-calibrated match of the original flashlight (PR#7 —
+ * orientation-independent overlay, func_80057658-derived falloff, room color).
+ * Pushed to the shader as u_flStyle; game/config key flashlight_style. */
+int g_PsyX_FlashlightStyle = 0;
+
 /* PC port: real flashlight shadow mapping. When on (and the per-pixel flashlight
  * is on + active), the frame's opaque geometry is rendered depth-only from the
  * flashlight's point of view into g_shadowDepthTex, and the cone fragment shader
@@ -745,6 +752,7 @@ typedef struct
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
 	GLint flashlightOnLoc;
+	GLint flStyleLoc;
 	GLint flLightPosLoc;
 	GLint flDirLoc;
 	GLint flColorLoc;
@@ -782,6 +790,7 @@ GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
 GLint u_flashlightOnLoc;
+GLint u_flStyleLoc;
 GLint u_flLightPosLoc;
 GLint u_flDirLoc;
 GLint u_flColorLoc;
@@ -1061,6 +1070,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform int u_fogToBlack;\n"\
 	"	uniform float u_fogStrength;\n"\
 	"	uniform int u_flashlightOn;\n"\
+	"	uniform int u_flStyle;\n"\
 	"	uniform vec3 u_flLightPos;\n"\
 	"	uniform vec3 u_flDir;\n"\
 	"	uniform vec3 u_flColor;\n"\
@@ -1089,24 +1099,37 @@ int g_PsxFogToBlack = 0;
 #define GPU_LIT_TAIL\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
-	/* The original flashlight overlay is orientation-independent; the cone and shadow receiver therefore do not use per-triangle face normals. */\
+	/* Two flashlight styles, chosen by the UNIFORM u_flStyle (uniform control flow, so derivative use inside the branch is well-defined). 1 = CLASSIC: PSX-calibrated orientation-independent overlay -- no face normals, func_80057658-derived falloff, eased wide cone, 0.49 base dim. 0 = MODERN: stylized spotlight -- per-fragment Lambert from a dFdx/dFdy-reconstructed face normal, linear falloff, hard 0.15 dark surround. */\
 	"		if (u_flashlightOn > 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
-	"				fragColor.rgb *= 0.49;\n"\
+	"				fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
 	"				vec3 flDir = normalize(u_flDir);\n"\
-	"				vec3 L = (u_flLightPos - flDir * 39.0) - flP;\n"\
+	"				vec3 flOrigin = (u_flStyle > 0) ? (u_flLightPos - flDir * 39.0) : u_flLightPos;\n"\
+	"				vec3 L = flOrigin - flP;\n"\
 	"				float d = length(L);\n"\
 	"				L /= max(d, 0.0001);\n"\
 	"				float cone  = smoothstep(u_flOuterCos, u_flInnerCos, dot(-L, flDir));\n"\
-	"				cone = cone * (2.0 - cone);\n"\
-	/* Center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
-	"				float attenD = d * 2.0;\n"\
-	"				float invD = 1.0 / max(attenD, 1.0);\n"\
-	"				float atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
-	"				atten += min(48.0, 32768.0 * invD);\n"\
-	"				atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
-	"				atten *= 1.0 - smoothstep(u_flRange * 0.9, u_flRange, attenD);\n"\
+	"				float ndl = 1.0;\n"\
+	"				float atten;\n"\
+	"				if (u_flStyle > 0) {\n"\
+	"					cone = cone * (2.0 - cone);\n"\
+	/* Classic center-beam distance envelope derived from SH1's func_80057658 at full Q12 flashlight strength: its GTE projection reduces to a capped 1/d term plus a thresholded 1/d^2 term, normalized by the room-light cap. */\
+	"					float attenD = d * 2.0;\n"\
+	"					float invD = 1.0 / max(attenD, 1.0);\n"\
+	"					atten = max(0.0, 134217728.0 * invD * invD - 16.0);\n"\
+	"					atten += min(48.0, 32768.0 * invD);\n"\
+	"					atten = clamp(atten / 255.0, 0.0, 1.0);\n"\
+	"					atten *= 1.0 - smoothstep(u_flRange * 0.9, u_flRange, attenD);\n"\
+	"				} else {\n"\
+	/* Modern: GrVertex carries no usable normals, so the face normal is reconstructed from the view-space position gradient -- exact per triangle face, no GTE-side capture needed. The N.L term gives surfaces 3D shape under the beam. */\
+	"					vec3 flN = cross(dFdx(flP), dFdy(flP));\n"\
+	"					float nlen = length(flN);\n"\
+	"					vec3 N = (nlen > 1e-9) ? flN / nlen : vec3(0.0, 0.0, -1.0);\n"\
+	"					if (dot(N, flP) > 0.0) N = -N;\n"\
+	"					ndl = 0.15 + 0.85 * max(dot(N, L), 0.0);\n"\
+	"					atten = clamp(1.0 - d / u_flRange, 0.0, 1.0);\n"\
+	"				}\n"\
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
 	"				if (u_shadowOn > 0) {\n"\
@@ -1151,7 +1174,7 @@ int g_PsxFogToBlack = 0;
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
-	"				vec3 fl = u_flColor * (cone * atten * shadow);\n"\
+	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
 	"				fragColor.rgb += flAlbedo * fl;\n"\
 	"			}\n"\
 	"		}\n"\
@@ -1484,6 +1507,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
+	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
 	sh->flLightPosLoc = glGetUniformLocation(sh->shader, "u_flLightPos");
 	sh->flDirLoc = glGetUniformLocation(sh->shader, "u_flDir");
 	sh->flColorLoc = glGetUniformLocation(sh->shader, "u_flColor");
@@ -1816,6 +1840,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
+		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_4.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_4.flDirLoc;
 		u_flColorLoc = g_gte_shader_4.flColorLoc;
@@ -1846,6 +1871,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
+		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_8.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_8.flDirLoc;
 		u_flColorLoc = g_gte_shader_8.flColorLoc;
@@ -1876,6 +1902,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
+		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_16.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_16.flDirLoc;
 		u_flColorLoc = g_gte_shader_16.flColorLoc;
@@ -1906,6 +1933,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
+		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_32_rgba.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_32_rgba.flDirLoc;
 		u_flColorLoc = g_gte_shader_32_rgba.flColorLoc;
@@ -1952,6 +1980,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	if (u_flashlightOnLoc != -1)
 		glUniform1i(u_flashlightOnLoc,
 		            (g_PsyX_UsePerPixelFlashlight && g_PsyX_FlashlightActive) ? 1 : 0);
+	if (u_flStyleLoc != -1)
+		glUniform1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
 	if (u_flLightPosLoc != -1)
 		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
 	if (u_flDirLoc != -1)
@@ -1971,8 +2001,11 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * area ~linearly (size 1.0 = base, 1.5 = ~1.5x). Inner stays the tighter
 	 * (higher-cos) angle; the 0.05 floor keeps the half-angle under 90 deg. */
 	{
+		/* Modern style keeps its pre-calibration ~35 deg base cone; the wider
+		 * 0.76 default belongs to the classic (PSX-matched) style. */
+		float baseOuterCos = g_PsyX_FlashlightStyle ? g_PsyX_FlashlightOuterCos : 0.82f;
 		float flInner = 1.0f - flSizeActive * (1.0f - g_PsyX_FlashlightInnerCos);
-		float flOuter = 1.0f - flSizeActive * (1.0f - g_PsyX_FlashlightOuterCos);
+		float flOuter = 1.0f - flSizeActive * (1.0f - baseOuterCos);
 		if (flInner < 0.05f) flInner = 0.05f;
 		if (flOuter < 0.05f) flOuter = 0.05f;
 		if (u_flInnerCosLoc != -1)
