@@ -26,6 +26,20 @@ extern int CFC2_S(int reg);
 /* performs cop2 opcode */
 extern int doCOP2(int op);
 
+/* Precise vertex/view-space shadow hooks. */
+extern int g_PsxUsePgxp;
+extern int g_PsyX_UsePerPixelFlashlight;
+extern void PGXP_StoreAddr(void* addr, int slot);
+extern void PGXP_MatrixSetRot(const void* matrix);
+extern void PGXP_MatrixSetTrans(const void* matrix);
+extern void PGXP_MatrixCaptureCurrent(void* matrix);
+extern void PGXP_MatrixInvalidateCurrent(void);
+extern void PGXP_MatrixInvalidateCurrentTranslation(void);
+extern void PGXP_MatrixLoadColumn(const void* column);
+extern void PGXP_MatrixStoreColumn(void* column);
+extern void PGXP_VectorLoad(const void* vector, int slot);
+extern void PGXP_VectorInvalidateCurrent(int slot);
+
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }
 #endif
@@ -43,17 +57,20 @@ extern int doCOP2(int op);
 // mtc2 0-1
 #define gte_ldv0( r0 )\
 	{	MTC2(*(uint*)((char*)(r0)+0), 0);\
-		MTC2(*(uint*)((char*)(r0)+4), 1);}
+		MTC2(*(uint*)((char*)(r0)+4), 1);\
+		PGXP_VectorLoad((const void*)(r0), 0);}
 
 // mtc2 2-3
 #define gte_ldv1( r0 )\
 	{	MTC2(*(uint*)((char*)(r0)+0), 2);\
-		MTC2(*(uint*)((char*)(r0)+4), 3);}
+		MTC2(*(uint*)((char*)(r0)+4), 3);\
+		PGXP_VectorLoad((const void*)(r0), 1);}
 
 // mtc2 4-5
 #define gte_ldv2( r0 )\
 	{	MTC2(*(uint*)((char*)(r0)+0), 4);\
-		MTC2(*(uint*)((char*)(r0)+4), 5);}
+		MTC2(*(uint*)((char*)(r0)+4), 5);\
+		PGXP_VectorLoad((const void*)(r0), 2);}
 
 // mtc2 0-5
 #define gte_ldv3( r0, r1, r2 ) \
@@ -62,11 +79,15 @@ extern int doCOP2(int op);
 		MTC2(*(uint*)((char*)(r1)+0), 2);\
 		MTC2(*(uint*)((char*)(r1)+4), 3);\
 		MTC2(*(uint*)((char*)(r2)+0), 4);\
-		MTC2(*(uint*)((char*)(r2)+4), 5);}
+		MTC2(*(uint*)((char*)(r2)+4), 5);\
+		PGXP_VectorLoad((const void*)(r0), 0);\
+		PGXP_VectorLoad((const void*)(r1), 1);\
+		PGXP_VectorLoad((const void*)(r2), 2);}
 
 // load mtc2 9,10,11
 #define gte_ldclmv( r0 ) \
-	{	MTC2(*(ushort*)((char*)(r0)), 9); \
+	{	PGXP_MatrixLoadColumn((const void*)(r0)); \
+		MTC2(*(ushort*)((char*)(r0)), 9); \
 		MTC2(*(ushort*)((char*)(r0)+6), 10); \
 		MTC2(*(ushort*)((char*)(r0)+12), 11);	}
 
@@ -200,7 +221,8 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+4), 1);\
 		CTC2(*(uint*)((char*)(r0)+8), 2);\
 		CTC2(*(uint*)((char*)(r0)+12), 3);\
-		CTC2(*(uint*)((char*)(r0)+16), 4);}
+		CTC2(*(uint*)((char*)(r0)+16), 4);\
+		PGXP_MatrixSetRot((const void*)(r0));}
 
 // load ctc2 5-7
 #define gte_SetTransVector( r0 )\
@@ -212,7 +234,8 @@ extern int doCOP2(int op);
 #define gte_SetTransMatrix( r0 ) \
 	{	CTC2(*(uint*)((char*)(r0)+20), 5);\
 		CTC2(*(uint*)((char*)(r0)+24), 6);\
-		CTC2(*(uint*)((char*)(r0)+28), 7);}
+		CTC2(*(uint*)((char*)(r0)+28), 7);\
+		PGXP_MatrixSetTrans((const void*)(r0));}
 
 // ctc2 8-12
 #define gte_SetLightMatrix( r0 )\
@@ -541,28 +564,43 @@ extern int doCOP2(int op);
 #define gte_stclmv( r0 ) \
 	{	*(ushort*)((char*)(r0)) = MFC2(9) & 0xFFFF; \
 		*(ushort*)((char*)(r0)+6) = MFC2(10) & 0xFFFF; \
-		*(ushort*)((char*)(r0)+12) = MFC2(11) & 0xFFFF;}
+		*(ushort*)((char*)(r0)+12) = MFC2(11) & 0xFFFF;\
+		PGXP_MatrixStoreColumn((void*)(r0));}
 
 // swc2 14
-#define gte_stsxy( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(14);}
+#define gte_stsxy( r0 ) do { \
+	uint* _p = (uint*)(r0); \
+	*_p = MFC2(14); \
+	if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) PGXP_StoreAddr(_p, 2); \
+} while (0)
 
 // mfc2 12-14
-#define gte_stsxy3( r0, r1, r2 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(12); \
-		*(uint*)((char*)(r1)) = MFC2(13); \
-		*(uint*)((char*)(r2)) = MFC2(14);}
+#define gte_stsxy3( r0, r1, r2 ) do { \
+	uint* _p0 = (uint*)(r0); \
+	uint* _p1 = (uint*)(r1); \
+	uint* _p2 = (uint*)(r2); \
+	*_p0 = MFC2(12); *_p1 = MFC2(13); *_p2 = MFC2(14); \
+	if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) { \
+		PGXP_StoreAddr(_p0, 0); PGXP_StoreAddr(_p1, 1); PGXP_StoreAddr(_p2, 2); \
+	} \
+} while (0)
 
 // swc2 14
 #define gte_stsxy2( r0 ) gte_stsxy(r0)
 
 // swc2 13
-#define gte_stsxy1( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(13);}
+#define gte_stsxy1( r0 ) do { \
+	uint* _p = (uint*)(r0); \
+	*_p = MFC2(13); \
+	if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) PGXP_StoreAddr(_p, 1); \
+} while (0)
 
 // swc2 12
-#define gte_stsxy0( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(12);}
+#define gte_stsxy0( r0 ) do { \
+	uint* _p = (uint*)(r0); \
+	*_p = MFC2(12); \
+	if (g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight) PGXP_StoreAddr(_p, 0); \
+} while (0)
 
 // swc2 8
 #define gte_stdp( r0 ) \
@@ -655,7 +693,8 @@ extern int doCOP2(int op);
 		*(uint*)((char*)(r0)+16) = CFC2(4);	\
 		*(uint*)((char*)(r0)+20) = CFC2(5);	\
 		*(uint*)((char*)(r0)+24) = CFC2(6);	\
-		*(uint*)((char*)(r0)+28) = CFC2(7);}
+		*(uint*)((char*)(r0)+28) = CFC2(7);\
+		PGXP_MatrixCaptureCurrent((void*)(r0));}
 
 // cfc2 16-23
 #define gte_ReadColorMatrix( r0 ) \

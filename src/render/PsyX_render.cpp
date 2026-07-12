@@ -101,6 +101,7 @@ float g_PsxWorldHScale = 1.0f;
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
+int g_PreviousDepthWrite = 1;
 int g_PreviousStencilMode = 0;
 int g_PreviousScissorState = 0;
 int g_PreviousOffscreenState = 0;
@@ -160,6 +161,7 @@ int g_cfg_pgxpZBuffer = 1;
  * else branch (2D-ortho path). Set from main_pc.c after PcConfig_Load runs
  * (config key: use_pgxp). */
 int g_PsxUsePgxp = 0;
+extern "C" float g_PgxpNearZ;
 int g_cfg_bilinearFiltering = 0;
 int g_cfg_affineTextures = 0;
 /* When non-zero, the GPU_DITHERING macro applies the 4x4 PSX-style ordered
@@ -625,6 +627,7 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
 #if USE_OPENGL
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
 
 	/* PC port: request MSAA on the default framebuffer when enabled. Must be
@@ -643,6 +646,9 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 		eprinterr("Failed to Initialise GL Context!\n");
 		return 0;
 	}
+	int actualDepthBits = 0;
+	if (SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &actualDepthBits) == 0 && actualDepthBits < 16)
+		eprinterr("Default framebuffer depth buffer is only %d bits; world Z precision will be limited\n", actualDepthBits);
 #endif
 
 	if (!GR_InitialiseGLExt())
@@ -684,19 +690,49 @@ void GR_UpdateSwapIntervalState(int swapInterval)
 #endif
 }
 
+static void GR_ClearDrawBuffersInternal(int clearDepth, int clearStencil)
+{
+#if USE_OPENGL
+	/* glClear obeys the scissor test. Ordering tables frequently leave a
+	 * narrow clip active, so force a full-buffer clear and keep the cached
+	 * state honest for the next primitive. */
+	glDisable(GL_SCISSOR_TEST);
+	g_PreviousScissorState = 0;
+
+	GLbitfield clearMask = clearStencil ? GL_STENCIL_BUFFER_BIT : 0;
+	if (clearDepth)
+	{
+		glDepthMask(GL_TRUE);
+		/* Force GR_SetDepthState to apply the first primitive's requested
+		 * write state even if the previous frame happened to cache the same
+		 * value as the state from before this clear. */
+		g_PreviousDepthWrite = -1;
+#ifdef RENDERER_OGLES
+		glClearDepthf(1.0f);
+#else
+		glClearDepth(1.0f);
+#endif
+		clearMask |= GL_DEPTH_BUFFER_BIT;
+	}
+
+	if (clearMask)
+		glClear(clearMask);
+#else
+	(void)clearDepth;
+	(void)clearStencil;
+#endif
+}
+
+extern "C" void PsyX_ClearDrawBuffers(int clearDepth)
+{
+	GR_ClearDrawBuffersInternal(clearDepth != 0, 1);
+}
+
 void GR_BeginScene()
 {
 	g_lastBoundTexture = 0;
 
-#if USE_OPENGL
-#ifdef RENDERER_OGLES
-	glClearDepthf(1.0f);
-#else
-	glClearDepth(1.0f);
-#endif
-	glClear(GL_DEPTH_BUFFER_BIT);
-	glClear(GL_STENCIL_BUFFER_BIT);
-#endif
+	PsyX_ClearDrawBuffers(1);
 
 	GR_UpdateVRAM();
 	GR_SetViewPort(0, 0, g_windowWidth, g_windowHeight);
@@ -751,6 +787,7 @@ typedef struct
 	GLint fogStrengthLoc;
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
+	GLint depthNearLoc;
 	GLint flashlightOnLoc;
 	GLint flStyleLoc;
 	GLint flLightPosLoc;
@@ -789,6 +826,7 @@ GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
+GLint u_depthNearLoc;
 GLint u_flashlightOnLoc;
 GLint u_flStyleLoc;
 GLint u_flLightPosLoc;
@@ -1002,38 +1040,44 @@ int g_PsxFogToBlack = 0;
 		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #endif
 
-/* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
- * build the SAME ortho clip position from the precise float screen X/Y, then
- * scale xyzw by W so the GPU's perspective divide returns the identical NDC
- * position but interpolates varyings (UV/colour) perspective-correctly. Depth
- * (a_zw.x) is left as the FLAT per-prim affine value so Z-ordering matches the
- * painter/submission model this renderer relies on — true per-vertex depth was
- * tried 3x (v1 67a852f / v2 f60aab4 / v3 99e5b18) and ALWAYS dropped/warped
- * coplanar triangles, because depth here is one flat value per prim and ties
- * resolve by OT order; a per-vertex subset is incompatible. Z-fight relief now
- * comes purely from un-quantising that flat depth (PsyX_SetNextPrimSz) when
- * PGXP is on. The else-branch is byte-identical to the legacy affine path. */
+/* PGXP projection and world depth. Homogeneous W keeps precise XY unchanged
+ * after division while correcting varyings. Positive a_depth uses standard
+ * reciprocal perspective depth, which is plane-consistent across diagonals;
+ * tracked 3D fallback primitives convert their flat OT bucket into the same
+ * curve, while 2D retains the legacy ortho value with depth testing disabled. */
 #define GTE_PERSPECTIVE_CORRECTION \
+		"	vec4 b;\n"\
+		"	float clipW = 1.0;\n"\
 		"	if (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) {\n"\
-		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
-		"		float W = a_pgxp.z;\n"\
-		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
+		"		b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
+		"		clipW = a_pgxp.z;\n"\
 		"	} else {\n"\
-		"		gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
-		"	}\n"
+		"		b = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
+		"	}\n"\
+		"	float depthZ = a_depth;\n"\
+		"	if (depthZ <= 0.0 && a_extra.w > 0.5)\n"\
+		"		depthZ = max(u_depthNear, (1.0 - clamp(a_zw.x, -1.0, 1.0)) * 0.5 * u_szMax);\n"\
+		"	if (depthZ > 0.0 && u_szMax > u_depthNear) {\n"\
+		"		float viewZ = max(depthZ, u_depthNear);\n"\
+		"		float depth01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / viewZ);\n"\
+		"		b.z = clamp(depth01, 0.0, 1.0) * 2.0 - 1.0;\n"\
+		"	}\n"\
+		"	gl_Position = vec4(b.xyz * clipW, b.w * clipW);\n"
 
 #define GTE_VERTEX_SHADER \
 	"	attribute vec4 a_position;\n"\
 	"	attribute vec4 a_texcoord; // uv, color multiplier, dither\n"\
 	"	attribute vec4 a_color;\n"\
-	"	attribute vec4 a_extra; // texcoord.xy ofs, unused.xy\n"\
+	"	attribute vec4 a_extra; // texcoord.xy ofs, fog, explicit 3D marker\n"\
 	"	attribute vec4 a_zw;\n"\
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
+	"	attribute float a_depth;\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform float u_szMax;\n"\
+	"	uniform float u_depthNear;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -1047,15 +1091,11 @@ int g_PsxFogToBlack = 0;
 	"		v_page_clut.xy += c_UVFudge;\n"\
 	"		v_page_clut.zw += c_UVFudge;\n"\
 	GTE_PERSPECTIVE_CORRECTION\
-	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp.
-	 * The `a_zw.y > 100` test only distinguishes 3D from 2D when the
-	 * runtime PGXP master gate is on (then a_zw.y is the screen
-	 * height ~240 for 3D content, 0 for 2D). With PGXP off at
-	 * runtime, ApplyVertexPGXP zeroes a_zw for everything → without
-	 * the u_pgxpEnabled override every prim would read v_is3d=0 and
-	 * we'd lose dither / bilinear on real 3D geometry too (visibly
-	 * blocky tree leaves, etc.). When pgxp off, fall back to legacy
-	 * "always treat as 3D" behavior — matches legacy behavior. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_pgxp.z > 0.0) ? 1.0 : 0.0) : 1.0;\n"\
+	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp. The packed
+	 * a_extra.w marker is set once for the whole scene primitive and deliberately
+	 * survives a PGXP affine fallback; deriving this from a_pgxp.z made one cache
+	 * miss change both interpolation and sampling. PGXP-off keeps the legacy
+	 * "always 3D" behavior. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_extra.w > 0.5) ? 1.0 : 0.0) : 1.0;\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
@@ -1456,6 +1496,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_extra, "a_extra");
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
+	glBindAttribLocation(program, a_depth, "a_depth");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -1528,6 +1569,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
+	sh->depthNearLoc = glGetUniformLocation(sh->shader, "u_depthNear");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
 	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
 	sh->flLightPosLoc = glGetUniformLocation(sh->shader, "u_flLightPos");
@@ -1861,6 +1903,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_4.depthNearLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_4.flLightPosLoc;
@@ -1892,6 +1935,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_8.depthNearLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_8.flLightPosLoc;
@@ -1923,6 +1967,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_16.depthNearLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_16.flLightPosLoc;
@@ -1954,6 +1999,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_32_rgba.depthNearLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_32_rgba.flLightPosLoc;
@@ -1974,7 +2020,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	}
 
 	/* Push u_pgxpEnabled every shader bind so vertex shader's v_is3d
-	 * fallback ((u_pgxpEnabled > 0) ? a_zw.y test : 1.0) correctly
+	 * fallback ((u_pgxpEnabled > 0) ? explicit marker : 1.0) correctly
 	 * drops the 3D-only gate when PGXP is off at runtime. Without
 	 * this fallback, every prim got a_zw.y=0 → v_is3d=0 → no dither
 	 * and forced-nearest sampling on actual 3D geometry (visible as
@@ -1982,10 +2028,14 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	if (u_pgxpEnabledLoc != -1)
 		glUniform1i(u_pgxpEnabledLoc, g_PsxUsePgxp);
 
-	/* PGXP depth normalize: prev-frame max SZ. Lets the vertex shader turn each
-	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
+	/* Frame-wide guarded near/far range for reciprocal world depth. */
 	if (u_szMaxLoc != -1)
 		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
+	if (u_depthNearLoc != -1) {
+		const float nearZ = (g_PgxpNearZ >= 1.0f && g_PgxpNearZ == g_PgxpNearZ)
+			? g_PgxpNearZ : 1.0f;
+		glUniform1f(u_depthNearLoc, nearZ);
+	}
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
@@ -2320,14 +2370,15 @@ void GR_ReadFramebufferDataToVRAM()
 
 void GR_SetScissorState(int enable)
 {
+	enable = enable ? 1 : 0;
 	if (g_PreviousScissorState == enable)
 		return;
 
 #if USE_OPENGL
-	if (g_PreviousScissorState)
-		glDisable(GL_SCISSOR_TEST);
-	else
+	if (enable)
 		glEnable(GL_SCISSOR_TEST);
+	else
+		glDisable(GL_SCISSOR_TEST);
 #endif
 	g_PreviousScissorState = enable;
 }
@@ -3035,6 +3086,7 @@ void GR_ShadowPassEnd(void)
 	g_lastBoundTexture     = (TextureID)-1;
 	g_PreviousBlendMode    = -999;
 	g_PreviousDepthMode    = -999;
+	g_PreviousDepthWrite   = -999;
 	g_PreviousStencilMode  = -999;
 	g_PreviousScissorState = -999;
 	glEnable(GL_STENCIL_TEST);
@@ -3393,31 +3445,40 @@ void GR_SwapWindow()
 	//glFinish();
 }
 
-/* PC port: force GL depth test ON for the inventory item pass (see
- * PsyX_ForceItemDepthBegin). When set, depth stays on even for the item's
- * semi-transparent faces (GR_SetBlendMode would otherwise GR_EnableDepth(0)),
- * so the model's own front faces occlude its back faces (radio antenna through
+/* PC port: force GL depth test+write ON for the inventory item pass (see
+ * PsyX_ForceItemDepthBegin). Semi-transparent item faces retain the historical
+ * forced-write exception, so front faces occlude back faces (radio antenna through
  * the body). Scoped by game code to GameState_InventoryScreen, where OT0 holds
  * the item alone — never the live world. */
 int g_PsyX_ForceItemDepth = 0;
 
-void GR_EnableDepth(int enable)
+void GR_SetDepthState(int testEnable, int writeEnable)
 {
-	/* Track the APPLIED GL state (not the requested `enable`) so toggling
-	 * g_PsyX_ForceItemDepth mid-frame re-applies on the next call. */
-	int applied = ((enable && g_cfg_pgxpZBuffer) || g_PsyX_ForceItemDepth) ? 1 : 0;
-
-	if (g_PreviousDepthMode == applied)
-		return;
-
-	g_PreviousDepthMode = applied;
+	/* Inventory keeps its historical force-test+write behavior. Everywhere else
+	 * the runtime z-buffer option gates both states; UI and transparent geometry
+	 * explicitly request writes off. */
+	const int appliedTest = ((testEnable && g_cfg_pgxpZBuffer) || g_PsyX_ForceItemDepth) ? 1 : 0;
+	const int appliedWrite = (((testEnable && writeEnable && g_cfg_pgxpZBuffer) ||
+	                           g_PsyX_ForceItemDepth)) ? 1 : 0;
 
 #if USE_OPENGL
-	if (applied)
-		glEnable(GL_DEPTH_TEST);
-	else
-		glDisable(GL_DEPTH_TEST);
+	if (g_PreviousDepthMode != appliedTest) {
+		g_PreviousDepthMode = appliedTest;
+		if (appliedTest)
+			glEnable(GL_DEPTH_TEST);
+		else
+			glDisable(GL_DEPTH_TEST);
+	}
+	if (g_PreviousDepthWrite != appliedWrite) {
+		g_PreviousDepthWrite = appliedWrite;
+		glDepthMask(appliedWrite ? GL_TRUE : GL_FALSE);
+	}
 #endif
+}
+
+void GR_EnableDepth(int enable)
+{
+	GR_SetDepthState(enable, enable);
 }
 
 /* Bracket the inventory item OT0 draw: clear depth so the item tests only
@@ -3429,8 +3490,7 @@ extern "C" void PsyX_ForceItemDepthBegin(void)
 #if USE_OPENGL
 	g_PsyX_ForceItemDepth = 1;
 	g_PreviousDepthMode = -1;   /* force next GR_EnableDepth to re-apply */
-	glDepthMask(GL_TRUE);
-	glClear(GL_DEPTH_BUFFER_BIT);
+	GR_ClearDrawBuffersInternal(1, 0);
 	glEnable(GL_DEPTH_TEST);
 #endif
 }
@@ -3440,6 +3500,8 @@ extern "C" void PsyX_ForceItemDepthEnd(void)
 #if USE_OPENGL
 	g_PsyX_ForceItemDepth = 0;
 	g_PreviousDepthMode = -1;   /* force the next prim's GR_EnableDepth to re-apply */
+	g_PreviousDepthWrite = 1;
+	glDepthMask(GL_TRUE);
 	glDisable(GL_DEPTH_TEST);
 #endif
 }
@@ -3488,7 +3550,6 @@ void GR_SetBlendMode(BlendMode blendMode)
 		}
 
 		g_PreviousBlendMode = blendMode;
-		GR_EnableDepth(1);
 		return;
 	}
 	else
@@ -3500,7 +3561,6 @@ void GR_SetBlendMode(BlendMode blendMode)
 		}
 
 		g_PreviousBlendMode = blendMode;
-		GR_EnableDepth(0);
 	}
 
 	glBlendEquationSeparate(blendMode == BM_SUBTRACT ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, GL_FUNC_ADD);
@@ -3572,6 +3632,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_normal);
 	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
 	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_depth, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->depth);
+	glEnableVertexAttribArray(a_depth);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;

@@ -236,6 +236,21 @@ extern void PGXP_StoreAddr(void* addr, int slot);
  * GPU resolves the prim-field address at draw. Replaces PsyX_SetNextPrimPgxp.
  * No-op when PGXP is off or src is untracked. */
 extern void Shadow_Copy(void* dst, const void* src);
+/* Like Shadow_Copy, but dst may contain an integer screen-space offset from src.
+ * Used by GTE-centred billboards/ribbons to retain sub-pixel motion without
+ * changing their intended screen-space shape. */
+extern void Shadow_CopyScreenOffset(void* dst, const void* src);
+/* Manual-projection equivalent: source is an integer VECTOR3-style
+ * {screenX, screenY, viewZ}, not a packed GTE SXY word. The Q12 variant first
+ * scales the exact center (lens-ghost placement), then preserves dst's integer
+ * offset from that scaled center. */
+extern void PGXP_StoreManualProjection(const void* projectedVector, float x, float y, float w);
+extern void PGXP_CopyManualProjectionScreenOffset(void* dst, const void* projectedVector);
+extern void PGXP_CopyManualProjectionScreenOffsetQ12(void* dst, const void* projectedVector,
+	int scaleXQ12, int scaleYQ12);
+/* Interpolate between two projected endpoints in screen space, preserving any
+ * extra integer offset already present in dst (Q12 alpha: 0..4096). */
+extern void Shadow_InterpolateScreenOffset(void* dst, const void* src0, const void* src1, int alphaQ12);
 #ifdef __cplusplus
 }
 #endif

@@ -90,6 +90,16 @@ static const ShadowEntry* Shadow_Get(const void* addr) {
 	return nullptr;
 }
 
+static void Shadow_Invalidate(const void* addr) {
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = ShadowHash(k);
+	for (int i = 0; i < 16; i++) {
+		ShadowEntry* e = &s_shadow[(s + i) & SHADOW_MASK];
+		if (e->key == k) { e->gen = 0; return; }
+		if (e->key == 0) return;
+	}
+}
+
 /* GTE store hook (DuckStation SWC2, done at source level): record the precise
  * projection of the word just written to `addr`. Called from the gte_stsxy*
  * macros via PGXP_StoreAddr, which reads the integer value back from addr. */
@@ -147,6 +157,16 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 	return nullptr;
 }
 
+static void Vs_Invalidate(const void* addr) {
+	uintptr_t k = (uintptr_t)addr;
+	unsigned s = ShadowHash(k);
+	for (int i = 0; i < 16; i++) {
+		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
+		if (e->key == k) { e->gen = 0; return; }
+		if (e->key == 0) return;
+	}
+}
+
 /* GTE store hook for the flashlight view-space FIFO (PsyX_GTE.cpp PGXP_StoreAddr,
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
@@ -163,26 +183,110 @@ extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz) {
 extern "C" void Shadow_Copy(void* dst, const void* src) {
 	if (g_PsxUsePgxp) {
 		const ShadowEntry* e = Shadow_Get(src);
-		if (e) Shadow_Put(dst, e->x, e->y, e->w, *(const unsigned*)dst);
+		if (e && e->value == *(const unsigned*)src)
+			Shadow_Put(dst, e->x, e->y, e->w, *(const unsigned*)dst);
+		else
+			Shadow_Invalidate(dst);
 	}
 	/* View-space propagates whenever PGXP is on too — the near-plane clipper
 	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
 	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
-		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst);
+		if (ve)
+			Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst);
+		else
+			Vs_Invalidate(dst);
 	}
 }
 
-/* Max |precise screen coord| (PSX units) PGXP will use before clamping the POSITION
- * for GPU guard-band safety (W is kept either way, so the vertex stays perspective).
- * Higher = less texture compression at the extreme screen edge (more visible in 16:9
- * Hor+), at the cost of larger off-screen NDC. Live-tunable via console `pgxpedge`. */
-extern "C" { float g_PgxpEdgeMax = 8192.0f; }
+/* Propagate a projected point into a screen-derived corner. World effects often
+ * project one center/end point with the GTE and then add an integer screen-space
+ * offset to build a billboard or ribbon. A plain Shadow_Copy would collapse all
+ * corners back onto the precise center; dropping the shadow keeps the original
+ * one-pixel wobble. Preserve the exact sub-pixel center plus the same integer
+ * delta the game applied. All corners sourced from one center retain one W, so
+ * their texture mapping remains affine exactly as intended.
+ *
+ * The screen offset has no unique camera-space position, so do not invent one:
+ * invalidate the view shadow. That keeps near clipping and the per-pixel
+ * flashlight on their conservative untracked path for these derived vertices. */
+extern "C" void Shadow_CopyScreenOffset(void* dst, const void* src) {
+	const unsigned dstValue = *(const unsigned*)dst;
+	const unsigned srcValue = *(const unsigned*)src;
 
-/* PGXP perspective-W precision. 1 (default) = use the unquantized GTE accumulator
- * (gte_shift(m_mac3,1)) for the shader's per-vertex W instead of the clamped 16-bit
- * SZ3 register; coincident edges then get a matching 1/W so seams stop widening with
- * distance. 0 = original quantized SZ3 (for A/B). Live-tunable via console `pgxpdepth`. */
+	if (g_PsxUsePgxp) {
+		const ShadowEntry* e = Shadow_Get(src);
+		if (e && e->value == srcValue) {
+			const int dstX = (short)(dstValue & 0xFFFFu);
+			const int dstY = (short)(dstValue >> 16);
+			const int srcX = (short)(srcValue & 0xFFFFu);
+			const int srcY = (short)(srcValue >> 16);
+			Shadow_Put(dst, e->x + (float)(dstX - srcX),
+			                e->y + (float)(dstY - srcY), e->w, dstValue);
+		} else {
+			Shadow_Invalidate(dst);
+		}
+	}
+
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+		Vs_Invalidate(dst);
+}
+
+/* Interpolate a screen-built vertex between two GTE-projected endpoints, then
+ * preserve any additional integer offset already applied to dst.  This covers
+ * ribbons and subdivided quads whose CPU path intentionally interpolates in
+ * screen space.  W is harmonic in screen space, matching perspective depth
+ * along the underlying 3D segment; using a linear W would bow its Z plane. */
+extern "C" void Shadow_InterpolateScreenOffset(void* dst, const void* src0,
+	const void* src1, int alphaQ12)
+{
+	const unsigned dstValue = *(const unsigned*)dst;
+	const unsigned srcValue0 = *(const unsigned*)src0;
+	const unsigned srcValue1 = *(const unsigned*)src1;
+
+	if (g_PsxUsePgxp) {
+		const ShadowEntry* e0 = Shadow_Get(src0);
+		const ShadowEntry* e1 = Shadow_Get(src1);
+		if (e0 && e1 && e0->value == srcValue0 && e1->value == srcValue1) {
+			const int x0 = (short)(srcValue0 & 0xFFFFu);
+			const int y0 = (short)(srcValue0 >> 16);
+			const int x1 = (short)(srcValue1 & 0xFFFFu);
+			const int y1 = (short)(srcValue1 >> 16);
+			const int dstX = (short)(dstValue & 0xFFFFu);
+			const int dstY = (short)(dstValue >> 16);
+			const int baseX = x0 + (int)(((long long)(x1 - x0) * alphaQ12) >> 12);
+			const int baseY = y0 + (int)(((long long)(y1 - y0) * alphaQ12) >> 12);
+			const double t = (double)alphaQ12 * (1.0 / 4096.0);
+			const double oneMinusT = 1.0 - t;
+			float w = 0.0f;
+			if (e0->w > 0.0f && e1->w > 0.0f) {
+				const double invW = oneMinusT / (double)e0->w + t / (double)e1->w;
+				if (invW > 0.0)
+					w = (float)(1.0 / invW);
+			}
+			Shadow_Put(dst,
+				(float)((double)e0->x * oneMinusT + (double)e1->x * t) + (float)(dstX - baseX),
+				(float)((double)e0->y * oneMinusT + (double)e1->y * t) + (float)(dstY - baseY),
+				w, dstValue);
+		} else {
+			Shadow_Invalidate(dst);
+		}
+	}
+
+	/* View-space interpolation is filled by the conservative fallback for now;
+	 * the precise screen/W tuple is sufficient for stable rasterization/depth. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+		Vs_Invalidate(dst);
+}
+
+/* Optional legacy screen-position clamp for A/B testing. Keeping W unchanged while
+ * clamping XY bends the homogeneous primitive, so coherent raw projection leaves it
+ * disabled and lets the GPU clip normally. */
+extern "C" { float g_PgxpEdgeMax = 0.0f; }
+
+/* PGXP perspective-W precision. 1 (default) = use raw Q12 RTPS view Z for the
+ * shader's per-vertex W instead of the clamped 16-bit SZ3 register; coincident
+ * edges then get a matching 1/W. 0 keeps original SZ3 for console A/B testing. */
 extern "C" { int g_PgxpUseUnquantizedDepth = 1; }
 
 /* PGXP near-plane clipping (docs/PGXP_NearClip_Design.md). A poly that straddles
@@ -197,6 +301,143 @@ extern "C" { int g_PsxPgxpNearClip = 1; }
 /* Clip plane view-space depth, GTE SZ units. Small enough to be an invisible cut
  * right at the eye, large enough that H/z and 1/W stay numerically tame. */
 extern "C" { float g_PgxpNearZ = 16.0f; }
+
+/* ---- Manually projected VECTOR3 side-channel -----------------------------
+ * A few Silent Hill effects reproduce RTPS in game code and leave their center
+ * as three separate 32-bit integers {screen X, screen Y, view Z}. They never
+ * pass through gte_stsxy, so the packed-SXY shadow above cannot see them.
+ *
+ * Keep a small generation-scoped table keyed by that VECTOR3 address. All
+ * three legacy integers validate an entry before it can seed a polygon field;
+ * reused stack/global storage therefore loses coverage safely instead of
+ * inheriting an old projection. Integer game state is never modified. */
+struct ManualProjectionEntry
+{
+	uintptr_t key;
+	unsigned gen;
+	int ix, iy, iz;
+	float x, y, w;
+};
+
+#define MANUAL_PROJECTION_BITS 8
+#define MANUAL_PROJECTION_SIZE (1u << MANUAL_PROJECTION_BITS)
+#define MANUAL_PROJECTION_MASK (MANUAL_PROJECTION_SIZE - 1u)
+static ManualProjectionEntry s_manualProjection[MANUAL_PROJECTION_SIZE];
+
+static inline void ReadManualProjectionKey(const void* projectedVector,
+	int* x, int* y, int* z)
+{
+	/* memcpy avoids imposing an alignment or aliasing contract on the public
+	 * void-pointer API while retaining the VECTOR3 three-int representation. */
+	int values[3];
+	memcpy(values, projectedVector, sizeof(values));
+	*x = values[0]; *y = values[1]; *z = values[2];
+}
+
+static const ManualProjectionEntry* ManualProjectionGet(const void* projectedVector)
+{
+	if (!projectedVector)
+		return nullptr;
+
+	const uintptr_t key = (uintptr_t)projectedVector;
+	const unsigned slot = ShadowHash(key);
+	for (int i = 0; i < 16; i++)
+	{
+		const ManualProjectionEntry* entry =
+			&s_manualProjection[(slot + (unsigned)i) & MANUAL_PROJECTION_MASK];
+		if (entry->key == key)
+		{
+			int x, y, z;
+			ReadManualProjectionKey(projectedVector, &x, &y, &z);
+			return entry->gen == s_pgxpGen && entry->ix == x &&
+			       entry->iy == y && entry->iz == z ? entry : nullptr;
+		}
+		if (entry->key == 0)
+			return nullptr;
+	}
+	return nullptr;
+}
+
+extern "C" void PGXP_StoreManualProjection(const void* projectedVector,
+	float x, float y, float w)
+{
+	if (!g_PsxUsePgxp || !projectedVector)
+		return;
+
+	int ix, iy, iz;
+	ReadManualProjectionKey(projectedVector, &ix, &iy, &iz);
+	const uintptr_t key = (uintptr_t)projectedVector;
+	const unsigned slot = ShadowHash(key);
+	for (int i = 0; i < 16; i++)
+	{
+		ManualProjectionEntry* entry =
+			&s_manualProjection[(slot + (unsigned)i) & MANUAL_PROJECTION_MASK];
+		if (entry->key == key || entry->key == 0 || entry->gen != s_pgxpGen)
+		{
+			entry->key = key; entry->gen = s_pgxpGen;
+			entry->ix = ix; entry->iy = iy; entry->iz = iz;
+			entry->x = x; entry->y = y; entry->w = w;
+			return;
+		}
+	}
+
+	ManualProjectionEntry* entry = &s_manualProjection[slot & MANUAL_PROJECTION_MASK];
+	entry->key = key; entry->gen = s_pgxpGen;
+	entry->ix = ix; entry->iy = iy; entry->iz = iz;
+	entry->x = x; entry->y = y; entry->w = w;
+}
+
+static void CopyManualProjectionScreenOffsetQ12(void* dst,
+	const void* projectedVector, int scaleXQ12, int scaleYQ12)
+{
+	if (!g_PsxUsePgxp || !dst)
+		return;
+
+	const unsigned dstValue = *(const unsigned*)dst;
+	const ManualProjectionEntry* entry = ManualProjectionGet(projectedVector);
+	const float nearZ = (g_PgxpNearZ >= 1.0f && isfinite(g_PgxpNearZ))
+		? g_PgxpNearZ : 1.0f;
+	if (entry && isfinite(entry->x) && isfinite(entry->y) &&
+	    isfinite(entry->w) && entry->w >= nearZ)
+	{
+		const int dstX = (short)(dstValue & 0xFFFFu);
+		const int dstY = (short)(dstValue >> 16);
+		/* Match Q12_MULT's arithmetic shift for the integer anchor. The exact
+		 * center itself keeps the discarded fraction before dst's intentional
+		 * pixel offset is applied. */
+		const int baseX = (int)(((long long)entry->ix * scaleXQ12) >> 12);
+		const int baseY = (int)(((long long)entry->iy * scaleYQ12) >> 12);
+		const float scaleX = (float)scaleXQ12 * (1.0f / 4096.0f);
+		const float scaleY = (float)scaleYQ12 * (1.0f / 4096.0f);
+		Shadow_Put(dst, entry->x * scaleX + (float)(dstX - baseX),
+		                entry->y * scaleY + (float)(dstY - baseY),
+		                entry->w, dstValue);
+	}
+	else
+	{
+		Shadow_Invalidate(dst);
+	}
+
+	/* These are intentional screen-space billboards/flare ghosts. A precise
+	 * XY/W tuple is well-defined, but assigning a fabricated camera-space point
+	 * would make the near clipper or flashlight shadow pass treat them as world
+	 * surfaces. The producer already clips the center to H/2, and the W guard
+	 * above rejects anything behind the configured PGXP near plane. */
+	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+		Vs_Invalidate(dst);
+}
+
+extern "C" void PGXP_CopyManualProjectionScreenOffset(void* dst,
+	const void* projectedVector)
+{
+	CopyManualProjectionScreenOffsetQ12(dst, projectedVector, 4096, 4096);
+}
+
+extern "C" void PGXP_CopyManualProjectionScreenOffsetQ12(void* dst,
+	const void* projectedVector, int scaleXQ12, int scaleYQ12)
+{
+	CopyManualProjectionScreenOffsetQ12(dst, projectedVector, scaleXQ12, scaleYQ12);
+}
 /* GTE projection registers captured at RTPS time (PsyX_GTE.cpp): OFX/OFY as float
  * pixels, H the projection distance. Per-frame constants in SH1. */
 extern "C" { float g_PgxpGteOfx = 0.0f, g_PgxpGteOfy = 0.0f, g_PgxpGteH = 1.0f; }
@@ -225,8 +466,12 @@ static inline bool GetPreciseVertex(const void* addr, unsigned value, int rawX, 
 		 * Only W=0 verts -- behind / at the near plane (no valid projection), set in
 		 * PsyX_GTE.cpp -- fall through to affine below. */
 		const float m = g_PgxpEdgeMax;
-		float px = e->x < -m ? -m : (e->x > m ? m : e->x);
-		float py = e->y < -m ? -m : (e->y > m ? m : e->y);
+		float px = e->x;
+		float py = e->y;
+		if (m > 0.0f) {
+			px = px < -m ? -m : (px > m ? m : px);
+			py = py < -m ? -m : (py > m ? m : py);
+		}
 		*ox = px + ofsX; *oy = py + ofsY; *ow = e->w; return true;
 	}
 	*ox = (float)rawX + ofsX; *oy = (float)rawY + ofsY; *ow = 0.0f; return false;
@@ -277,8 +522,12 @@ extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void
 /* Coverage instrumentation: precise (det) vs affine (miss) per 3D vertex, dumped
  * ~once a second when PGXP is on. Also bumps the frame generation. */
 static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0, s_pgxpClip = 0;
+static void PsyX_DepthMetadataEndFrame(void);
 extern "C" void PGXP_CoverageTick(void)
 {
+	/* Depth metadata is consumed by every OT drawn in this scene. Retire it only
+	 * at the real frame boundary, never in the pre-DrawOTag compatibility hook. */
+	PsyX_DepthMetadataEndFrame();
 	PGXP_BumpGen();
 	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = 0; return; }
 	if (++s_pgxpFrames >= 60)
@@ -424,22 +673,99 @@ static inline void VsFillVertex(GrVertex* v, const void* addr)
 	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f; }
 }
 
-/* True when the near clipper will take this poly: every vertex carries a
- * validated view-space entry (ny marker) and the poly straddles the near plane.
- * MakeVertexTriangle/Quad consult this to keep per-vertex precise data intact —
- * their whole-poly affine drop would otherwise destroy the in-front vertices'
- * projections before the clipper runs. Callers ensure g_PsxUsePgxp. */
+enum PgxpPrimitiveMarker
+{
+	PGXP_PRIM_2D             = 0,
+	PGXP_PRIM_3D_FLAT        = 1,
+	PGXP_PRIM_3D_EXACT_SZ    = 126,
+	PGXP_PRIM_3D_VIEW_DEPTH  = 127
+};
+
+/* Maximum coherent depth seen in the current frame. It intentionally survives
+ * ClearSplits so OT0 world depth and any later 3D OT use one normalization; the
+ * real frame-end hook resets it. */
+static float s_pgxpDepthMaxCurrentList = 0.0f;
+
+static inline void PgxpExtendDepthRange(float z)
+{
+	if (z > s_pgxpDepthMaxCurrentList && z == z)
+		s_pgxpDepthMaxCurrentList = z;
+}
+
+/* `_p1` is delivered to the shader as a_extra.w (signed byte, not normalized).
+ * Mark the whole primitive, rather than individual precise vertices: a single
+ * PGXP miss can make the whole polygon affine, but it is still scene geometry
+ * and must retain 3D filtering/dither. A validated view-space or precise entry
+ * proves GTE provenance; s_curPgxpAffine identifies explicitly screen-built
+ * world billboards. UI polygons have neither, while lines/rects never call this
+ * and retain the memset-zero marker. Call this after precise lookup but before
+ * the whole-polygon fallback clears ppw. */
+static inline void PgxpMarkPrimitive3D(GrVertex* v, int n)
+{
+	if (!g_PsxUsePgxp)
+		return;
+
+	bool is3D = s_curPgxpAffine;
+	bool allViewDepth = !s_curPgxpAffine;
+	bool allPreciseW = !s_curPgxpAffine;
+	for (int i = 0; i < n; i++) {
+		is3D = is3D || v[i].ny >= 0.5f || v[i].ppw > 0.0f;
+		allViewDepth = allViewDepth && v[i].ny >= 0.5f &&
+		               v[i].vsz >= g_PgxpNearZ && v[i].vsz == v[i].vsz;
+		allPreciseW = allPreciseW && v[i].ppw > 0.0f && v[i].ppw == v[i].ppw;
+	}
+
+	if (is3D) {
+		const int marker = (allViewDepth || allPreciseW)
+			? PGXP_PRIM_3D_VIEW_DEPTH : PGXP_PRIM_3D_FLAT;
+		for (int i = 0; i < n; i++) {
+			v[i]._p1 = (char)marker;
+			if (allViewDepth)
+				v[i].depth = v[i].vsz;
+			else if (allPreciseW)
+				v[i].depth = v[i].ppw;
+			if (marker == PGXP_PRIM_3D_VIEW_DEPTH)
+				PgxpExtendDepthRange(v[i].depth);
+		}
+	}
+}
+
+enum PgxpNearPlaneClass
+{
+	PGXP_NEAR_UNTRACKED,
+	PGXP_NEAR_IN_FRONT,
+	PGXP_NEAR_STRADDLING,
+	PGXP_NEAR_BEHIND
+};
+
+/* Classify only primitives whose every vertex has validated view-space data.
+ * Anything untracked or explicitly forced affine is left to the legacy path;
+ * this prevents a stale/partial shadow from deleting otherwise valid geometry. */
+static inline PgxpNearPlaneClass PgxpClassifyNearPlane(const GrVertex* v, int n)
+{
+	if (!g_PsxPgxpNearClip || s_curPgxpAffine || !(g_PgxpNearZ >= 1.0f))
+		return PGXP_NEAR_UNTRACKED;
+
+	int front = 0;
+	for (int i = 0; i < n; i++) {
+		if (v[i].ny < 0.5f || v[i].vsz != v[i].vsz) /* missing/NaN data */
+			return PGXP_NEAR_UNTRACKED;
+		if (v[i].vsz >= g_PgxpNearZ)
+			front++;
+	}
+
+	if (front == n)
+		return PGXP_NEAR_IN_FRONT;
+	if (front == 0)
+		return PGXP_NEAR_BEHIND;
+	return PGXP_NEAR_STRADDLING;
+}
+
+/* True when the near clipper will take this poly. MakeVertexTriangle/Quad
+ * consult this to preserve the in-front precise vertices until clipping. */
 static inline bool PgxpNearClipEligible(const GrVertex* v, int n)
 {
-	if (!g_PsxPgxpNearClip || s_curPgxpAffine)
-		return false;
-	int front = 0, behind = 0;
-	for (int i = 0; i < n; i++) {
-		if (v[i].ny < 0.5f)
-			return false;
-		if (v[i].vsz >= g_PgxpNearZ) front++; else behind++;
-	}
-	return front > 0 && behind > 0;
+	return PgxpClassifyNearPlane(v, n) == PGXP_NEAR_STRADDLING;
 }
 
 DISPENV currentDispEnv;
@@ -505,16 +831,29 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 int g_GPUDisabledState = 0;
 int g_DrawPrimMode = 0;
 
-// Per-primitive GTE SZ depth table.  Populated at addPrim time (GTE SZ registers
-// valid immediately after RotTransPers calls), looked up during primitive parsing
-// to give GL per-vertex perspective depth.  Cleared each GsDrawOt call.
-// 4096 slots, linear probe ≤16; collision rate is negligible for typical scene sizes.
-#define SZ_TABLE_BITS 12
+// Per-primitive SZ metadata captured at addPrim. The large generation-stamped
+// table covers world-sized OTs without clearing entries before DrawOTag; exact
+// producers (inventory/decals) are distinguished from stale automatic FIFO data.
+#define SZ_TABLE_BITS 18
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
-struct SZEntry { uintptr_t key; uint16_t sz[4]; };
+enum SzCaptureKind : unsigned char
+{
+	SZ_CAPTURE_AUTO = 0,
+	SZ_CAPTURE_FLAT = 1,
+	SZ_CAPTURE_EXACT = 2
+};
+
+struct SZEntry
+{
+	uintptr_t key;
+	unsigned gen;
+	uint16_t sz[4];
+	unsigned char kind;
+};
 static SZEntry g_szTable[SZ_TABLE_SIZE];
+static unsigned g_szTableGen = 1;
 
 // Global SZ scale: maximum SZ seen in the previous frame, used as the
 // depth reference so all polygons share a consistent window_depth space
@@ -522,13 +861,19 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
 static uint32_t g_szMaxThisFrame = 0;
 static uint32_t g_szMaxPrevFrame = 0;
 
-/* PGXP depth fix: the previous frame's max SZ, used to normalize per-vertex
- * SZ3 into NDC depth in the shader (same formula as ApplyGtePerVertexDepth but
- * per-vertex + unquantized, so coplanar faces no longer share a depth bucket).
- * Returns 1 as a safe floor before the first frame. */
+/* Stable far plane shared by every OT in this frame. The shader maps exact
+ * view/SZ depth through a reciprocal perspective curve; a small margin keeps
+ * the farthest submitted vertex inside clip space. */
 extern "C" float PGXP_GetSzMax(void)
 {
-	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
+	const float nearZ = (g_PgxpNearZ >= 1.0f && g_PgxpNearZ == g_PgxpNearZ)
+		? g_PgxpNearZ : 1.0f;
+	float farZ = s_pgxpDepthMaxCurrentList;
+	if (!(farZ > nearZ) && g_szMaxThisFrame > (uint32_t)nearZ)
+		farZ = (float)g_szMaxThisFrame;
+	if (!(farZ > nearZ))
+		farZ = nearZ + 1.0f;
+	return farZ * 1.01f + 1.0f;
 }
 
 // World-geometry renderers (Gfx_MeshDraw) bulk-transform vertices before the
@@ -537,6 +882,7 @@ extern "C" float PGXP_GetSzMax(void)
 // next PsyX_CaptureGteDepths invocation uses the correct per-vertex depths.
 static uint16_t g_primSzNext[4];
 static int g_primSzNextValid = 0;
+static SzCaptureKind g_primSzNextKind = SZ_CAPTURE_AUTO;
 
 extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
 {
@@ -550,6 +896,7 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_CAPTURE_FLAT;
 }
 
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
@@ -561,6 +908,7 @@ extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, un
 	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
 	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
 	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_CAPTURE_EXACT;
 }
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
@@ -576,10 +924,13 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
 	uint16_t s0, s1, s2, s3;
+	SzCaptureKind kind = SZ_CAPTURE_AUTO;
 	if (g_primSzNextValid) {
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
+		kind = g_primSzNextKind;
 		g_primSzNextValid = 0;
+		g_primSzNextKind = SZ_CAPTURE_AUTO;
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
@@ -591,38 +942,30 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	if (s3 > mx) mx = s3;
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
 
-	for (int i = 0; i < 16; i++) {
+	int reuse = -1;
+	for (int i = 0; i < 32; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == 0 || g_szTable[s].key == key) {
-			g_szTable[s].key = key;
-			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
-			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
-			return;
-		}
+		SZEntry& e = g_szTable[s];
+		if (e.key == key) { reuse = s; break; }
+		if (e.key == 0) { if (reuse < 0) reuse = s; break; }
+		if (e.gen != g_szTableGen && reuse < 0) reuse = s;
 	}
-	// Probe exhausted — overwrite initial slot
-	g_szTable[slot].key = key;
-	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
-	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
+	if (reuse < 0) reuse = slot;
+	SZEntry& e = g_szTable[reuse];
+	e.key = key;
+	e.gen = g_szTableGen;
+	e.sz[0] = s0; e.sz[1] = s1; e.sz[2] = s2; e.sz[3] = s3;
+	e.kind = (unsigned char)kind;
 }
 
 extern "C" void PsyX_ClearGteDepthTable(void)
 {
-	g_szMaxPrevFrame = g_szMaxThisFrame;
-	g_szMaxThisFrame = 0;
-	/* Inventory item pass only: the item's precise per-prim SZ was captured into
-	 * g_szTable during the GsSortObject4J sort earlier THIS frame, and the item's
-	 * own GsDrawOt(OT0) is the first draw after that sort (no intervening GsDrawOt),
-	 * so wiping the table here would drop it before ApplyGtePerVertexDepth reads it —
-	 * collapsing every item poly to one bucket depth (radio antenna through the body).
-	 * Skip the wipe while g_PsyX_ForceItemDepth is set (scoped by game code to the
-	 * item-only OT0 draw in GameState_InventoryScreen); every world/pickup draw has
-	 * the flag == 0 and clears normally. g_szMaxPrevFrame still swaps to the item's
-	 * own max above, so the item's depth normalizes against itself. */
-	extern int g_PsyX_ForceItemDepth;
-	if (!g_PsyX_ForceItemDepth)
-		memset(g_szTable, 0, sizeof(g_szTable));
+	/* Compatibility hook called immediately before DrawOTag. Primitive metadata
+	 * was already captured by addPrim, so it must remain live here. Only discard
+	 * unconsumed one-shot producer state; generation retirement happens once at
+	 * PGXP_CoverageTick after every OT in the frame, preserving inventory too. */
 	g_primSzNextValid = 0;
+	g_primSzNextKind = SZ_CAPTURE_AUTO;
 	/* s_shadow / s_affine are gen-stamped, NOT cleared here: this runs at the start
 	 * of GsDrawOt, after addPrim filled them but before DrawOTag reads them, so a
 	 * memset would wipe the current frame's entries before use. */
@@ -630,54 +973,96 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curPgxpAffine = false;
 }
 
-static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
+/* Real frame retirement. PGXP_CoverageTick runs after every OT in the scene has
+ * been consumed, so current-frame primitive metadata remains available to both
+ * world and UI DrawOTag calls. */
+static void PsyX_DepthMetadataEndFrame(void)
+{
+	g_szMaxPrevFrame = g_szMaxThisFrame;
+	g_szMaxThisFrame = 0;
+	s_pgxpDepthMaxCurrentList = 0.0f;
+	g_primSzNextValid = 0;
+	g_primSzNextKind = SZ_CAPTURE_AUTO;
+	if (++g_szTableGen == 0) {
+		memset(g_szTable, 0, sizeof(g_szTable));
+		g_szTableGen = 1;
+	}
+}
+
+static const SZEntry* PsyX_LookupGteDepths(const void* prim)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
-	for (int i = 0; i < 16; i++) {
+	for (int i = 0; i < 32; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == key) {
-			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
-			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
-			return true;
+			return g_szTable[s].gen == g_szTableGen ? &g_szTable[s] : nullptr;
 		}
 		if (g_szTable[s].key == 0) break;
 	}
-	return false;
+	return nullptr;
 }
 
-// Overrides flat bucket z with GTE SZ-based depth.
-// Uses average SZ across polygon vertices: geometrically more accurate than max_SZ,
-// which can be dominated by a single near vertex and sort adjacent coplanar surfaces
-// into the wrong OT depth relationship.  Uniform depth per polygon (all vertices
-// share one value) eliminates the per-vertex interpolation that caused diffuse
-// Z-fighting along polygon edges.
+// Exact SZ producers override coherent view depth (notably decal bias and item
+// faces). Ordinary metadata leaves PGXP view/W depth or the flat OT fallback intact.
 static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
 {
-	if (g_szMaxPrevFrame < 1) return;
-
-	uint16_t sz[4];
-	if (!PsyX_LookupGteDepths(polyTag, sz))
+	const SZEntry* entry = PsyX_LookupGteDepths(polyTag);
+	if (!entry)
 		return;
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
-		sv0 = (float)sz[0]; sv1 = (float)sz[1];
-		sv2 = (float)sz[3]; sv3 = (float)sz[2];  // buffer[2]=V3, buffer[3]=V2
+		sv0 = (float)entry->sz[0]; sv1 = (float)entry->sz[1];
+		sv2 = (float)entry->sz[3]; sv3 = (float)entry->sz[2];  // buffer[2]=V3, buffer[3]=V2
 	} else {
-		sv0 = (float)sz[1]; sv1 = (float)sz[2]; sv2 = (float)sz[3];
+		sv0 = (float)entry->sz[1]; sv1 = (float)entry->sz[2]; sv2 = (float)entry->sz[3];
 	}
+
+	/* Exact metadata is intentional geometry depth: inventory faces and PC
+	 * decals (including their coplanar bias). It overrides raw PGXP W/view Z;
+	 * automatic or quantized captures never override a coherent primitive. */
+	if (entry->kind == SZ_CAPTURE_EXACT && sv0 > 0.0f && sv1 > 0.0f && sv2 > 0.0f &&
+	    (!isQuad || sv3 > 0.0f)) {
+		vertex[0].depth = sv0; vertex[1].depth = sv1; vertex[2].depth = sv2;
+		vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = (char)PGXP_PRIM_3D_EXACT_SZ;
+		PgxpExtendDepthRange(sv0); PgxpExtendDepthRange(sv1); PgxpExtendDepthRange(sv2);
+		if (isQuad) {
+			vertex[3].depth = sv3;
+			vertex[3]._p1 = (char)PGXP_PRIM_3D_EXACT_SZ;
+			PgxpExtendDepthRange(sv3);
+		}
+		return;
+	}
+
+	/* Preserve the inventory safety net for any legacy item drawer that did not
+	 * provide an exact override: one flat per-face depth, never a partial mix. */
+	extern int g_PsyX_ForceItemDepth;
+	if (!g_PsyX_ForceItemDepth)
+		return;
 
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
 
-	float z_val = 1.0f - 2.0f * sz_avg * (1.0f / (float)g_szMaxPrevFrame);
+	uint32_t maxSz = g_szMaxThisFrame > g_szMaxPrevFrame ? g_szMaxThisFrame : g_szMaxPrevFrame;
+	if (maxSz < 1) return;
+	float z_val = 1.0f - 2.0f * sz_avg * (1.0f / (float)maxSz);
 	if (z_val < -1.0f) z_val = -1.0f;
 	if (z_val >  1.0f) z_val =  1.0f;
 	vertex[0].z = vertex[1].z = vertex[2].z = z_val;
-	if (isQuad) vertex[3].z = z_val;
+	vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = (char)PGXP_PRIM_3D_FLAT;
+	if (isQuad) {
+		vertex[3].z = z_val;
+		vertex[3]._p1 = (char)PGXP_PRIM_3D_FLAT;
+	}
 }
+
+enum SplitDepthMode
+{
+	SPLIT_DEPTH_DISABLED = 0,
+	SPLIT_DEPTH_3D = 1
+};
 
 struct GPUDrawSplit
 {
@@ -690,6 +1075,7 @@ struct GPUDrawSplit
 	TextureID		textureId;
 
 	int				drawPrimMode;
+	int				depthMode;
 
 	u_short			startVertex;
 	u_short			numVerts;
@@ -847,12 +1233,12 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		VsFillVertex(&vertex[1], p1);
 		VsFillVertex(&vertex[2], p2);
 	}
-
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
+		PgxpMarkPrimitive3D(vertex, 3);
 		/* Per-poly consistency: if ANY vertex fell to affine (ppw<=0 — at/behind the
 		 * near plane, where there's no valid perspective projection), drop the WHOLE
 		 * poly to affine. A poly with some verts perspective and some affine shears at
@@ -901,13 +1287,13 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		VsFillVertex(&vertex[2], p2);
 		VsFillVertex(&vertex[3], p3);
 	}
-
 	if (g_PsxUsePgxp)
 	{
 		PgxpFillVertex(&vertex[0], p0, p0[0], p0[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[1], p1, p1[0], p1[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[2], p2, p2[0], p2[1], ofsX, ofsY);
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
+		PgxpMarkPrimitive3D(vertex, 4);
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
 		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
@@ -1356,6 +1742,7 @@ static void PgxpNearClipLerp(const GrVertex* a, const GrVertex* b, GrVertex* out
 	out->vsx = a->vsx + (b->vsx - a->vsx) * t;
 	out->vsy = a->vsy + (b->vsy - a->vsy) * t;
 	out->vsz = g_PgxpNearZ;
+	out->depth = a->depth + (b->depth - a->depth) * t;
 
 	/* Re-project with the GTE's own formula (sx = OFX + x*H/z), landing in the
 	 * same space PgxpFillVertex stores (draw-env offset included). W = view z,
@@ -1402,16 +1789,40 @@ static void PgxpNearClipReproject(GrVertex* v, float ofsX, float ofsY)
  * 6 -> 12 verts (each straddling triangle yields up to 2). */
 static int PgxpNearClipEmit(GrVertex* v, int count)
 {
-	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
+	if (!g_PsxUsePgxp)
 		return count;
 
-	/* Growth headroom: never write past the vertex buffer; keeping the
-	 * unclipped poly stays within the pre-existing envelope. */
-	if (g_vertexIndex + 12 > MAX_VERTEX_BUFFER_SIZE)
+	const PgxpNearPlaneClass nearClass = PgxpClassifyNearPlane(v, count);
+	if (nearClass == PGXP_NEAR_UNTRACKED || nearClass == PGXP_NEAR_IN_FRONT)
 		return count;
+
+	/* With complete view-space provenance, a primitive wholly behind the near
+	 * plane cannot contribute visible fragments. Returning zero is safe: callers
+	 * advance g_vertexIndex by this count, so the next primitive overwrites the
+	 * unused scratch vertices. */
+	if (nearClass == PGXP_NEAR_BEHIND) {
+		s_pgxpClip++;
+		return 0;
+	}
+
+	/* A clipped triangle can emit at most two triangles. If the buffer lacks
+	 * growth headroom, keep the original primitive but force ALL of its vertices
+	 * affine. Returning a mixed-W polygon here creates severe edge shearing. */
+	const int maxOutCount = count * 2;
+	if (g_vertexIndex + maxOutCount > MAX_VERTEX_BUFFER_SIZE) {
+		for (int i = 0; i < count; i++) {
+			v[i].ppw = 0.0f;
+			v[i].depth = 0.0f;
+			v[i]._p1 = (char)PGXP_PRIM_3D_FLAT;
+		}
+		return count;
+	}
 
 	GrVertex out[12];
 	int outCount = 0;
+	bool explicitDepth = true;
+	for (int i = 0; i < count; i++)
+		explicitDepth = explicitDepth && v[i]._p1 == (char)PGXP_PRIM_3D_EXACT_SZ && v[i].depth > 0.0f;
 
 	float ofsX, ofsY;
 	DrawEnvOffset(ofsX, ofsY);
@@ -1446,6 +1857,16 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 		}
 	}
 
+	/* A successfully clipped primitive now has coherent positive view depth on
+	 * every output vertex. Preserve explicit SZ/bias depth when present; otherwise
+	 * promote the clipped result to exact view depth. */
+	for (int i = 0; i < outCount; i++) {
+		if (!explicitDepth) {
+			out[i].depth = out[i].vsz;
+			out[i]._p1 = (char)PGXP_PRIM_3D_VIEW_DEPTH;
+		}
+		PgxpExtendDepthRange(out[i].depth);
+	}
 	memcpy(v, out, outCount * sizeof(GrVertex));
 	s_pgxpClip++;
 	return outCount;
@@ -1453,7 +1874,12 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 
 //------------------------------------------------------------------------------------------------------------------------
 
-static void AddSplit(bool semiTrans, bool textured)
+static inline int SplitDepthForPrimitive(const GrVertex* vertex)
+{
+	return vertex->_p1 != (char)PGXP_PRIM_2D ? SPLIT_DEPTH_3D : SPLIT_DEPTH_DISABLED;
+}
+
+static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
@@ -1479,6 +1905,7 @@ static void AddSplit(bool semiTrans, bool textured)
 		curSplit.drawenv.tw.x == overrideTextureOffsetX &&
 		curSplit.drawenv.tw.y == overrideTextureOffsetY &&
 		curSplit.drawPrimMode == g_DrawPrimMode &&
+		curSplit.depthMode == depthMode &&
 		curSplit.drawenv.clip.x == activeDrawEnv.clip.x &&
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
 		curSplit.drawenv.clip.w == activeDrawEnv.clip.w &&
@@ -1502,6 +1929,7 @@ static void AddSplit(bool semiTrans, bool textured)
 	split.texFormat = texFormat;
 	split.textureId = textureId;
 	split.drawPrimMode = g_DrawPrimMode;
+	split.depthMode = depthMode;
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
@@ -1517,8 +1945,8 @@ static void AddSplit(bool semiTrans, bool textured)
 
 /* Debug isolation of the additive (BM_ADD) layer, driven by the `add` console cmd.
  * 0 = drop every additive split (confirm whether a fire/lightning effect is additive
- * geometry), 1 = normal, 2 = draw additive WITH the depth test that GR_SetBlendMode
- * normally disables (test the "additive draws through the floor" hypothesis). */
+ * geometry), 1 = normal, 2 = force depth testing even for an additive split that
+ * was conservatively classified as 2D/untracked. */
 int g_PsxDbgAddMode = 1;
 
 void DrawSplit(const GPUDrawSplit& split)
@@ -1559,9 +1987,13 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetOffscreenState(&split.drawenv.clip, !drawOnScreen);
 
 	GR_SetBlendMode(split.blendMode);
+	if (split.depthMode == SPLIT_DEPTH_3D)
+		GR_SetDepthState(1, split.blendMode == BM_NONE ? 1 : 0);
+	else
+		GR_SetDepthState(0, 0);
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
-		GR_EnableDepth(1);
+		GR_SetDepthState(1, 0);
 
 	GR_DrawTriangles(split.startVertex, split.numVerts / 3);
 
@@ -1619,12 +2051,9 @@ void DrawAllSplits()
 
 			eprintf("==========================================\n");
 			eprintf("POLYGON: %d\n", g_dbg_polygonSelected);
-			eprintf("X: %d Y: %d
-", vert->x, vert->y);
-			eprintf("U: %d V: %d
-", vert->u, vert->v);
-			eprintf("TP: %d CLT: %d
-", vert->page, vert->clut);
+			eprintf("X: %d Y: %d\n", vert->x, vert->y);
+			eprintf("U: %d V: %d\n", vert->u, vert->v);
+			eprintf("TP: %d CLT: %d\n", vert->page, vert->clut);
 			
 			eprintf("==========================================\n");
 		}
@@ -1660,8 +2089,28 @@ void DrawAllSplits()
 		GR_ShadowPassEnd();
 	}
 
-	for (int i = 1; i <= g_splitIndex; i++)
-		DrawSplit(g_splits[i]);
+	/* Color pass order for a real world Z buffer:
+	 *   1. every opaque 3D split populates depth;
+	 *   2. transparent 3D keeps original split/OT order, tests against opaque,
+	 *      but never writes depth;
+	 *   3. 2D/UI/lines retain painter order with depth fully disabled.
+	 * Drawing transparent before a later opaque split would let the opaque color
+	 * overwrite correctly blended pixels even though it is behind them. */
+	for (int i = 1; i <= g_splitIndex; i++) {
+		const GPUDrawSplit& s = g_splits[i];
+		if (s.depthMode == SPLIT_DEPTH_3D && s.blendMode == BM_NONE)
+			DrawSplit(s);
+	}
+	for (int i = 1; i <= g_splitIndex; i++) {
+		const GPUDrawSplit& s = g_splits[i];
+		if (s.depthMode == SPLIT_DEPTH_3D && s.blendMode != BM_NONE)
+			DrawSplit(s);
+	}
+	for (int i = 1; i <= g_splitIndex; i++) {
+		const GPUDrawSplit& s = g_splits[i];
+		if (s.depthMode == SPLIT_DEPTH_DISABLED)
+			DrawSplit(s);
+	}
 
 	ClearSplits();
 }
@@ -2031,13 +2480,12 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	{
 		POLY_F3* poly = (POLY_F3*)polyTag;
 
-		AddSplit(semiTrans, false);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, false);
 		MakeTexcoordTriangleZero(firstVertex, 0);
 		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+		AddSplit(semiTrans, false, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
@@ -2056,13 +2504,12 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		{
 			ApplyHiresOverride(poly->tpage, poly->clut);
 
-			AddSplit(semiTrans, true);
-
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
 			ApplyGtePerVertexDepth(firstVertex, polyTag, false);
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+			AddSplit(semiTrans, true, SplitDepthForPrimitive(firstVertex));
 
 			g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
@@ -2076,8 +2523,6 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	{
 		POLY_F4* poly = (POLY_F4*)polyTag;
 
-		AddSplit(semiTrans, false);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, true);
@@ -2085,6 +2530,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
+		AddSplit(semiTrans, false, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 #if defined(DEBUG_POLY_COUNT)
@@ -2147,8 +2593,6 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, true);
@@ -2156,6 +2600,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
+		AddSplit(semiTrans, true, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 
@@ -2184,8 +2629,6 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_G3* poly = (POLY_G3*)polyTag;
 
-		AddSplit(semiTrans, false);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, false);
@@ -2197,6 +2640,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[0]._p0 = poly->pad1;
 		firstVertex[1]._p0 = poly->pad1;
 		firstVertex[2]._p0 = poly->pad2;
+		AddSplit(semiTrans, false, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
@@ -2211,8 +2655,6 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, false);
@@ -2223,6 +2665,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
 		firstVertex[1]._p0 = poly->p1;  // v1
 		firstVertex[2]._p0 = poly->p2;  // v2
+		AddSplit(semiTrans, true, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
 
@@ -2234,8 +2677,6 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	case 0x8:
 	{
 		POLY_G4* poly = (POLY_G4*)polyTag;
-
-		AddSplit(semiTrans, false);
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
@@ -2250,6 +2691,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[3]._p0 = poly->pad2;
 
 		TriangulateQuad();
+		AddSplit(semiTrans, false, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 
@@ -2264,8 +2706,6 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
-
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
 		ApplyGtePerVertexDepth(firstVertex, polyTag, true);
@@ -2279,6 +2719,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[3]._p0 = poly->p2;  // v2 (buffer[3] = poly vertex 2 due to swap)
 
 		TriangulateQuad();
+		AddSplit(semiTrans, true, SplitDepthForPrimitive(firstVertex));
 
 		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
 

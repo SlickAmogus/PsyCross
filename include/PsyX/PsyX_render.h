@@ -124,6 +124,10 @@ typedef struct
 	u_char		u, v, bright, dither;
 	u_char		r, g, b, a;
 
+	/* Extra packed shader attributes: texture-coordinate offsets, per-vertex
+	 * fog, and an explicit 3D marker. The marker is independent of PGXP W so
+	 * a 3D primitive that deliberately falls back to affine interpolation does
+	 * not get mistaken for UI by the fragment shader. */
 	char		tcx, tcy, _p0, _p1;
 
 	/* PGXP (perspective-correct): precise float screen X/Y and a per-vertex
@@ -145,6 +149,12 @@ typedef struct
 	 * shader reads it only under u_flashlightOn, and gates on vsz>0 so untracked
 	 * (zero) verts and 2D prims are never lit. */
 	float		vsx, vsy, vsz;
+
+	/* Coherent camera-depth scalar for the world Z buffer. Zero selects the
+	 * primitive's flat OT depth; positive values use reciprocal perspective
+	 * depth in the main shader. Kept separate from normal/view fields so those
+	 * remain available to near clipping and the flashlight pipeline. */
+	float		depth;
 } GrVertex;
 #pragma pack(pop)
 
@@ -158,6 +168,7 @@ typedef enum
 	a_pgxp,
 	a_normal,
 	a_viewpos,
+	a_depth,
 } ShaderAttrib;
 
 typedef enum
@@ -228,6 +239,7 @@ extern void			GR_SetBlendMode(BlendMode blendMode);
 extern void			GR_SetPolygonOffset(float ofs);
 extern void			GR_SetStencilMode(int drawPrim);
 extern void			GR_EnableDepth(int enable);
+extern void			GR_SetDepthState(int testEnable, int writeEnable);
 extern void			GR_SetScissorState(int enable);
 extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);

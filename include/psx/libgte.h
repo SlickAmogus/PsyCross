@@ -82,6 +82,23 @@ extern void SetFogNear(int a, int h);
 extern void SetFogNearFar(int a, int b, int h);
 extern int SquareRoot0(int a);
 
+/* PGXP exact-rotation shadow.  The MATRIX itself remains the original Q12
+ * value; these helpers carry an optional unquantized 3x3 twin alongside it. */
+extern void PGXP_MatrixRegister(const MATRIX* m, const double exact[9]);
+extern int PGXP_MatrixLookup(const MATRIX* m, double exact[9]);
+extern int PGXP_MatrixLookupCurrent(double exact[9]);
+extern void PGXP_MatrixCopy(MATRIX* dst, const MATRIX* src);
+extern void PGXP_MatrixCopyFull(MATRIX* dst, const MATRIX* src);
+extern void PGXP_MatrixInvalidate(MATRIX* m);
+extern void PGXP_MatrixRegisterTranslation(MATRIX* m, const double exact[3]);
+extern void PGXP_MatrixRegisterTranslationQ12(MATRIX* m, int x, int y, int z);
+extern int PGXP_MatrixLookupTranslation(const MATRIX* m, double exact[3]);
+extern void PGXP_MatrixInvalidateTranslation(MATRIX* m);
+extern void PGXP_MatrixNextGeneration(void);
+/* Optional exact Q12 source twin for an SVECTOR whose stored GTE value is Q8. */
+extern void PGXP_VectorRegisterQ12(const void* v, int x, int y, int z);
+extern void PGXP_VectorRegisterFixed(const void* v, int x, int y, int z, int shift);
+
 extern int rsin(int a);
 extern int rcos(int a);
 extern int ratan2(int y, int x);

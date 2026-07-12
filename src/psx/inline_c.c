@@ -73,6 +73,9 @@ int MFC2_S(int reg)
 }
 
 void MTC2(unsigned int value, int reg) {
+	if ((unsigned int)reg <= 5u)
+		PGXP_VectorInvalidateCurrent(reg >> 1);
+
 	switch (reg) {
 	case 15:
 		C2_SXY0 = C2_SXY1;
@@ -98,6 +101,9 @@ void MTC2(unsigned int value, int reg) {
 }
 
 void MTC2_S(int value, int reg) {
+	if ((unsigned int)reg <= 5u)
+		PGXP_VectorInvalidateCurrent(reg >> 1);
+
 	switch (reg) {
 	case 15:
 		C2_SXY0 = C2_SXY1;
@@ -123,6 +129,13 @@ void MTC2_S(int value, int reg) {
 }
 
 void CTC2(unsigned int value, int reg) {
+	/* Any direct/partial write to the five rotation registers invalidates the
+	 * exact twin. gte_SetRotMatrix restores it after all five writes. */
+	if ((unsigned int)reg <= 4u)
+		PGXP_MatrixInvalidateCurrent();
+	else if ((unsigned int)(reg - 5) <= 2u)
+		PGXP_MatrixInvalidateCurrentTranslation();
+
 	switch (reg) {
 	case 4:
 	case 12:
@@ -145,6 +158,11 @@ void CTC2(unsigned int value, int reg) {
 }
 
 void CTC2_S(int value, int reg) {
+	if ((unsigned int)reg <= 4u)
+		PGXP_MatrixInvalidateCurrent();
+	else if ((unsigned int)(reg - 5) <= 2u)
+		PGXP_MatrixInvalidateCurrentTranslation();
+
 	switch (reg) {
 	case 4:
 	case 12:
