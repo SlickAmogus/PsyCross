@@ -24,7 +24,7 @@ endif()
 
 add_library(psycross_static STATIC ${PSYCROSS_SRCS_C} ${PSYCROSS_SRCS_CPP})
 set_target_properties(psycross_static PROPERTIES OUTPUT_NAME "psycross")
-target_include_directories(psycross_static PUBLIC "include" "include/psx")
+target_include_directories(psycross_static PUBLIC "include")
 
 # On ELF the host executable that links this archive is built with
 # -rdynamic (so map overlay .so's can resolve game symbols at dlopen). That
