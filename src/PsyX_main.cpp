@@ -40,7 +40,7 @@ int strcasecmp(const char* _l, const char* _r)
 	for (; *l && *r && (*l == *r || tolower(*l) == tolower(*r)); l++, r++);
 	return tolower(*l) - tolower(*r);
 }
-#elif defined(__UNIX__)
+#elif defined(__unix__)
 #include <strings.h>
 #endif
 #define _stricmp(s1, s2) strcasecmp(s1, s2)
