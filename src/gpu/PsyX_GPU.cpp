@@ -25,6 +25,20 @@ OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
 int g_currentOTBucketCount = 0;
 float g_otBucketDepth = 0.0f;
 
+/* Deterministic tie-break for nearly coplanar primitives in one OT bucket.
+ * The rank is packed into GrVertex::dither (whose per-primitive value is not
+ * consumed by the current shaders; the real dither switch is a uniform), so
+ * GrVertex stays exactly 64 bytes. The shader converts one rank step to one
+ * 24-bit window-depth unit and lets the later painter-order primitive win. */
+static unsigned char g_otPrimitiveDepthTie = 0;
+
+static inline unsigned char PackDitherAndDepthTie(unsigned char dither)
+{
+	if (!g_PsxUsePgxp)
+		return dither;
+	return (unsigned char)((dither ? 0x80u : 0u) | (g_otPrimitiveDepthTie & 0x7Fu));
+}
+
 /* ----------------------------------------------------------------------------
  * PGXP (perspective-correct rendering) — shadow-memory model, DuckStation-faithful.
  *
@@ -677,20 +691,10 @@ enum PgxpPrimitiveMarker
 {
 	PGXP_PRIM_2D             = 0,
 	PGXP_PRIM_3D_FLAT        = 1,
+	PGXP_PRIM_3D_WORLD       = 125,
 	PGXP_PRIM_3D_EXACT_SZ    = 126,
 	PGXP_PRIM_3D_VIEW_DEPTH  = 127
 };
-
-/* Maximum coherent depth seen in the current frame. It intentionally survives
- * ClearSplits so OT0 world depth and any later 3D OT use one normalization; the
- * real frame-end hook resets it. */
-static float s_pgxpDepthMaxCurrentList = 0.0f;
-
-static inline void PgxpExtendDepthRange(float z)
-{
-	if (z > s_pgxpDepthMaxCurrentList && z == z)
-		s_pgxpDepthMaxCurrentList = z;
-}
 
 /* `_p1` is delivered to the shader as a_extra.w (signed byte, not normalized).
  * Mark the whole primitive, rather than individual precise vertices: a single
@@ -724,8 +728,6 @@ static inline void PgxpMarkPrimitive3D(GrVertex* v, int n)
 				v[i].depth = v[i].vsz;
 			else if (allPreciseW)
 				v[i].depth = v[i].ppw;
-			if (marker == PGXP_PRIM_3D_VIEW_DEPTH)
-				PgxpExtendDepthRange(v[i].depth);
 		}
 	}
 }
@@ -861,19 +863,15 @@ static unsigned g_szTableGen = 1;
 static uint32_t g_szMaxThisFrame = 0;
 static uint32_t g_szMaxPrevFrame = 0;
 
-/* Stable far plane shared by every OT in this frame. The shader maps exact
- * view/SZ depth through a reciprocal perspective curve; a small margin keeps
- * the farthest submitted vertex inside clip space. */
+/* Stable far plane shared by every OT and every frame. 2^18 covers saturated
+ * 16-bit GTE SZ plus the unquantized PGXP headroom used by far-projection modes;
+ * with a reciprocal projection it costs effectively no useful near precision.
+ * A content-dependent maximum made separate OT draws use different depth
+ * mappings in the same framebuffer, producing intermittent z-fighting and
+ * failed particle occlusion. */
 extern "C" float PGXP_GetSzMax(void)
 {
-	const float nearZ = (g_PgxpNearZ >= 1.0f && g_PgxpNearZ == g_PgxpNearZ)
-		? g_PgxpNearZ : 1.0f;
-	float farZ = s_pgxpDepthMaxCurrentList;
-	if (!(farZ > nearZ) && g_szMaxThisFrame > (uint32_t)nearZ)
-		farZ = (float)g_szMaxThisFrame;
-	if (!(farZ > nearZ))
-		farZ = nearZ + 1.0f;
-	return farZ * 1.01f + 1.0f;
+	return 262144.0f;
 }
 
 // World-geometry renderers (Gfx_MeshDraw) bulk-transform vertices before the
@@ -980,7 +978,6 @@ static void PsyX_DepthMetadataEndFrame(void)
 {
 	g_szMaxPrevFrame = g_szMaxThisFrame;
 	g_szMaxThisFrame = 0;
-	s_pgxpDepthMaxCurrentList = 0.0f;
 	g_primSzNextValid = 0;
 	g_primSzNextKind = SZ_CAPTURE_AUTO;
 	if (++g_szTableGen == 0) {
@@ -1026,12 +1023,51 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	    (!isQuad || sv3 > 0.0f)) {
 		vertex[0].depth = sv0; vertex[1].depth = sv1; vertex[2].depth = sv2;
 		vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = (char)PGXP_PRIM_3D_EXACT_SZ;
-		PgxpExtendDepthRange(sv0); PgxpExtendDepthRange(sv1); PgxpExtendDepthRange(sv2);
 		if (isQuad) {
 			vertex[3].depth = sv3;
 			vertex[3]._p1 = (char)PGXP_PRIM_3D_EXACT_SZ;
-			PgxpExtendDepthRange(sv3);
 		}
+		return;
+	}
+
+	const bool validSz = sv0 > 0.0f && sv1 > 0.0f && sv2 > 0.0f &&
+	                     (!isQuad || sv3 > 0.0f);
+
+	/* PsyX_SetNextPrimSz is emitted only by the static world-mesh drawer. Keep a
+	 * dedicated marker so the color pass can preserve the PS1 OT painter order
+	 * between world faces while still leaving a usable depth buffer for actors,
+	 * particles and decals. A complete PGXP face retains its precise plane; only
+	 * an already-incomplete face receives the conservative captured average. */
+	if (entry->kind == SZ_CAPTURE_FLAT && validSz) {
+		if (vertex[0]._p1 != (char)PGXP_PRIM_3D_VIEW_DEPTH) {
+			const float flatDepth = isQuad
+				? (sv0 + sv1 + sv2 + sv3) * 0.25f
+				: (sv0 + sv1 + sv2) * (1.0f / 3.0f);
+			vertex[0].depth = vertex[1].depth = vertex[2].depth = flatDepth;
+			if (isQuad)
+				vertex[3].depth = flatDepth;
+		}
+		vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = (char)PGXP_PRIM_3D_WORLD;
+		if (isQuad)
+			vertex[3]._p1 = (char)PGXP_PRIM_3D_WORLD;
+		return;
+	}
+
+	/* A partially tracked 3D primitive has no coherent per-vertex view depth and
+	 * would otherwise reconstruct its depth from the OT bucket. That fallback is
+	 * only an ordering hint and no longer shares the fixed 2^18 depth range, so it
+	 * can place translucent effects several times farther away than their opaque
+	 * host surface. Use the addPrim-time GTE snapshot as one conservative flat
+	 * depth, but only for an already-classified FLAT primitive. Precise world
+	 * geometry keeps its per-vertex PGXP depth; this is the distinction missing
+	 * from the earlier flat-depth experiment that disturbed world/fog rendering. */
+	if (vertex[0]._p1 == (char)PGXP_PRIM_3D_FLAT && validSz) {
+		const float flatDepth = isQuad
+			? (sv0 + sv1 + sv2 + sv3) * 0.25f
+			: (sv0 + sv1 + sv2) * (1.0f / 3.0f);
+		vertex[0].depth = vertex[1].depth = vertex[2].depth = flatDepth;
+		if (isQuad)
+			vertex[3].depth = flatDepth;
 		return;
 	}
 
@@ -1061,7 +1097,8 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 enum SplitDepthMode
 {
 	SPLIT_DEPTH_DISABLED = 0,
-	SPLIT_DEPTH_3D = 1
+	SPLIT_DEPTH_3D = 1,
+	SPLIT_DEPTH_WORLD = 2
 };
 
 struct GPUDrawSplit
@@ -1337,6 +1374,7 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv1);
 	assert(uv2);
 	assert(uv3);
+	dither = PackDitherAndDepthTie(dither);
 
 	const unsigned char bright = 2;
 	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
@@ -1391,6 +1429,7 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv0);
 	assert(uv1);
 	assert(uv2);
+	dither = PackDitherAndDepthTie(dither);
 
 	const unsigned char bright = 2;
 	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
@@ -1442,7 +1481,7 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	if (int(uv[1]) + h > 255) h = 255 - uv[1];
 
 	const unsigned char bright = 2;
-	const unsigned char dither = 0;
+	const unsigned char dither = PackDitherAndDepthTie(0);
 	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
 	short pageCoord = page & 0x1F;
 
@@ -1492,6 +1531,7 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 
 void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
 {
+	dither = PackDitherAndDepthTie(dither);
 	const unsigned char bright = 1;
 
 	vertex[0].u = 0;
@@ -1525,6 +1565,7 @@ void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
 
 void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 {
+	dither = PackDitherAndDepthTie(dither);
 	const unsigned char bright = 1;
 
 	vertex[0].u = 0;
@@ -1551,6 +1592,7 @@ void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 
 void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 {
+	dither = PackDitherAndDepthTie(dither);
 	const unsigned char bright = 1;
 
 	vertex[0].u = 0;
@@ -1865,7 +1907,6 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 			out[i].depth = out[i].vsz;
 			out[i]._p1 = (char)PGXP_PRIM_3D_VIEW_DEPTH;
 		}
-		PgxpExtendDepthRange(out[i].depth);
 	}
 	memcpy(v, out, outCount * sizeof(GrVertex));
 	s_pgxpClip++;
@@ -1876,6 +1917,8 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 
 static inline int SplitDepthForPrimitive(const GrVertex* vertex)
 {
+	if (vertex->_p1 == (char)PGXP_PRIM_3D_WORLD)
+		return SPLIT_DEPTH_WORLD;
 	return vertex->_p1 != (char)PGXP_PRIM_2D ? SPLIT_DEPTH_3D : SPLIT_DEPTH_DISABLED;
 }
 
@@ -1987,10 +2030,23 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetOffscreenState(&split.drawenv.clip, !drawOnScreen);
 
 	GR_SetBlendMode(split.blendMode);
-	if (split.depthMode == SPLIT_DEPTH_3D)
+	const bool hasWorldDepth = split.depthMode != SPLIT_DEPTH_DISABLED;
+	const bool worldPainter = split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE;
+	const bool transparent3D = hasWorldDepth && split.blendMode != BM_NONE;
+	/* Static opaque world faces already have a correct OT painter order. GL_ALWAYS
+	 * reproduces that order for coplanar rugs/paper/floor layers and writes the
+	 * winning face's precise depth for the later actor/particle passes. */
+	GR_SetDepthFuncAlways(worldPainter ? 1 : 0);
+	if (hasWorldDepth)
 		GR_SetDepthState(1, split.blendMode == BM_NONE ? 1 : 0);
 	else
 		GR_SetDepthState(0, 0);
+	/* Test translucent world geometry against opaque depth without modifying its
+	 * view Z. A small slope-aware raster-depth offset lets glass, wet floors and
+	 * other authored coplanar layers survive equality/rounding at their host
+	 * surface, while real walls remain far outside this sub-pixel allowance. */
+	const float transparentOffset = transparent3D ? -1.0f : 0.0f;
+	GR_SetPolygonOffset(transparentOffset, transparentOffset);
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
 		GR_SetDepthState(1, 0);
@@ -2089,13 +2145,18 @@ void DrawAllSplits()
 		GR_ShadowPassEnd();
 	}
 
-	/* Color pass order for a real world Z buffer:
-	 *   1. every opaque 3D split populates depth;
-	 *   2. transparent 3D keeps original split/OT order, tests against opaque,
-	 *      but never writes depth;
-	 *   3. 2D/UI/lines retain painter order with depth fully disabled.
-	 * Drawing transparent before a later opaque split would let the opaque color
-	 * overwrite correctly blended pixels even though it is behind them. */
+	/* Hybrid painter/Z color pass:
+	 *   1. opaque static-world faces keep their original OT order and continuously
+	 *      replace color+depth (GL_ALWAYS), eliminating coplanar self-occlusion;
+	 *   2. other opaque 3D uses normal LEQUAL against the completed world depth;
+	 *   3. every remaining split keeps its original relative order: transparent
+	 *      3D tests against opaque but never writes depth, while 2D/UI/lines keep
+	 *      depth disabled. */
+	for (int i = 1; i <= g_splitIndex; i++) {
+		const GPUDrawSplit& s = g_splits[i];
+		if (s.depthMode == SPLIT_DEPTH_WORLD && s.blendMode == BM_NONE)
+			DrawSplit(s);
+	}
 	for (int i = 1; i <= g_splitIndex; i++) {
 		const GPUDrawSplit& s = g_splits[i];
 		if (s.depthMode == SPLIT_DEPTH_3D && s.blendMode == BM_NONE)
@@ -2103,12 +2164,7 @@ void DrawAllSplits()
 	}
 	for (int i = 1; i <= g_splitIndex; i++) {
 		const GPUDrawSplit& s = g_splits[i];
-		if (s.depthMode == SPLIT_DEPTH_3D && s.blendMode != BM_NONE)
-			DrawSplit(s);
-	}
-	for (int i = 1; i <= g_splitIndex; i++) {
-		const GPUDrawSplit& s = g_splits[i];
-		if (s.depthMode == SPLIT_DEPTH_DISABLED)
+		if (s.blendMode != BM_NONE || s.depthMode == SPLIT_DEPTH_DISABLED)
 			DrawSplit(s);
 	}
 
@@ -2129,6 +2185,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 	if (singlePrimitive)
 	{
 		P_TAG* polyTag = reinterpret_cast<P_TAG*>(p);
+		g_otPrimitiveDepthTie = 0;
 		ParsePrimitive(polyTag);
 
 		GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
@@ -2140,6 +2197,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 		// one depth value — matching the PSX's painter's-algorithm intent.
 		// g_otBucketDepth advances only at tagLength==0 bucket-boundary entries.
 		int otBucketIdx = 0;
+		unsigned depthTieRank = 0;
 		const float otBucketStep = (g_currentOTBucketCount > 1)
 			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
 		g_otBucketDepth = -1.0f;
@@ -2155,8 +2213,10 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 				int primLength = 0;
 				while (currentPacket < endPacket)
 				{
+					g_otPrimitiveDepthTie = (unsigned char)(depthTieRank < 127u ? depthTieRank : 127u);
 					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
+					if (depthTieRank < 127u) depthTieRank++;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
 
@@ -2190,6 +2250,8 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 				// OT bucket boundary — advance to the next bucket's depth.
 				g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 				if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
+				depthTieRank = 0;
+				g_otPrimitiveDepthTie = 0;
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)

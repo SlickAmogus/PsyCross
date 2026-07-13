@@ -236,10 +236,11 @@ extern void			GR_Perspective3D(const float fov, const float width, const float h
 extern void			GR_Ortho2D(float left, float right, float bottom, float top, float znear, float zfar);
 
 extern void			GR_SetBlendMode(BlendMode blendMode);
-extern void			GR_SetPolygonOffset(float ofs);
+extern void			GR_SetPolygonOffset(float slope, float units);
 extern void			GR_SetStencilMode(int drawPrim);
 extern void			GR_EnableDepth(int enable);
 extern void			GR_SetDepthState(int testEnable, int writeEnable);
+extern void			GR_SetDepthFuncAlways(int enable);
 extern void			GR_SetScissorState(int enable);
 extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);

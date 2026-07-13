@@ -102,6 +102,9 @@ float g_PsxWorldHScale = 1.0f;
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
 int g_PreviousDepthWrite = 1;
+int g_PreviousDepthFuncAlways = 0;
+float g_PreviousPolygonOffsetSlope = 0.0f;
+float g_PreviousPolygonOffsetUnits = 0.0f;
 int g_PreviousStencilMode = 0;
 int g_PreviousScissorState = 0;
 int g_PreviousOffscreenState = 0;
@@ -1061,6 +1064,19 @@ int g_PsxFogToBlack = 0;
 		"		float viewZ = max(depthZ, u_depthNear);\n"\
 		"		float depth01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / viewZ);\n"\
 		"		b.z = clamp(depth01, 0.0, 1.0) * 2.0 - 1.0;\n"\
+		/* a_texcoord.w packs the original dither flag in bit 7 and the
+		 * primitive's painter-order rank in bits 0..6. One rank step equals
+		 * one 24-bit window-depth unit (twice that in NDC). The total shift is
+		 * capped to four view-depth units, so distant real surfaces cannot be
+		 * reordered merely because reciprocal depth has coarser far precision. */\
+		"		if (u_pgxpEnabled > 0 && a_extra.w > 0.5)\n"\
+		"		{\n"\
+		"			float tieNdc = mod(a_texcoord.w, 128.0) * (2.0 / 16777216.0);\n"\
+		"			float nearerZ = max(u_depthNear, viewZ - 4.0);\n"\
+		"			float nearer01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / nearerZ);\n"\
+		"			float tieLimit = max(0.0, (depth01 - nearer01) * 2.0);\n"\
+		"			b.z = max(-1.0, b.z - min(tieNdc, tieLimit));\n"\
+		"		}\n"\
 		"	}\n"\
 		"	gl_Position = vec4(b.xyz * clipW, b.w * clipW);\n"
 
@@ -3078,6 +3094,9 @@ void GR_ShadowPassEnd(void)
 	glViewport(s_shadowPrevViewport[0], s_shadowPrevViewport[1],
 	           s_shadowPrevViewport[2], s_shadowPrevViewport[3]);
 	glDepthFunc(GL_LEQUAL);  /* restore the renderer default; the pass set GL_LESS */
+	g_PreviousDepthFuncAlways = 0;
+	g_PreviousPolygonOffsetSlope = 0.0f;
+	g_PreviousPolygonOffsetUnits = 0.0f;
 
 	/* We changed program/depth/blend/scissor/stencil. Sentinels that never equal a
 	 * real mode force the first color split to fully re-establish GL state. */
@@ -3476,6 +3495,17 @@ void GR_SetDepthState(int testEnable, int writeEnable)
 #endif
 }
 
+void GR_SetDepthFuncAlways(int enable)
+{
+#if USE_OPENGL
+	enable = enable ? 1 : 0;
+	if (g_PreviousDepthFuncAlways == enable)
+		return;
+	g_PreviousDepthFuncAlways = enable;
+	glDepthFunc(enable ? GL_ALWAYS : GL_LEQUAL);
+#endif
+}
+
 void GR_EnableDepth(int enable)
 {
 	GR_SetDepthState(enable, enable);
@@ -3581,17 +3611,22 @@ void GR_SetBlendMode(BlendMode blendMode)
 	g_PreviousBlendMode = blendMode;
 }
 
-void GR_SetPolygonOffset(float ofs)
+void GR_SetPolygonOffset(float slope, float units)
 {
 #if USE_OPENGL
-	if (ofs == 0.0f)
+	if (g_PreviousPolygonOffsetSlope == slope && g_PreviousPolygonOffsetUnits == units)
+		return;
+
+	g_PreviousPolygonOffsetSlope = slope;
+	g_PreviousPolygonOffsetUnits = units;
+	if (slope == 0.0f && units == 0.0f)
 	{
 		glDisable(GL_POLYGON_OFFSET_FILL);
 	}
 	else
 	{
 		glEnable(GL_POLYGON_OFFSET_FILL);
-		glPolygonOffset(0.0f, ofs);
+		glPolygonOffset(slope, units);
 	}
 #endif
 }
