@@ -113,7 +113,12 @@
 #define TPAGE_WIDTH		(256)
 #define TPAGE_HEIGHT	(256)
 
-#define MAX_VERTEX_BUFFER_SIZE	(1 << (sizeof(ushort) * 8))
+/* Was (1 << 16) = 65536, matching the u_short GPUDrawSplit indices. The whole-town
+ * render mode (docs/WholeMap_Far_Projection_Task.md) submits far more geometry in
+ * one frame than a streamed scene, so the ceiling is raised and the split indices
+ * widened to unsigned int (GPUDrawSplit). Output-neutral for normal play — the
+ * buffer is only ever filled to g_vertexIndex, and a streamed frame stays tiny. */
+#define MAX_VERTEX_BUFFER_SIZE	(1 << 18)
 
 #pragma pack(push,1)
 typedef struct

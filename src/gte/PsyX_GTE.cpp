@@ -1019,6 +1019,14 @@ extern "C" int g_PgxpUseUnquantizedDepth; /* defined in PsyX_GPU.cpp */
 extern "C" float g_PgxpGteOfx, g_PgxpGteOfy, g_PgxpGteH; /* PsyX_GPU.cpp */
 extern "C" void VShadow_Store(void* addr, float x, float y, float z); /* PsyX_GPU.cpp */
 
+/* Whole-town render mode (set per world-chunk-draw by the game from
+ * Pc_WholeMapDrawActive). When set, vertices whose true view depth exceeds what
+ * the GTE depth register can hold (SZ3 clamps at 0xffff) OR whose view X/Y clamp
+ * out of s16 (IR1/IR2) are re-projected from the UNCLAMPED view position so the
+ * whole town projects at the correct scale instead of freezing ~6 cells out.
+ * 0 (default) = untouched legacy path, byte-identical. Defined in PsyX_GPU.cpp. */
+extern "C" int g_PsxWholeMapFar;
+
 /* Called from the gte_stsxy* store macros (only when g_PsxUsePgxp): the macro
  * just wrote the integer screen coord for FIFO slot `slot` (SXY0=0, SXY1=1,
  * SXY2=2) to `addr`, so record the shadow keyed by that address, validated by
@@ -1047,6 +1055,14 @@ int GTE_RotTransPers(int idx, int lm)
 	const long long rtpsMac1 = /*int44*/(long long)((long long)C2_TRX << 12) + (C2_R11 * VX(idx)) + (C2_R12 * VY(idx)) + (C2_R13 * VZ(idx));
 	const long long rtpsMac2 = /*int44*/(long long)((long long)C2_TRY << 12) + (C2_R21 * VX(idx)) + (C2_R22 * VY(idx)) + (C2_R23 * VZ(idx));
 	const long long rtpsMac3 = /*int44*/(long long)((long long)C2_TRZ << 12) + (C2_R31 * VX(idx)) + (C2_R32 * VY(idx)) + (C2_R33 * VZ(idx));
+
+	/* Whole-map far override: carries the unclamped re-projection of this vertex
+	 * (computed once below) into the PGXP FIFO so PGXP-on gets correct far screen
+	 * position and depth too. wmFarHit stays false on the legacy path. */
+	bool   wmFarHit = false;
+	double wmFarX = 0.0, wmFarY = 0.0;
+	float  wmFarW = 0.0f;
+
 	C2_MAC1 = A1(rtpsMac1);
 	C2_MAC2 = A2(rtpsMac2);
 	C2_MAC3 = A3(rtpsMac3);
@@ -1097,6 +1113,32 @@ int GTE_RotTransPers(int idx, int lm)
 		}
 	}
 
+	/* Whole-map far re-projection. The standard path above divides IR1/IR2 (view
+	 * X/Y clamped to s16) by SZ3 (view depth clamped to 0xffff), so beyond the
+	 * clamp the projection freezes. C2_MAC1/C2_MAC2 are the UNCLAMPED analogs of
+	 * IR1/IR2, and gte_shift(m_mac3,1) is the UNCLAMPED analog of SZ3 (identical
+	 * in range, no [0,0xffff] cap). Recompute in double precision only for
+	 * vertices where a clamp actually fired, and overwrite the on-screen coord
+	 * (still range-limited by Lm_G to the ±0x400 screen box; off-screen far
+	 * geometry clamps to the edge exactly as a near off-screen vertex would).
+	 * Gated on g_PsxWholeMapFar so the legacy path is byte-identical when off. */
+	if (g_PsxWholeMapFar)
+	{
+		long long fz = gte_shift(m_mac3, 1); /* unclamped SZ3 */
+		if (fz > 0 && (fz > 0xffff || C2_MAC1 != C2_IR1 || C2_MAC2 != C2_IR2))
+		{
+			double r   = (double)C2_H / (double)fz;
+			double fsx = (double)C2_OFX / 65536.0 + (double)C2_MAC1 * r;
+			double fsy = (double)C2_OFY / 65536.0 + (double)C2_MAC2 * r;
+			C2_SX2 = Lm_G1((long long)(fsx + (fsx >= 0.0 ? 0.5 : -0.5)));
+			C2_SY2 = Lm_G2((long long)(fsy + (fsy >= 0.0 ? 0.5 : -0.5)));
+			wmFarHit = true;
+			wmFarX = fsx;
+			wmFarY = fsy;
+			wmFarW = (float)fz; /* unclamped depth -> correct perspective + GL depth via PGXP */
+		}
+	}
+
 	/* PGXP: stash the full-precision projection keyed by the clamped integer screen
 	 * coord the prim will store. Gated — zero cost / zero effect when PGXP is off. */
 	if (g_PsxUsePgxp)
@@ -1116,6 +1158,15 @@ int GTE_RotTransPers(int idx, int lm)
 			/* At / behind the eye there is no valid projection; the clipper handles crossings. */
 			fx = (double)C2_SX2; fy = (double)C2_SY2;
 			pgxpW = 0.0f;
+		}
+
+		/* Whole-map far vertex: replace the SZ3-clamped precise coord/W with the
+		 * unclamped re-projection so PGXP-on renders far town geometry at correct
+		 * scale AND correct per-vertex depth (pgxpW = true unclamped view depth). */
+		if (wmFarHit) {
+			fx = wmFarX;
+			fy = wmFarY;
+			pgxpW = wmFarW;
 		}
 
 		/* Mirror the GTE SXY FIFO with a precise FIFO so the gte_stsxy* store macros
