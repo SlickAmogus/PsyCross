@@ -32,6 +32,7 @@
 
 #include "PsyX/PsyX_render.h"
 
+#ifndef _WIN32
 #ifdef __EMSCRIPTEN__
 int strcasecmp(const char* _l, const char* _r)
 {
@@ -39,9 +40,11 @@ int strcasecmp(const char* _l, const char* _r)
 	for (; *l && *r && (*l == *r || tolower(*l) == tolower(*r)); l++, r++);
 	return tolower(*l) - tolower(*r);
 }
-#elif !defined(_WIN32)
+#elif defined(__unix__)
 #include <strings.h>
 #endif
+#define _stricmp(s1, s2) strcasecmp(s1, s2)
+#endif //_WIN32
 
 SDL_Window* g_window = NULL;
 int g_swapInterval = 1;
@@ -315,14 +318,6 @@ static void PsyX_Sys_InitialiseInput()
 
 	PsyX_Pad_InitSystem();
 }
-
-#ifdef __GNUC__
-/* strcasecmp lives in <strings.h>, but in this TU an earlier include locks
- * the glibc feature-test macros before <strings.h> is reached, leaving it
- * undeclared under -std=gnu++17. Declare it directly (POSIX signature). */
-extern "C" int strcasecmp(const char* s1, const char* s2);
-#define _stricmp(s1, s2) strcasecmp(s1, s2)
-#endif
 
 // Keyboard mapping lookup
 int PsyX_LookupKeyboardMapping(const char* str, int default_value)
