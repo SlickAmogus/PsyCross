@@ -981,6 +981,7 @@ void PsyX_EndScene()
 	if (g_PsyX_WheelDownFrames > 0) g_PsyX_WheelDownFrames--;
 
 	PGXP_CoverageTick();
+	PGXP_MatrixNextGeneration();
 
 	GR_EndScene();
 

@@ -6,6 +6,10 @@
 #include "psx/gtereg.h"
 
 #include <math.h>
+#include <array>
+#include <stdint.h>
+#include <string.h>
+#include <unordered_map>
 
 
 
@@ -47,6 +51,725 @@ GTERegisters gteRegs;
 static int m_sf;
 static long long m_mac0;
 static long long m_mac3;
+
+/* Unquantized rotation-matrix shadow used only by PGXP's side channel.  The
+ * GTE registers and every integer result remain untouched.  Pointer entries
+ * are validated against all nine Q12 coefficients; value recovery is allowed
+ * only while a coefficient tuple has one unambiguous exact meaning in the
+ * current frame. */
+namespace
+{
+using MatrixKey = std::array<short, 9>;
+using ExactMatrix = std::array<double, 9>;
+using TranslationKey = std::array<int, 3>;
+using ExactTranslation = std::array<double, 3>;
+using VectorKey = std::array<short, 3>;
+using ExactVector = std::array<double, 3>;
+
+struct MatrixKeyHash
+{
+	size_t operator()(const MatrixKey& key) const
+	{
+		size_t hash = (size_t)1469598103934665603ULL;
+		for (short value : key)
+		{
+			hash ^= (unsigned short)value;
+			hash *= (size_t)1099511628211ULL;
+		}
+		return hash;
+	}
+};
+
+struct VectorKeyHash
+{
+	size_t operator()(const VectorKey& key) const
+	{
+		size_t hash = (size_t)1469598103934665603ULL;
+		for (short value : key)
+		{
+			hash ^= (unsigned short)value;
+			hash *= (size_t)1099511628211ULL;
+		}
+		return hash;
+	}
+};
+
+struct AddressEntry
+{
+	MatrixKey key{};
+	ExactMatrix exact{};
+	uint64_t generation = 0;
+	bool valid = false;
+};
+
+struct ValueEntry
+{
+	ExactMatrix exact{};
+	bool ambiguous = false;
+};
+
+struct TranslationEntry
+{
+	TranslationKey key{};
+	ExactTranslation exact{};
+	uint64_t generation = 0;
+	bool valid = false;
+};
+
+struct VectorAddressEntry
+{
+	VectorKey key{};
+	ExactVector exact{};
+	uint64_t generation = 0;
+	bool valid = false;
+};
+
+struct VectorValueEntry
+{
+	ExactVector exact{};
+	bool ambiguous = false;
+};
+
+static std::unordered_map<const void*, AddressEntry> s_matrixByAddress;
+static std::unordered_map<MatrixKey, ValueEntry, MatrixKeyHash> s_matrixByValue;
+static std::unordered_map<const void*, TranslationEntry> s_translationByAddress;
+static std::unordered_map<const void*, VectorAddressEntry> s_vectorByAddress;
+static std::unordered_map<VectorKey, VectorValueEntry, VectorKeyHash> s_vectorByValue;
+static uint64_t s_matrixGeneration = 1;
+
+static MatrixKey MatrixKeyFromMemory(const void* matrix)
+{
+	MatrixKey key;
+	const short* values = (const short*)matrix;
+	for (int i = 0; i < 9; ++i)
+		key[i] = values[i];
+	return key;
+}
+
+static MatrixKey MatrixKeyFromGte(void)
+{
+	return MatrixKey{{ C2_R11, C2_R12, C2_R13,
+		C2_R21, C2_R22, C2_R23,
+		C2_R31, C2_R32, C2_R33 }};
+}
+
+static TranslationKey TranslationKeyFromMemory(const void* matrix)
+{
+	const MATRIX* m = (const MATRIX*)matrix;
+	return TranslationKey{{ m->t[0], m->t[1], m->t[2] }};
+}
+
+static TranslationKey TranslationKeyFromGte(void)
+{
+	return TranslationKey{{ C2_TRX, C2_TRY, C2_TRZ }};
+}
+
+static VectorKey VectorKeyFromMemory(const void* vector)
+{
+	const short* v = (const short*)vector;
+	return VectorKey{{ v[0], v[1], v[2] }};
+}
+
+static VectorKey VectorKeyFromGte(int slot)
+{
+	return VectorKey{{ (short)VX(slot), (short)VY(slot), (short)VZ(slot) }};
+}
+
+static bool ExactEqual(const ExactMatrix& a, const ExactMatrix& b)
+{
+	for (int i = 0; i < 9; ++i)
+		if (a[i] != b[i])
+			return false;
+	return true;
+}
+
+static bool IdentityKey(const MatrixKey& key)
+{
+	static const MatrixKey identity = {{ 4096, 0, 0, 0, 4096, 0, 0, 0, 4096 }};
+	return key == identity;
+}
+
+static bool AspectIdentityKey(const MatrixKey& key)
+{
+	/* Psy-Q GsIDMATRIX2: identity plus the exact 3/4 NTSC Y scale. */
+	static const MatrixKey identity = {{ 4096, 0, 0, 0, 3072, 0, 0, 0, 4096 }};
+	return key == identity;
+}
+
+static ExactMatrix ExactIdentity(void)
+{
+	return ExactMatrix{{ 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 }};
+}
+
+static ExactMatrix ExactAspectIdentity(void)
+{
+	return ExactMatrix{{ 1.0, 0.0, 0.0, 0.0, 0.75, 0.0, 0.0, 0.0, 1.0 }};
+}
+
+static ExactMatrix ExactQuantizedMatrix(const MatrixKey& key)
+{
+	ExactMatrix exact;
+	for (int i = 0; i < 9; ++i)
+		exact[i] = (double)key[i] / 4096.0;
+	return exact;
+}
+
+static void AddValueEntry(const MatrixKey& key, const ExactMatrix& exact)
+{
+	auto inserted = s_matrixByValue.emplace(key, ValueEntry{ exact, false });
+	if (!inserted.second && !inserted.first->second.ambiguous &&
+		!ExactEqual(inserted.first->second.exact, exact))
+	{
+		/* Once ambiguous, stay ambiguous for this generation.  In particular,
+		 * never replace the canonical value with the most recent writer. */
+		inserted.first->second.ambiguous = true;
+	}
+}
+
+static void RegisterMatrix(const void* matrix, const MatrixKey& key,
+	const ExactMatrix& exact)
+{
+	AddressEntry entry;
+	entry.key = key;
+	entry.exact = exact;
+	entry.generation = s_matrixGeneration;
+	entry.valid = true;
+	s_matrixByAddress[matrix] = entry;
+	AddValueEntry(key, exact);
+}
+
+static bool LookupMatrix(const void* matrix, ExactMatrix& exact)
+{
+	const MatrixKey key = MatrixKeyFromMemory(matrix);
+	auto address = s_matrixByAddress.find(matrix);
+	if (address != s_matrixByAddress.end())
+	{
+		const AddressEntry& entry = address->second;
+		/* Address provenance is generation-scoped.  Keeping it across frames
+		 * would make a reused stack slot with the same Q12 tuple indistinguishable
+		 * from the old matrix.  Expiry trades only coverage for safety. */
+		const bool live = entry.generation == s_matrixGeneration;
+		if (live && entry.key == key)
+		{
+			if (!entry.valid)
+			{
+				/* Invalid means "do not trust the old unquantized twin", not
+				 * "discard all parent precision". The current stored Q12 matrix
+				 * is always a safe exact fallback for the PGXP side channel. */
+				exact = ExactQuantizedMatrix(key);
+				RegisterMatrix(matrix, key, exact);
+				return true;
+			}
+			exact = entry.exact;
+			return true;
+		}
+	}
+
+	/* The canonical Q12 identity has no lost information and is therefore safe
+	 * even when it originated as a static initializer rather than a producer. */
+	if (IdentityKey(key))
+	{
+		exact = ExactIdentity();
+		RegisterMatrix(matrix, key, exact);
+		return true;
+	}
+	if (AspectIdentityKey(key))
+	{
+		exact = ExactAspectIdentity();
+		RegisterMatrix(matrix, key, exact);
+		return true;
+	}
+
+	auto value = s_matrixByValue.find(key);
+	if (value != s_matrixByValue.end() && !value->second.ambiguous)
+		exact = value->second.exact;
+	else
+		exact = ExactQuantizedMatrix(key);
+	/* A value-recovered copy is deliberately generation-scoped: on the next
+	 * frame the same integer tuple may represent a slightly different angle. */
+	RegisterMatrix(matrix, key, exact);
+	return true;
+}
+
+static void RegisterTranslation(const void* matrix, const TranslationKey& key,
+	const ExactTranslation& exact)
+{
+	TranslationEntry entry;
+	entry.key = key;
+	entry.exact = exact;
+	entry.generation = s_matrixGeneration;
+	entry.valid = true;
+	s_translationByAddress[matrix] = entry;
+}
+
+static bool LookupTranslation(const void* matrix, ExactTranslation& exact)
+{
+	const TranslationKey key = TranslationKeyFromMemory(matrix);
+	auto address = s_translationByAddress.find(matrix);
+	if (address != s_translationByAddress.end())
+	{
+		const TranslationEntry& entry = address->second;
+		if (entry.generation == s_matrixGeneration && entry.key == key)
+		{
+			if (!entry.valid)
+			{
+				exact = ExactTranslation{{ (double)key[0], (double)key[1], (double)key[2] }};
+				RegisterTranslation(matrix, key, exact);
+				return true;
+			}
+			exact = entry.exact;
+			return true;
+		}
+	}
+
+	/* An integer GTE translation is already exact in its own units.  Unknown
+	 * provenance therefore degrades to the legacy value without losing matrix
+	 * rotation coverage. */
+	exact = ExactTranslation{{ (double)key[0], (double)key[1], (double)key[2] }};
+	RegisterTranslation(matrix, key, exact);
+	return true;
+}
+
+static bool ExactVectorEqual(const ExactVector& a, const ExactVector& b)
+{
+	return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+static void RegisterVector(const void* vector, const VectorKey& key, const ExactVector& exact)
+{
+	VectorAddressEntry address;
+	address.key = key;
+	address.exact = exact;
+	address.generation = s_matrixGeneration;
+	address.valid = true;
+	s_vectorByAddress[vector] = address;
+
+	auto value = s_vectorByValue.emplace(key, VectorValueEntry{ exact, false });
+	if (!value.second && !value.first->second.ambiguous &&
+		!ExactVectorEqual(value.first->second.exact, exact))
+	{
+		/* A tuple remains unusable for value recovery after the first conflict;
+		 * never oscillate to whichever exact vector registered last. */
+		value.first->second.ambiguous = true;
+	}
+}
+
+static bool LookupVector(const void* vector, ExactVector& exact)
+{
+	const VectorKey key = VectorKeyFromMemory(vector);
+	auto address = s_vectorByAddress.find(vector);
+	if (address != s_vectorByAddress.end() &&
+		address->second.generation == s_matrixGeneration &&
+		address->second.key == key)
+	{
+		if (!address->second.valid)
+			return false;
+		exact = address->second.exact;
+		return true;
+	}
+
+	auto value = s_vectorByValue.find(key);
+	if (value == s_vectorByValue.end() || value->second.ambiguous)
+		return false;
+	exact = value->second.exact;
+	RegisterVector(vector, key, exact);
+	return true;
+}
+
+struct CurrentRotation
+{
+	MatrixKey key{};
+	ExactMatrix exact{};
+	bool valid = false;
+};
+
+static CurrentRotation s_currentRotation;
+
+struct CurrentTranslation
+{
+	TranslationKey key{};
+	ExactTranslation exact{};
+	bool valid = false;
+};
+
+static CurrentTranslation s_currentTranslation;
+
+struct CurrentVector
+{
+	VectorKey key{};
+	ExactVector exact{};
+	bool valid = false;
+};
+
+static CurrentVector s_currentVector[3];
+
+static bool CurrentExact(ExactMatrix& exact)
+{
+	const MatrixKey key = MatrixKeyFromGte();
+	if (s_currentRotation.valid && s_currentRotation.key == key)
+	{
+		exact = s_currentRotation.exact;
+		return true;
+	}
+	if (IdentityKey(key))
+	{
+		exact = ExactIdentity();
+		return true;
+	}
+	if (AspectIdentityKey(key))
+	{
+		exact = ExactAspectIdentity();
+		return true;
+	}
+	return false;
+}
+
+static bool CurrentExactTranslation(ExactTranslation& exact)
+{
+	const TranslationKey key = TranslationKeyFromGte();
+	if (s_currentTranslation.valid && s_currentTranslation.key == key)
+	{
+		exact = s_currentTranslation.exact;
+		return true;
+	}
+	return false;
+}
+
+static bool CurrentExactVector(int slot, ExactVector& exact)
+{
+	if ((unsigned)slot > 2u)
+		return false;
+	const VectorKey key = VectorKeyFromGte(slot);
+	if (s_currentVector[slot].valid && s_currentVector[slot].key == key)
+	{
+		exact = s_currentVector[slot].exact;
+		return true;
+	}
+	return false;
+}
+
+struct ColumnMultiply
+{
+	const char* inputBase = nullptr;
+	char* outputBase = nullptr;
+	MatrixKey inputKey{};
+	ExactMatrix result{};
+	int column = 0;
+	bool valid = false;
+};
+
+static ColumnMultiply s_columnMultiply;
+}
+
+extern "C" void PGXP_MatrixRegister(const MATRIX* matrix, const double exactValues[9])
+{
+	if (!matrix || !exactValues)
+		return;
+	ExactMatrix exact;
+	for (int i = 0; i < 9; ++i)
+		exact[i] = exactValues[i];
+	RegisterMatrix(matrix, MatrixKeyFromMemory(matrix), exact);
+}
+
+extern "C" int PGXP_MatrixLookup(const MATRIX* matrix, double exactValues[9])
+{
+	if (!matrix || !exactValues)
+		return 0;
+	ExactMatrix exact;
+	if (!LookupMatrix(matrix, exact))
+		return 0;
+	for (int i = 0; i < 9; ++i)
+		exactValues[i] = exact[i];
+	return 1;
+}
+
+extern "C" int PGXP_MatrixLookupCurrent(double exactValues[9])
+{
+	if (!exactValues)
+		return 0;
+	ExactMatrix exact;
+	if (!CurrentExact(exact))
+		return 0;
+	for (int i = 0; i < 9; ++i)
+		exactValues[i] = exact[i];
+	return 1;
+}
+
+extern "C" void PGXP_MatrixCopy(MATRIX* dst, const MATRIX* src)
+{
+	if (!dst || !src)
+		return;
+	ExactMatrix exact;
+	if (LookupMatrix(src, exact))
+		RegisterMatrix(dst, MatrixKeyFromMemory(dst), exact);
+	else
+	{
+		AddressEntry entry;
+		entry.key = MatrixKeyFromMemory(dst);
+		entry.generation = s_matrixGeneration;
+		s_matrixByAddress[dst] = entry;
+	}
+}
+
+extern "C" void PGXP_MatrixRegisterTranslation(MATRIX* matrix, const double exactValues[3])
+{
+	if (!matrix || !exactValues)
+		return;
+	const ExactTranslation exact = {{ exactValues[0], exactValues[1], exactValues[2] }};
+	RegisterTranslation(matrix, TranslationKeyFromMemory(matrix), exact);
+}
+
+extern "C" void PGXP_MatrixRegisterTranslationQ12(MATRIX* matrix, int x, int y, int z)
+{
+	if (!matrix)
+		return;
+	/* Validate the producer's Q12->Q8 integer result before associating its
+	 * discarded four fractional bits with this MATRIX. */
+	if (matrix->t[0] != (x >> 4) || matrix->t[1] != (y >> 4) || matrix->t[2] != (z >> 4))
+	{
+		PGXP_MatrixInvalidateTranslation(matrix);
+		return;
+	}
+	const ExactTranslation exact = {{ (double)x / 16.0, (double)y / 16.0, (double)z / 16.0 }};
+	RegisterTranslation(matrix, TranslationKeyFromMemory(matrix), exact);
+}
+
+extern "C" int PGXP_MatrixLookupTranslation(const MATRIX* matrix, double exactValues[3])
+{
+	if (!matrix || !exactValues)
+		return 0;
+	ExactTranslation exact;
+	if (!LookupTranslation(matrix, exact))
+		return 0;
+	exactValues[0] = exact[0];
+	exactValues[1] = exact[1];
+	exactValues[2] = exact[2];
+	return 1;
+}
+
+extern "C" void PGXP_MatrixInvalidateTranslation(MATRIX* matrix)
+{
+	if (!matrix)
+		return;
+	TranslationEntry entry;
+	entry.key = TranslationKeyFromMemory(matrix);
+	entry.generation = s_matrixGeneration;
+	s_translationByAddress[matrix] = entry;
+}
+
+extern "C" void PGXP_MatrixCopyFull(MATRIX* dst, const MATRIX* src)
+{
+	if (!dst || !src)
+		return;
+	PGXP_MatrixCopy(dst, src);
+	ExactTranslation exact;
+	if (LookupTranslation(src, exact))
+		RegisterTranslation(dst, TranslationKeyFromMemory(dst), exact);
+	else
+		PGXP_MatrixInvalidateTranslation(dst);
+}
+
+extern "C" void PGXP_VectorRegisterQ12(const void* vector, int x, int y, int z)
+{
+	PGXP_VectorRegisterFixed(vector, x, y, z, 4);
+}
+
+extern "C" void PGXP_VectorRegisterFixed(const void* vector, int x, int y, int z, int shift)
+{
+	if (!g_PsxUsePgxp || !vector || shift < 0 || shift > 30)
+		return;
+	const VectorKey key = VectorKeyFromMemory(vector);
+	if ((int)key[0] != (x >> shift) || (int)key[1] != (y >> shift) || (int)key[2] != (z >> shift))
+		return;
+	const double scale = (double)(1u << shift);
+	const ExactVector exact = {{ (double)x / scale, (double)y / scale, (double)z / scale }};
+	RegisterVector(vector, key, exact);
+}
+
+extern "C" void PGXP_MatrixInvalidate(MATRIX* matrix)
+{
+	if (!matrix)
+		return;
+	AddressEntry entry;
+	entry.key = MatrixKeyFromMemory(matrix);
+	entry.generation = s_matrixGeneration;
+	s_matrixByAddress[matrix] = entry;
+}
+
+extern "C" void PGXP_MatrixNextGeneration(void)
+{
+	++s_matrixGeneration;
+	if (s_matrixGeneration == 0)
+		s_matrixGeneration = 1;
+	s_matrixByValue.clear();
+	/* Entries are generation-validated already; clearing also bounds storage and
+	 * eliminates any chance of a reused stack address inheriting old metadata. */
+	s_matrixByAddress.clear();
+	s_translationByAddress.clear();
+	s_vectorByAddress.clear();
+	s_vectorByValue.clear();
+}
+
+extern "C" void PGXP_MatrixInvalidateCurrent(void)
+{
+	s_currentRotation.valid = false;
+	s_columnMultiply = ColumnMultiply{};
+}
+
+extern "C" void PGXP_MatrixInvalidateCurrentTranslation(void)
+{
+	s_currentTranslation.valid = false;
+}
+
+extern "C" void PGXP_VectorInvalidateCurrent(int slot)
+{
+	if ((unsigned)slot <= 2u)
+		s_currentVector[slot].valid = false;
+}
+
+extern "C" void PGXP_MatrixSetRot(const void* matrix)
+{
+	s_currentRotation.valid = false;
+	s_columnMultiply = ColumnMultiply{};
+	if (!matrix)
+		return;
+	ExactMatrix exact;
+	const MatrixKey memoryKey = MatrixKeyFromMemory(matrix);
+	const MatrixKey gteKey = MatrixKeyFromGte();
+	if (memoryKey == gteKey && LookupMatrix(matrix, exact))
+	{
+		s_currentRotation.key = gteKey;
+		s_currentRotation.exact = exact;
+		s_currentRotation.valid = true;
+	}
+}
+
+extern "C" void PGXP_MatrixSetTrans(const void* matrix)
+{
+	s_currentTranslation.valid = false;
+	if (!matrix)
+		return;
+	ExactTranslation exact;
+	const TranslationKey memoryKey = TranslationKeyFromMemory(matrix);
+	const TranslationKey gteKey = TranslationKeyFromGte();
+	if (memoryKey == gteKey && LookupTranslation(matrix, exact))
+	{
+		s_currentTranslation.key = gteKey;
+		s_currentTranslation.exact = exact;
+		s_currentTranslation.valid = true;
+	}
+}
+
+extern "C" void PGXP_VectorLoad(const void* vector, int slot)
+{
+	if ((unsigned)slot > 2u)
+		return;
+	s_currentVector[slot].valid = false;
+	if (!g_PsxUsePgxp || !vector)
+		return;
+	ExactVector exact;
+	const VectorKey memoryKey = VectorKeyFromMemory(vector);
+	const VectorKey gteKey = VectorKeyFromGte(slot);
+	if (memoryKey == gteKey && LookupVector(vector, exact))
+	{
+		s_currentVector[slot].key = gteKey;
+		s_currentVector[slot].exact = exact;
+		s_currentVector[slot].valid = true;
+	}
+}
+
+extern "C" void PGXP_MatrixCaptureCurrent(void* matrix)
+{
+	if (!matrix)
+		return;
+	ExactMatrix exact;
+	const MatrixKey memoryKey = MatrixKeyFromMemory(matrix);
+	if (memoryKey == MatrixKeyFromGte() && CurrentExact(exact))
+		RegisterMatrix(matrix, memoryKey, exact);
+	else
+		PGXP_MatrixInvalidate((MATRIX*)matrix);
+
+	ExactTranslation translation;
+	const TranslationKey memoryTranslation = TranslationKeyFromMemory(matrix);
+	if (memoryTranslation == TranslationKeyFromGte() && CurrentExactTranslation(translation))
+		RegisterTranslation(matrix, memoryTranslation, translation);
+	else
+		PGXP_MatrixInvalidateTranslation((MATRIX*)matrix);
+}
+
+extern "C" void PGXP_MatrixLoadColumn(const void* columnPtr)
+{
+	if (!columnPtr)
+	{
+		s_columnMultiply.valid = false;
+		return;
+	}
+
+	if (s_columnMultiply.column == 0)
+	{
+		s_columnMultiply = ColumnMultiply{};
+		s_columnMultiply.inputBase = (const char*)columnPtr;
+		ExactMatrix lhs, rhs;
+		if (CurrentExact(lhs) && LookupMatrix(columnPtr, rhs))
+		{
+			s_columnMultiply.inputKey = MatrixKeyFromMemory(columnPtr);
+			for (int row = 0; row < 3; ++row)
+				for (int col = 0; col < 3; ++col)
+					s_columnMultiply.result[row * 3 + col] =
+						lhs[row * 3 + 0] * rhs[0 * 3 + col] +
+						lhs[row * 3 + 1] * rhs[1 * 3 + col] +
+						lhs[row * 3 + 2] * rhs[2 * 3 + col];
+			s_columnMultiply.valid = true;
+		}
+	}
+	else
+	{
+		const int col = s_columnMultiply.column;
+		if ((const char*)columnPtr != s_columnMultiply.inputBase + col * (int)sizeof(short))
+			s_columnMultiply.valid = false;
+		if (s_columnMultiply.valid)
+		{
+			const short* p = (const short*)columnPtr;
+			for (int row = 0; row < 3; ++row)
+				if (p[row * 3] != s_columnMultiply.inputKey[row * 3 + col])
+					s_columnMultiply.valid = false;
+		}
+	}
+}
+
+extern "C" void PGXP_MatrixStoreColumn(void* columnPtr)
+{
+	if (!columnPtr)
+	{
+		s_columnMultiply = ColumnMultiply{};
+		return;
+	}
+
+	const int col = s_columnMultiply.column;
+	if (col == 0)
+	{
+		s_columnMultiply.outputBase = (char*)columnPtr;
+		/* Do not let an old address twin escape while this matrix is only partly
+		 * overwritten.  Avoid reading its not-yet-initialized remaining columns. */
+		AddressEntry entry;
+		entry.generation = s_matrixGeneration;
+		s_matrixByAddress[columnPtr] = entry;
+	}
+	else if ((char*)columnPtr != s_columnMultiply.outputBase + col * (int)sizeof(short))
+	{
+		s_columnMultiply.valid = false;
+	}
+
+	if (++s_columnMultiply.column == 3)
+	{
+		MATRIX* output = (MATRIX*)s_columnMultiply.outputBase;
+		if (output && s_columnMultiply.valid)
+			RegisterMatrix(output, MatrixKeyFromMemory(output), s_columnMultiply.result);
+		else if (output)
+			PGXP_MatrixInvalidate(output);
+		s_columnMultiply = ColumnMultiply{};
+	}
+}
 
 unsigned int gte_leadingzerocount(unsigned int lzcs) 
 {
@@ -329,16 +1052,20 @@ int GTE_RotTransPers(int idx, int lm)
 {
 	int h_over_sz3;
 
+	const long long rtpsMac1 = /*int44*/(long long)((long long)C2_TRX << 12) + (C2_R11 * VX(idx)) + (C2_R12 * VY(idx)) + (C2_R13 * VZ(idx));
+	const long long rtpsMac2 = /*int44*/(long long)((long long)C2_TRY << 12) + (C2_R21 * VX(idx)) + (C2_R22 * VY(idx)) + (C2_R23 * VZ(idx));
+	const long long rtpsMac3 = /*int44*/(long long)((long long)C2_TRZ << 12) + (C2_R31 * VX(idx)) + (C2_R32 * VY(idx)) + (C2_R33 * VZ(idx));
+
 	/* Whole-map far override: carries the unclamped re-projection of this vertex
 	 * (computed once below) into the PGXP FIFO so PGXP-on gets correct far screen
-	 * pos + depth too. wmFarHit stays false on the legacy path. */
+	 * position and depth too. wmFarHit stays false on the legacy path. */
 	bool   wmFarHit = false;
 	double wmFarX = 0.0, wmFarY = 0.0;
 	float  wmFarW = 0.0f;
 
-	C2_MAC1 = A1(/*int44*/(long long)((long long)C2_TRX << 12) + (C2_R11 * VX(idx)) + (C2_R12 * VY(idx)) + (C2_R13 * VZ(idx)));
-	C2_MAC2 = A2(/*int44*/(long long)((long long)C2_TRY << 12) + (C2_R21 * VX(idx)) + (C2_R22 * VY(idx)) + (C2_R23 * VZ(idx)));
-	C2_MAC3 = A3(/*int44*/(long long)((long long)C2_TRZ << 12) + (C2_R31 * VX(idx)) + (C2_R32 * VY(idx)) + (C2_R33 * VZ(idx)));
+	C2_MAC1 = A1(rtpsMac1);
+	C2_MAC2 = A2(rtpsMac2);
+	C2_MAC3 = A3(rtpsMac3);
 	C2_IR1 = Lm_B1(C2_MAC1, lm);
 	C2_IR2 = Lm_B2(C2_MAC2, lm);
 	C2_IR3 = Lm_B3_sf(m_mac3, m_sf, lm);
@@ -351,6 +1078,40 @@ int GTE_RotTransPers(int idx, int lm)
 	C2_SXY1 = C2_SXY2;
 	C2_SX2 = Lm_G1(F((long long)C2_OFX + ((long long)C2_IR1 * h_over_sz3)) >> 16);
 	C2_SY2 = Lm_G2(F((long long)C2_OFY + ((long long)C2_IR2 * h_over_sz3)) >> 16);
+
+	const bool capturePrecise = g_PsxUsePgxp || g_PsyX_UsePerPixelFlashlight;
+	double viewX = 0.0, viewY = 0.0, viewZ = 0.0;
+	if (capturePrecise)
+	{
+		/* Saturated IR/SZ coordinates paired with an unsaturated W do not form a
+		 * coherent homogeneous position. Preserve the raw Q12 transform instead. */
+		const double q12Scale = 1.0 / 4096.0;
+		viewX = (double)rtpsMac1 * q12Scale;
+		viewY = (double)rtpsMac2 * q12Scale;
+		viewZ = (double)rtpsMac3 * q12Scale;
+
+		/* When all nine rotation and all three translation registers still
+		 * validate, PGXP may project through their unquantized twins.  Every
+		 * legacy MAC/IR/SZ/SXY result above remains bit-identical. */
+		ExactMatrix exactRotation;
+		ExactTranslation exactTranslation;
+		if (g_PsxUsePgxp && CurrentExact(exactRotation) && CurrentExactTranslation(exactTranslation))
+		{
+			double vx = (double)VX(idx);
+			double vy = (double)VY(idx);
+			double vz = (double)VZ(idx);
+			ExactVector exactInput;
+			if (CurrentExactVector(idx, exactInput))
+			{
+				vx = exactInput[0];
+				vy = exactInput[1];
+				vz = exactInput[2];
+			}
+			viewX = exactTranslation[0] + exactRotation[0] * vx + exactRotation[1] * vy + exactRotation[2] * vz;
+			viewY = exactTranslation[1] + exactRotation[3] * vx + exactRotation[4] * vy + exactRotation[5] * vz;
+			viewZ = exactTranslation[2] + exactRotation[6] * vx + exactRotation[7] * vy + exactRotation[8] * vz;
+		}
+	}
 
 	/* Whole-map far re-projection. The standard path above divides IR1/IR2 (view
 	 * X/Y clamped to s16) by SZ3 (view depth clamped to 0xffff), so beyond the
@@ -382,31 +1143,19 @@ int GTE_RotTransPers(int idx, int lm)
 	 * coord the prim will store. Gated — zero cost / zero effect when PGXP is off. */
 	if (g_PsxUsePgxp)
 	{
-		/* Project with a TRUE float divide, NOT the GTE's h_over_sz3. h_over_sz3 is the
-		 * hardware UNR divide SATURATED by Lm_E to 0x1ffff (H/SZ3 capped at ~2.0) as soon
-		 * as SZ3 < H/2, so geometry close to the camera got a WRONG precise coord AND was
-		 * forced to affine (W=0) below. A poly straddling that threshold then renders
-		 * half-perspective / half-affine and smears at the screen edge. The float divide
-		 * has no cap: every in-front vertex (SZ3 > 0) projects correctly and stays on the
-		 * perspective path, so the whole poly is consistent. (For SZ3 >= H/2 this is
-		 * identical to the old path — only the previously-broken close case changes.)
-		 * W = view-space SZ3 (only the per-vertex ratio matters; absolute scale cancels). */
+		/* The hardware reciprocal and screen registers saturate near the eye and at
+		 * the guard band. The precise twin uses the unsaturated view tuple so XY and W
+		 * remain one coherent projection; the legacy GTE registers above stay intact. */
 		double fx, fy;
 		float  pgxpW;
-		if (C2_SZ3 > 0) {
-			double ratio = (double)C2_H / (double)C2_SZ3;            /* H/SZ3, UNclamped */
-			fx = (double)C2_OFX / 65536.0 + (double)C2_IR1 * ratio;
-			fy = (double)C2_OFY / 65536.0 + (double)C2_IR2 * ratio;
-			/* W for the shader's perspective divide. C2_SZ3 is the GTE's CLAMPED 16-bit
-			 * depth register; two independent GTE calls for a shared edge quantize to
-			 * SZ3 values 1-2 apart, so the per-vertex 1/W diverges and the perspective
-			 * interpolation across the shared edge mismatches -> seam that gets more
-			 * visible with distance. gte_shift(m_mac3,1) is the SAME shift Lm_D applies
-			 * to make SZ3 but WITHOUT the [0,0xffff] clamp -> full precision, so coincident
-			 * edges get matching W. Toggle (pgxpdepth 0/1) for A/B. */
-			pgxpW = g_PgxpUseUnquantizedDepth ? (float)gte_shift(m_mac3, 1) : (float)C2_SZ3;
+		if (viewZ > 0.0) {
+			double ratio = (double)C2_H / viewZ;
+			fx = (double)C2_OFX / 65536.0 + viewX * ratio;
+			fy = (double)C2_OFY / 65536.0 + viewY * ratio;
+			/* The optional legacy value remains available for console A/B testing. */
+			pgxpW = g_PgxpUseUnquantizedDepth ? (float)viewZ : (float)C2_SZ3;
 		} else {
-			/* SZ3 == 0: at / behind the near plane, no valid projection -> affine (W=0). */
+			/* At / behind the eye there is no valid projection; the clipper handles crossings. */
 			fx = (double)C2_SX2; fy = (double)C2_SY2;
 			pgxpW = 0.0f;
 		}
@@ -440,11 +1189,11 @@ int GTE_RotTransPers(int idx, int lm)
 	 * MAC1/MAC2/MAC3). Source data for the per-pixel flashlight AND the PGXP
 	 * near-plane clipper, so it runs when either is on. Mirrors the SXY FIFO
 	 * shift above so gte_stsxy* can resolve address->view-pos. Off = no cost. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	if (capturePrecise)
 	{
-		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)C2_MAC1;
-		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)C2_MAC2;
-		s_vsFifoZ[0] = s_vsFifoZ[1]; s_vsFifoZ[1] = s_vsFifoZ[2]; s_vsFifoZ[2] = (float)C2_MAC3;
+		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)viewX;
+		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)viewY;
+		s_vsFifoZ[0] = s_vsFifoZ[1]; s_vsFifoZ[1] = s_vsFifoZ[2]; s_vsFifoZ[2] = (float)viewZ;
 	}
 
 	return h_over_sz3;

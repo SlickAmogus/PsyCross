@@ -140,9 +140,22 @@ extern "C" {
 #endif
 void Shadow_Store(void* addr, float x, float y, float w, unsigned value);
 void Shadow_Copy(void* dst, const void* src);
+void Shadow_CopyScreenOffset(void* dst, const void* src);
+void Shadow_InterpolateScreenOffset(void* dst, const void* src0, const void* src1, int alphaQ12);
+/* Manual screen projection side-channel. projectedVector points to three
+ * consecutive 32-bit integers (screen X, screen Y, view Z); the association is
+ * generation-stamped and validates all three before any copy. */
+void PGXP_StoreManualProjection(const void* projectedVector, float x, float y, float w);
+void PGXP_CopyManualProjectionScreenOffset(void* dst, const void* projectedVector);
+void PGXP_CopyManualProjectionScreenOffsetQ12(void* dst, const void* projectedVector,
+                                               int scaleXQ12, int scaleYQ12);
 void PGXP_FrameReset(void);
 void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] det/miss when on */
-float PGXP_GetSzMax(void);    /* prev-frame max SZ for shader depth normalize */
+float PGXP_GetSzMax(void);    /* frame-wide guarded far depth for shader normalize */
+/* Clear stencil for the next ordering-table draw and, when clearDepth is
+ * nonzero, the frame depth buffer too. The implementation also repairs the
+ * renderer state cache and guarantees that an old scissor cannot crop clears. */
+void PsyX_ClearDrawBuffers(int clearDepth);
 #if defined(__cplusplus)
 }
 #endif
