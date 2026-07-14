@@ -746,6 +746,7 @@ typedef struct
 	GLint pixelScaleLoc;
 	GLint texelSizeLoc;
 	GLint texOffsetLoc;
+	GLint hiresHalfLoc;
 	GLint fogColorLoc;
 	GLint fogToBlackLoc;
 	GLint fogStrengthLoc;
@@ -784,6 +785,7 @@ GLint u_ditherForceLoc;
 GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
 GLint u_texOffsetLoc;
+GLint u_hiresHalfLoc;
 GLint u_fogColorLoc;
 GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
@@ -1278,13 +1280,24 @@ const char* gte_shader_32_rgba =
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec2 texelSize;\n"\
 	"	uniform vec2 u_texOffset;\n"\
+	"	uniform vec2 u_hiresHalf;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
 	/* u_texOffset: the prim's tpage origin relative to the replaced TIM's
 	 * VRAM origin, in native texels. A surface wider than one tpage is drawn
 	 * as several prims whose UVs each restart at their own tpage — without
-	 * the offset every chunk sampled the override from x=0 (duplicated image). */
-	"		vec2 tc = (v_texcoord.xy + u_texOffset) * texelSize + texelSize * 0.5;\n"\
+	 * the offset every chunk sampled the override from x=0 (duplicated image).
+	 *
+	 * u_hiresHalf: half a HIRES texel in native-texel units (0.5*native/hires
+	 * per axis). The old "+ 0.5 native texel" shift pushed edge fragments up
+	 * to half a texel into the NEIGHBORING atlas cell (white marks hugging
+	 * every font glyph / the cursor sprite with texture packs); clamping the
+	 * fractional part instead keeps the LINEAR footprint inside the fragment's
+	 * own native texel — full hires detail within the cell, zero cross-cell
+	 * bleed at cell edges. (0,0) = free linear, no clamp (no-override path). */
+	"		vec2 uvn = v_texcoord.xy + u_texOffset;\n"\
+	"		vec2 cell = floor(uvn);\n"\
+	"		vec2 tc = (cell + clamp(uvn - cell, u_hiresHalf, vec2(1.0) - u_hiresHalf)) * texelSize;\n"\
 	"		fragColor = texture2D(s_texture, tc);\n"\
 	/* PSX colour-0 transparency for hi-res overrides: alpha 0 texels are
 	 * holes on ANY prim (opaque prims ignore blending, so without the
@@ -1523,6 +1536,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->texOffsetLoc = glGetUniformLocation(sh->shader, "u_texOffset");
+	sh->hiresHalfLoc = glGetUniformLocation(sh->shader, "u_hiresHalf");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
 	sh->fogToBlackLoc = glGetUniformLocation(sh->shader, "u_fogToBlack");
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
@@ -1856,6 +1870,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
+		u_hiresHalfLoc = -1;
 		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_4.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
@@ -1887,6 +1902,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
+		u_hiresHalfLoc = -1;
 		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_8.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
@@ -1918,6 +1934,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
+		u_hiresHalfLoc = -1;
 		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_16.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
@@ -1949,6 +1966,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
 		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
 		u_texOffsetLoc = g_gte_shader_32_rgba.texOffsetLoc;
+		u_hiresHalfLoc = g_gte_shader_32_rgba.hiresHalfLoc;
 		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
 		u_fogToBlackLoc = g_gte_shader_32_rgba.fogToBlackLoc;
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
@@ -2107,7 +2125,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	g_lastBoundTexture = texture;
 }
 
-void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY)
+void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
+                               int hiresW, int hiresH)
 {
 	if(u_texelSizeLoc == -1)
 		return;
@@ -2120,6 +2139,20 @@ void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY)
 	{
 		float ofs[] = { (float)offsetX, (float)offsetY };
 		glUniform2fv(u_texOffsetLoc, 1, ofs);
+	}
+
+	if(u_hiresHalfLoc != -1)
+	{
+		/* Half a hires texel in native-texel units; the fragment shader clamps
+		 * its LINEAR footprint inside each native texel with this. Capped at
+		 * 0.5 (native-res replacement = pure texel-center sampling); 0 when the
+		 * hires size is unknown (legacy DR_PSYX_TEX path) = no clamp. */
+		float hx = (hiresW > 0 && width  > 0) ? 0.5f * (float)width  / (float)hiresW : 0.0f;
+		float hy = (hiresH > 0 && height > 0) ? 0.5f * (float)height / (float)hiresH : 0.0f;
+		float hh[2];
+		hh[0] = (hx > 0.5f) ? 0.5f : hx;
+		hh[1] = (hy > 0.5f) ? 0.5f : hy;
+		glUniform2fv(u_hiresHalfLoc, 1, hh);
 	}
 }
 

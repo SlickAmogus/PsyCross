@@ -457,6 +457,11 @@ int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
 int overrideTextureOffsetX = 0;
 int overrideTextureOffsetY = 0;
+/* Hi-res GL texture pixel dims (0 = unknown/legacy) — feed the shader's
+ * per-native-texel footprint clamp so LINEAR sampling can't bleed into the
+ * neighboring atlas cell (font glyph / cursor edge artifacts with packs). */
+int overrideTextureHiresW = 0;
+int overrideTextureHiresH = 0;
 
 // DR_PSYX_TEX packet state, kept separately so the hi-res override lookup
 // below can restore it on a miss instead of clobbering it to zero.
@@ -471,9 +476,11 @@ static int drPsyxTexOverrideHeight = 0;
  * links for hosts that don't provide the table. */
 extern "C" unsigned int __attribute__((weak))
 HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
-                                int* outOffX, int* outOffY)
+                                int* outOffX, int* outOffY,
+                                int* outHiresW, int* outHiresH)
 {
 	(void)tpage; (void)clut; (void)outW; (void)outH; (void)outOffX; (void)outOffY;
+	(void)outHiresW; (void)outHiresH;
 	return 0;
 }
 
@@ -489,14 +496,16 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
  * path keeps its original semantics. */
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
-	int nW = 0, nH = 0, offX = 0, offY = 0;
-	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY);
+	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
+	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
 	if (hi != 0) {
 		overrideTexture        = (TextureID)hi;
 		overrideTextureWidth   = nW;
 		overrideTextureHeight  = nH;
 		overrideTextureOffsetX = offX;
 		overrideTextureOffsetY = offY;
+		overrideTextureHiresW  = hiW;
+		overrideTextureHiresH  = hiH;
 	}
 	else {
 		overrideTexture        = drPsyxTexOverride;
@@ -504,6 +513,8 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 		overrideTextureHeight  = drPsyxTexOverrideHeight;
 		overrideTextureOffsetX = 0;
 		overrideTextureOffsetY = 0;
+		overrideTextureHiresW  = 0;
+		overrideTextureHiresH  = 0;
 	}
 }
 
@@ -699,6 +710,11 @@ struct GPUDrawSplit
 	unsigned int	startVertex; /* widened from u_short: MAX_VERTEX_BUFFER_SIZE now > 65535 */
 	unsigned int	numVerts;
 
+	/* Hi-res override texture dims for this split (0 = unknown) — the
+	 * shader's per-native-texel footprint clamp needs the upscale factor. */
+	int				overrideHiresW;
+	int				overrideHiresH;
+
 	const char*		debugText;
 };
 
@@ -724,6 +740,8 @@ void ClearSplits()
 	overrideTextureHeight = drPsyxTexOverrideHeight;
 	overrideTextureOffsetX = 0;
 	overrideTextureOffsetY = 0;
+	overrideTextureHiresW = 0;
+	overrideTextureHiresH = 0;
 }
 
 template<class T>
@@ -1515,6 +1533,8 @@ static void AddSplit(bool semiTrans, bool textured)
 	split.drawenv.tw.h = overrideTextureHeight;
 	split.drawenv.tw.x = overrideTextureOffsetX;
 	split.drawenv.tw.y = overrideTextureOffsetY;
+	split.overrideHiresW = overrideTextureHiresW;
+	split.overrideHiresH = overrideTextureHiresH;
 
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
@@ -1557,7 +1577,8 @@ void DrawSplit(const GPUDrawSplit& split)
 
 	if (split.texFormat == TF_32_BIT_RGBA)
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
-		                          split.drawenv.tw.x, split.drawenv.tw.y);
+		                          split.drawenv.tw.x, split.drawenv.tw.y,
+		                          split.overrideHiresW, split.overrideHiresH);
 
 	const bool drawOnScreen = split.drawenv.dfe;
 	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
@@ -2159,7 +2180,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			 * with bit 15 set (clutY 512+). If the override table claims this
 			 * (tpage, clut), the prim never samples VRAM; let it through. */
 			if (clutY > 511 &&
-			    HiresOverride_LookupByTpageClut(tpage, clut, nullptr, nullptr, nullptr, nullptr) == 0) {
+			    HiresOverride_LookupByTpageClut(tpage, clut, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) == 0) {
 				static int s_pft4DropCount = 0;
 				if (s_pft4DropCount < 32) {
 					eprintinfo("[PFT4DROP] tpage=0x%04hX clut=0x%04hX uvs=(%d,%d)(%d,%d)(%d,%d)(%d,%d) reason=clutY_oob (%d)\n",
@@ -2568,6 +2589,8 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		overrideTexture = psytex->code[0] & 0xFFFFFF;
 		overrideTextureWidth = psytex->code[1] & 0xFFF;
 		overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
+		overrideTextureHiresW = 0; /* unknown upscale: shader clamp off */
+		overrideTextureHiresH = 0;
 		drPsyxTexOverride = overrideTexture;
 		drPsyxTexOverrideWidth = overrideTextureWidth;
 		drPsyxTexOverrideHeight = overrideTextureHeight;
