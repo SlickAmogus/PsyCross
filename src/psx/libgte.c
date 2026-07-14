@@ -122,6 +122,21 @@ void PopMatrix()
 	}
 }
 
+/* PGXP shadow registration for the RotTransPers* wrappers below.
+ *
+ * These project through PsyCross's own gte_stsxy* macros (psx/inline_c.h), which
+ * — unlike the game's gte_stsxy3c in pc_port/include — never call PGXP_StoreAddr.
+ * Nothing was ever recorded for the vertices they write, so the draw side resolved
+ * no shadow at the prim address and fell back to affine: that is why the
+ * GsSortObject4J item drawers (inventory carousel + world pickup) rendered affine
+ * no matter what use_pgxp said.
+ *
+ * `slot` is the vertex's position in the GTE's 3-deep SXY FIFO at the moment of the
+ * store (2 = newest), mirrored by the precise FIFO in PsyX_GTE.cpp. The FIFO shifts
+ * on every RTPS, so a capture must happen before any further projection. */
+extern int  g_PsxUsePgxp;
+extern void PGXP_StoreAddr(void* addr, int slot);
+
 void RotTrans(SVECTOR* v0, VECTOR* v1, long* flag)
 {
 	gte_RotTrans(v0, v1, flag);
@@ -140,6 +155,11 @@ int RotTransPers(SVECTOR* v0, int* sxy, long* p, long* flag)
 	int sz;
 	gte_RotTransPers(v0, sxy, p, flag, &sz);
 
+	/* One RTPS: this vertex is the newest FIFO entry. (The quad drawers in
+	 * libgs_stub.c project v3 through here after a RotTransPers3 on v0..v2.) */
+	if (g_PsxUsePgxp)
+		PGXP_StoreAddr(sxy, 2);
+
 	return sz;
 }
 
@@ -155,6 +175,15 @@ int RotTransPers3(SVECTOR* v0, SVECTOR* v1, SVECTOR* v2, long* sxy0, long* sxy1,
 {
 	int sz;
 	gte_RotTransPers3(v0, v1, v2, sxy0, sxy1, sxy2, p, flag, &sz);
+
+	/* RTPT leaves v0..v2 in FIFO slots 0..2. Capture before the caller projects
+	 * anything else (the quad drawers follow up with RotTransPers on v3). */
+	if (g_PsxUsePgxp)
+	{
+		PGXP_StoreAddr(sxy0, 0);
+		PGXP_StoreAddr(sxy1, 1);
+		PGXP_StoreAddr(sxy2, 2);
+	}
 
 	/* Mirror the SZ FIFO 1:1 (SZ0=oldest/unused, SZ1..3 = v0..v2), matching the
 	 * indexing ApplyGtePerVertexDepth expects (triangle reads sz[1..3]). */
@@ -176,12 +205,25 @@ int RotTransPers4(SVECTOR* v0, SVECTOR* v1, SVECTOR* v2, SVECTOR* v3, long* sxy0
 
 	gte_stsxy3(sxy0, sxy1, sxy2);
 
+	/* Capture v0..v2 NOW: the RTPS below shifts the 3-deep FIFO by one, which
+	 * would drop v0 beyond recovery. */
+	if (g_PsxUsePgxp)
+	{
+		PGXP_StoreAddr(sxy0, 0);
+		PGXP_StoreAddr(sxy1, 1);
+		PGXP_StoreAddr(sxy2, 2);
+	}
+
 	gte_stflg(&_flag);
 
 	gte_ldv0(v3);
 	gte_rtps();
 
 	gte_stsxy(sxy3);
+
+	if (g_PsxUsePgxp)
+		PGXP_StoreAddr(sxy3, 2); /* the RTPS above made v3 the newest entry */
+
 	gte_stflg(flag);
 	gte_stdp(p);
 
