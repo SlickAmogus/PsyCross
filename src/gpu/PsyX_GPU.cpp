@@ -414,6 +414,14 @@ static inline void PgxpFillVertex(GrVertex* v, const void* addr, int rawX, int r
 	}
 }
 
+/* Set by the game (PsyX_ForceItemDepthBegin/End) around the isolated item-model
+ * draw — the inventory carousel and the world pickup, where OT0 holds only that
+ * one TMD. It already forces per-pixel depth for those; we also read it here to
+ * keep the item OUT of the world's per-pixel flashlight. Since the PGXP item fix,
+ * item vertices carry a propagated view-space shadow, so without this the isolated
+ * preview model would light up as if it were standing in the scene. */
+extern int g_PsyX_ForceItemDepth;
+
 /* Fill a GrVertex's view-space position (vsx/vsy/vsz) from the flashlight shadow
  * at the vertex's prim-field address (same address-keyed lookup as PGXP). A miss
  * leaves the memset-0 default, which the shader treats as "untracked" (vsz<=0,
@@ -863,8 +871,10 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
 
 	/* Before the PGXP block: the near-clip eligibility test below reads the
-	 * view-space data these fill. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	 * view-space data these fill. Skipped for the isolated item model — it must
+	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
+	 * so losing near-clip eligibility is harmless). */
+	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
@@ -916,8 +926,10 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
-	/* Before the PGXP block: near-clip eligibility reads the view-space data. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	/* Before the PGXP block: near-clip eligibility reads the view-space data.
+	 * Skipped for the isolated item model so it stays out of the world's per-pixel
+	 * flashlight (see MakeVertexTriangle). */
+	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
