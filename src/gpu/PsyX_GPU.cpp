@@ -643,7 +643,10 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	 * item-only OT0 draw in GameState_InventoryScreen); every world/pickup draw has
 	 * the flag == 0 and clears normally. g_szMaxPrevFrame still swaps to the item's
 	 * own max above, so the item's depth normalizes against itself. */
-	extern int g_PsyX_ForceItemDepth;
+	/* Uses the file-scope decl at the top of this file. NOT redeclared here: this
+	 * function is extern "C", so a block-scope `extern int` would take C language
+	 * linkage and clash with the C++-linkage file-scope decl / definition — Clang
+	 * (macOS CI) errors "different language linkage"; GCC just ignored it. */
 	if (!g_PsyX_ForceItemDepth)
 		memset(g_szTable, 0, sizeof(g_szTable));
 	g_primSzNextValid = 0;
