@@ -981,8 +981,13 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 			if (psxAttrib->mask & SPU_VOICE_VOLR)
 				voice->attr.volume.right = psxAttrib->volume.right;
 
-			float left_gain = (float)(voice->attr.volume.left) / (float)(16384);
-			float right_gain = (float)(voice->attr.volume.right) / (float)(16384);
+			// PSX direct-mode voice volume is signed: negative = phase-inverted
+			// playback at |vol| amplitude (libsd negates the right channel for
+			// "wide stereo" tracks, smf_io.c wide_flag_21). A mono OpenAL source
+			// can't invert one channel, and averaging signed gains cancels
+			// L + (-L) to 0 — take magnitudes so wide voices keep their loudness.
+			float left_gain = fabsf((float)(voice->attr.volume.left)) / (float)(16384);
+			float right_gain = fabsf((float)(voice->attr.volume.right)) / (float)(16384);
 
 			if(left_gain > 1.0f)
 				left_gain = 1.0f;
