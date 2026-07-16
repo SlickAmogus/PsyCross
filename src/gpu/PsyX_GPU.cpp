@@ -550,8 +550,22 @@ int g_DrawPrimMode = 0;
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
-struct SZEntry { uintptr_t key; uint16_t sz[4]; };
+/* sz widened u16 -> u32: the whole-town far-depth substitution below feeds true
+ * cell-center view depths that exceed the 0xFFFF SZ clamp. u16 values still fit
+ * exactly, so normal play is numerically identical. */
+struct SZEntry { uintptr_t key; uint32_t sz[4]; };
 static SZEntry g_szTable[SZ_TABLE_SIZE];
+
+/* Whole-town far depth (docs/WholeMap_Far_Projection_Task.md). The GTE SZ3
+ * register saturates at 0xFFFF = ~256 world units, so EVERY poly beyond 256u
+ * gets the same clamped depth -> identical GL depth -> GL_LEQUAL ties resolve by
+ * draw order and distant town blocks composite over each other (the "block
+ * merged into the intersection" report). Chunks are cell-confined to 40u, so the
+ * game hands us each far chunk's true cell-center view depth here (SZ units, set
+ * per chunk around Ipd_ChunkDraw); a fully-saturated far poly takes it instead of
+ * 0xFFFF, giving correct block-vs-block ordering. 0 / mode-off => untouched.
+ * (g_PsxWholeMapFar itself is defined earlier in this file.) */
+extern "C" { int g_PsxWholeMapChunkSz = 0; }
 
 // Global SZ scale: maximum SZ seen in the previous frame, used as the
 // depth reference so all polygons share a consistent window_depth space
@@ -572,18 +586,35 @@ extern "C" float PGXP_GetSzMax(void)
 // polygon loop, so the GTE SZ FIFO is stale at each polygon's addPrim call.
 // They call PsyX_SetNextPrimSz with the polygon's field_18C SZ values so the
 // next PsyX_CaptureGteDepths invocation uses the correct per-vertex depths.
-static uint16_t g_primSzNext[4];
+static uint32_t g_primSzNext[4];
 static int g_primSzNextValid = 0;
 
 extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
 {
 	(void)arg3;
-	uint16_t avg   = (uint16_t)(((unsigned)s0 + s1 + s2 + s3) >> 2);
-	uint16_t avg_q = (uint16_t)((avg >> 6) << 6);
-	// Calibrate with unquantised real max so character/item GL depths stay accurate.
-	uint32_t mx = s0 > s1 ? s0 : s1;
-	if (s2 > mx) mx = s2;
-	if (s3 > mx) mx = s3;
+	uint32_t avg_q;
+	uint32_t mx;
+
+	/* Whole-town far poly (all 4 verts saturated at the 0xFFFF ~256u SZ clamp):
+	 * substitute the chunk's true cell-center view depth so the far town depth-
+	 * sorts instead of collapsing to one plane. Only when that depth is itself
+	 * past the clamp (a genuinely-far chunk); nearer chunks keep real per-poly SZ,
+	 * and the 128-256u band is already monotonic (u16 un-wrap). */
+	if (g_PsxWholeMapFar && g_PsxWholeMapChunkSz > 0xFFFF &&
+	    s0 == 0xFFFF && s1 == 0xFFFF && s2 == 0xFFFF && s3 == 0xFFFF)
+	{
+		avg_q = (uint32_t)g_PsxWholeMapChunkSz;
+		mx    = avg_q;
+	}
+	else
+	{
+		uint32_t avg = ((unsigned)s0 + s1 + s2 + s3) >> 2;
+		avg_q = (avg >> 6) << 6;
+		// Calibrate with unquantised real max so character/item GL depths stay accurate.
+		mx = s0 > s1 ? s0 : s1;
+		if (s2 > mx) mx = s2;
+		if (s3 > mx) mx = s3;
+	}
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
@@ -612,7 +643,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
-	uint16_t s0, s1, s2, s3;
+	uint32_t s0, s1, s2, s3;
 	if (g_primSzNextValid) {
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
@@ -670,7 +701,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curPgxpAffine = false;
 }
 
-static bool PsyX_LookupGteDepths(const void* prim, uint16_t* sz)
+static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -696,7 +727,7 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 {
 	if (g_szMaxPrevFrame < 1) return;
 
-	uint16_t sz[4];
+	uint32_t sz[4];
 	if (!PsyX_LookupGteDepths(polyTag, sz))
 		return;
 
