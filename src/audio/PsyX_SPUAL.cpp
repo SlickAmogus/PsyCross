@@ -144,9 +144,20 @@ static int s_surroundActive   = 0; // achieved layout has rear speakers
 /* Emitter azimuth side-channel (PSX Q12 angle: 0 = dead ahead, positive =
  * right, +/-2048 = behind). Game code recovers the true camera-relative
  * angle before it collapses direction to an L/R balance and stashes it
- * here; the next key-on's start-address write claims it. */
-static int s_nextAzimuthQ12   = 0;
-static int s_nextAzimuthValid = 0;
+ * here; the next key-on's start-address write claims it.
+ *
+ * Ownership: the arm -> key-on chain is synchronous on the arming thread,
+ * while sequencer note-ons run on the intr/timer thread — the claim is
+ * therefore restricted to WDSA writes from the ARMING thread, so a BGM
+ * note interleaving between arm and key-on can neither steal the angle
+ * nor get mispositioned by it. The TTL expires orphans (key-on failed:
+ * no free voice, bad VAB) that would otherwise wait to mistag a later
+ * same-thread sound. */
+static int           s_nextAzimuthQ12    = 0;
+static int           s_nextAzimuthValid  = 0;
+static SDL_threadID  s_nextAzimuthThread = 0;
+static Uint32        s_nextAzimuthMs     = 0;
+#define AZIMUTH_STASH_TTL_MS 100
 
 PSX_API_EXPORT void PsyX_SPUAL_SetOutputMode(int mode) { s_speakersRequest = mode; }
 PSX_API_EXPORT int  PsyX_SPUAL_GetOutputMode(void)     { return s_speakersAchieved; }
@@ -157,13 +168,19 @@ PSX_API_EXPORT int  PsyX_SPUAL_GetSurroundActive(void) { return s_surroundActive
  * play case so an unrelated later key-on can't inherit a stale angle. */
 PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuthQ12)
 {
-	s_nextAzimuthQ12   = azimuthQ12;
-	s_nextAzimuthValid = 1;
+	SDL_LockMutex(g_SpuMutex);
+	s_nextAzimuthQ12    = azimuthQ12;
+	s_nextAzimuthThread = SDL_ThreadID();
+	s_nextAzimuthMs     = SDL_GetTicks();
+	s_nextAzimuthValid  = 1;
+	SDL_UnlockMutex(g_SpuMutex);
 }
 
 PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void)
 {
+	SDL_LockMutex(g_SpuMutex);
 	s_nextAzimuthValid = 0;
+	SDL_UnlockMutex(g_SpuMutex);
 }
 
 /* Live-update path (Sd_SfxAttributesUpdate): the voice is already playing
@@ -1154,9 +1171,21 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 				// azimuth the game stashed for the upcoming sound, or clear
 				// stale spatial state when there is none (voice reuse — a
 				// sequencer note must not inherit the last SFX's position).
-				voice->azimuthValid = (ushort)s_nextAzimuthValid;
-				voice->azimuthQ12   = s_nextAzimuthQ12;
-				s_nextAzimuthValid  = 0;
+				// Claim only on the arming thread and within the TTL: the
+				// arm -> key-on chain is synchronous, so an intr-thread BGM
+				// note or an expired orphan (failed key-on) never matches.
+				if (s_nextAzimuthValid &&
+				    s_nextAzimuthThread == SDL_ThreadID() &&
+				    (Uint32)(SDL_GetTicks() - s_nextAzimuthMs) <= AZIMUTH_STASH_TTL_MS)
+				{
+					voice->azimuthValid = 1;
+					voice->azimuthQ12   = s_nextAzimuthQ12;
+					s_nextAzimuthValid  = 0;
+				}
+				else
+				{
+					voice->azimuthValid = 0;
+				}
 			}
 
 			if (psxAttrib->mask & SPU_VOICE_LSAX)
