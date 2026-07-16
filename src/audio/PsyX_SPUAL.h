@@ -30,6 +30,21 @@ extern void PsyX_SPUAL_Update();
 extern void PsyX_SPUAL_SetAdsrEnabled(int on);
 extern int  PsyX_SPUAL_GetAdsrEnabled(void);
 
+/* Speaker layout (0=auto 1=stereo 2=quad 3=5.1 4=7.1 5=hrtf). Set latches a
+ * request for init; Apply renegotiates a live device (alcResetDeviceSOFT).
+ * Get returns the ACHIEVED layout, which is what routing must trust. */
+extern void PsyX_SPUAL_SetOutputMode(int mode);
+extern int  PsyX_SPUAL_ApplyOutputMode(int mode);
+extern int  PsyX_SPUAL_GetOutputMode(void);
+extern int  PsyX_SPUAL_GetSurroundActive(void);
+
+/* Emitter azimuth side-channel (PSX Q12 angle: 0 = ahead, positive = right).
+ * SetNext arms the sound about to key on; SetVoiceAzimuth live-updates an
+ * already-identified voice (Sd_SfxAttributesUpdate path). */
+extern void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuthQ12);
+extern void PsyX_SPUAL_ClearNextKeyOnAzimuth(void);
+extern void PsyX_SPUAL_SetVoiceAzimuth(int voiceIdx, int azimuthQ12);
+
 extern int PsyX_SPUAL_GetKeyStatus(u_int voice_bit);
 extern void PsyX_SPUAL_GetAllKeysStatus(char* status);
 

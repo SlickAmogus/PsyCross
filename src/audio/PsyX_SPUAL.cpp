@@ -15,6 +15,30 @@
 #include <AL/efx.h>
 #endif
 
+/* ALC_SOFT_output_mode / loopback channel tokens. Values are ABI-stable;
+ * bare OpenAL 1.1 headers (macOS system framework) lack them, so define
+ * fallbacks — every use is still gated on a runtime extension check. */
+#ifndef ALC_OUTPUT_MODE_SOFT
+#define ALC_OUTPUT_MODE_SOFT  0x19AC
+#define ALC_ANY_SOFT          0x19AD
+#define ALC_STEREO_BASIC_SOFT 0x19AE
+#define ALC_STEREO_UHJ_SOFT   0x19AF
+#define ALC_STEREO_HRTF_SOFT  0x19B2
+#endif
+#ifndef ALC_MONO_SOFT
+#define ALC_MONO_SOFT   0x1500
+#define ALC_STEREO_SOFT 0x1501
+#define ALC_QUAD_SOFT   0x1503
+#endif
+#ifndef ALC_SURROUND_5_1_SOFT
+#define ALC_SURROUND_5_1_SOFT 0x1504
+#define ALC_SURROUND_6_1_SOFT 0x1505
+#define ALC_SURROUND_7_1_SOFT 0x1506
+#endif
+#ifndef ALC_SOFT_HRTF
+typedef ALCboolean(ALC_APIENTRY* LPALCRESETDEVICESOFT)(ALCdevice* device, const ALCint* attribs);
+#endif
+
 /* This TU is compiled with -fvisibility=hidden on ELF so its global OpenAL
  * EFX function-pointer variables do not interpose libopenal for other
  * modules (see PsyCross/CMakeLists.txt). The PsyX_SPUAL_ API below, however,
@@ -97,6 +121,55 @@ int g_SpuAdsrEnabled = 1;
 PSX_API_EXPORT void PsyX_SPUAL_SetAdsrEnabled(int on) { g_SpuAdsrEnabled = on ? 1 : 0; }
 PSX_API_EXPORT int  PsyX_SPUAL_GetAdsrEnabled(void)   { return g_SpuAdsrEnabled; }
 
+/* Speaker layout (config key audio_output): 0=auto 1=stereo 2=quad 3=5.1
+ * 4=7.1 5=hrtf. AL-free enum so the console/launcher (and a future non-AL
+ * backend) can share it. "auto" passes NO ALC_OUTPUT_MODE_SOFT attribute:
+ * OpenAL Soft then detects the system layout itself AND the user's
+ * alsoft.ini keeps authority (the attribute would override it). Voice
+ * routing trusts only the ACHIEVED mode — a 5.1 request on a stereo
+ * endpoint silently degrades, it does not error. */
+enum
+{
+	PSYX_SPK_AUTO = 0,
+	PSYX_SPK_STEREO,
+	PSYX_SPK_QUAD,
+	PSYX_SPK_51,
+	PSYX_SPK_71,
+	PSYX_SPK_HRTF,
+};
+static int s_speakersRequest  = PSYX_SPK_AUTO;
+static int s_speakersAchieved = PSYX_SPK_AUTO;
+static int s_surroundActive   = 0; // achieved layout has rear speakers
+
+/* Emitter azimuth side-channel (PSX Q12 angle: 0 = dead ahead, positive =
+ * right, +/-2048 = behind). Game code recovers the true camera-relative
+ * angle before it collapses direction to an L/R balance and stashes it
+ * here; the next key-on's start-address write claims it. */
+static int s_nextAzimuthQ12   = 0;
+static int s_nextAzimuthValid = 0;
+
+PSX_API_EXPORT void PsyX_SPUAL_SetOutputMode(int mode) { s_speakersRequest = mode; }
+PSX_API_EXPORT int  PsyX_SPUAL_GetOutputMode(void)     { return s_speakersAchieved; }
+PSX_API_EXPORT int  PsyX_SPUAL_GetSurroundActive(void) { return s_surroundActive; }
+
+/* Arm the azimuth for the sound about to key on (claimed by the next
+ * start-address write in SetVoiceAttr). Clear covers the compute-without-
+ * play case so an unrelated later key-on can't inherit a stale angle. */
+PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuthQ12)
+{
+	s_nextAzimuthQ12   = azimuthQ12;
+	s_nextAzimuthValid = 1;
+}
+
+PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void)
+{
+	s_nextAzimuthValid = 0;
+}
+
+/* Live-update path (Sd_SfxAttributesUpdate): the voice is already playing
+ * and identified; the following SpuSetVoiceAttr volume write repositions it. */
+PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int voiceIdx, int azimuthQ12);
+
 typedef enum
 {
 	ENV_OFF = 0,
@@ -128,6 +201,13 @@ typedef struct
 	float    baseGain;     // volume-derived gain before envelope
 	ushort   hasEnvelope;  // adsr programmed
 	ushort   looping;      // AL_LOOPING was set for the current sample
+
+	// Spatial routing (PC surround). azimuth claimed from the key-on stash
+	// at each start-address write, so voice reuse can't inherit stale state.
+	ushort   isWide;       // libsd wide-stereo (negated right volume) latch
+	ushort   azimuthValid;
+	int      azimuthQ12;   // PSX Q12 angle: 0 ahead, positive right
+
 	u_int    relStartMs;   // SDL tick at key-off; caps pathological release tails
 } SPUALVoice;
 
@@ -231,6 +311,107 @@ static void InitOpenAlEffects()
 #endif // __EMSCRIPTEN__
 }
 
+#ifndef __EMSCRIPTEN__
+
+static int SpeakersToAlcOutputMode(int spk)
+{
+	switch (spk)
+	{
+	case PSYX_SPK_STEREO: return ALC_STEREO_BASIC_SOFT;
+	case PSYX_SPK_QUAD:   return ALC_QUAD_SOFT;
+	case PSYX_SPK_51:     return ALC_SURROUND_5_1_SOFT;
+	case PSYX_SPK_71:     return ALC_SURROUND_7_1_SOFT;
+	case PSYX_SPK_HRTF:   return ALC_STEREO_HRTF_SOFT;
+	}
+	return ALC_ANY_SOFT;
+}
+
+static int AlcOutputModeToSpeakers(int alcMode)
+{
+	switch (alcMode)
+	{
+	case ALC_QUAD_SOFT:           return PSYX_SPK_QUAD;
+	case ALC_SURROUND_5_1_SOFT:
+	case ALC_SURROUND_6_1_SOFT:   return PSYX_SPK_51;
+	case ALC_SURROUND_7_1_SOFT:   return PSYX_SPK_71;
+	case ALC_STEREO_HRTF_SOFT:    return PSYX_SPK_HRTF;
+	}
+	return PSYX_SPK_STEREO;
+}
+
+static const char* s_speakerModeNames[] = { "auto", "stereo", "quad", "5.1", "7.1", "hrtf" };
+
+/* attrs must have room for 8 ints. The output-mode pair is added only for an
+ * explicit override — never for auto (see the enum comment above). */
+static void BuildContextAttrs(int* attrs)
+{
+	int n = 0;
+
+	attrs[n++] = ALC_FREQUENCY;
+	attrs[n++] = 44100;
+	attrs[n++] = ALC_MAX_AUXILIARY_SENDS;
+	attrs[n++] = 2;
+
+	if (s_speakersRequest != PSYX_SPK_AUTO && g_ALCdevice &&
+	    alcIsExtensionPresent(g_ALCdevice, "ALC_SOFT_output_mode"))
+	{
+		attrs[n++] = ALC_OUTPUT_MODE_SOFT;
+		attrs[n++] = SpeakersToAlcOutputMode(s_speakersRequest);
+	}
+
+	attrs[n] = 0;
+}
+
+static void QueryAchievedOutputMode(void)
+{
+	int alcMode = 0;
+
+	s_speakersAchieved = PSYX_SPK_AUTO;
+	s_surroundActive   = 0;
+
+	if (!g_ALCdevice || !alcIsExtensionPresent(g_ALCdevice, "ALC_SOFT_output_mode"))
+		return;
+
+	alcGetIntegerv(g_ALCdevice, ALC_OUTPUT_MODE_SOFT, 1, &alcMode);
+	s_speakersAchieved = AlcOutputModeToSpeakers(alcMode);
+	s_surroundActive   = s_speakersAchieved == PSYX_SPK_QUAD ||
+	                     s_speakersAchieved == PSYX_SPK_51 ||
+	                     s_speakersAchieved == PSYX_SPK_71;
+
+	eprintinfo("speaker layout: %s (requested %s, ALC mode 0x%x)%s\n",
+		s_speakerModeNames[s_speakersAchieved], s_speakerModeNames[s_speakersRequest],
+		alcMode, s_surroundActive ? " [surround routing active]" : "");
+}
+
+#endif // __EMSCRIPTEN__
+
+/* Live layout switch (console AUDIOOUT): renegotiates the output mode on the
+ * open device via alcResetDeviceSOFT — sources keep playing, only the mix
+ * format flips. Returns 1 on success; 0 means restart required. Called
+ * before init it just latches the request for InitSound. */
+PSX_API_EXPORT int PsyX_SPUAL_ApplyOutputMode(int mode)
+{
+	s_speakersRequest = mode;
+
+#ifndef __EMSCRIPTEN__
+	if (!g_ALCdevice)
+		return 1;
+
+	LPALCRESETDEVICESOFT resetFn = (LPALCRESETDEVICESOFT)alcGetProcAddress(g_ALCdevice, "alcResetDeviceSOFT");
+	if (!resetFn)
+		return 0;
+
+	int attrs[8];
+	BuildContextAttrs(attrs);
+
+	int ok = resetFn(g_ALCdevice, attrs) == ALC_TRUE;
+	QueryAchievedOutputMode();
+	return ok;
+#else
+	return 0;
+#endif
+}
+
 int PsyX_SPUAL_InitSound()
 {
 	if (!g_SpuMutex)
@@ -244,16 +425,6 @@ int PsyX_SPUAL_InitSound()
 	int numDevices, alErr, i;
 	const char* devices;
 	const char* devStrptr;
-
-	// out_channel_formats snd_outputchannels
-	static int al_context_params[] =
-	{
-		ALC_FREQUENCY, 44100,
-#ifndef __EMSCRIPTEN__
-		ALC_MAX_AUXILIARY_SENDS, 2,
-#endif
-		0
-	};
 
 	if (g_ALCdevice)
 		return 1;
@@ -289,6 +460,8 @@ int PsyX_SPUAL_InitSound()
 	}
 
 #ifndef __EMSCRIPTEN__
+	int al_context_params[8];
+	BuildContextAttrs(al_context_params);
 	g_ALCcontext = alcCreateContext(g_ALCdevice, al_context_params);
 #else
 	g_ALCcontext = alcCreateContext(g_ALCdevice, NULL);
@@ -313,6 +486,10 @@ int PsyX_SPUAL_InitSound()
 	// Setup defaults
 	alListenerf(AL_GAIN, 1.0f);
 	alDistanceModel(AL_NONE);
+
+#ifndef __EMSCRIPTEN__
+	QueryAchievedOutputMode();
+#endif
 
 	// create channels
 	for (i = 0; i < s_spuVoiceCount; i++)
@@ -932,6 +1109,17 @@ void PsyX_SPUAL_GetVoiceAttr(SpuVoiceAttr* psxAttrib)
 	SDL_UnlockMutex(g_SpuMutex);
 }
 
+PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int voiceIdx, int azimuthQ12)
+{
+	if (!g_spuInit || voiceIdx < 0 || voiceIdx >= s_spuVoiceCount)
+		return;
+
+	SDL_LockMutex(g_SpuMutex);
+	g_SpuVoices[voiceIdx].azimuthQ12   = azimuthQ12;
+	g_SpuVoices[voiceIdx].azimuthValid = 1;
+	SDL_UnlockMutex(g_SpuMutex);
+}
+
 void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 {
 	if (!g_spuInit)
@@ -961,6 +1149,14 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 					voice->sampledirty++;
 
 				voice->attr.addr = psxAttrib->addr;
+
+				// A start-address write accompanies every key-on: claim the
+				// azimuth the game stashed for the upcoming sound, or clear
+				// stale spatial state when there is none (voice reuse — a
+				// sequencer note must not inherit the last SFX's position).
+				voice->azimuthValid = (ushort)s_nextAzimuthValid;
+				voice->azimuthQ12   = s_nextAzimuthQ12;
+				s_nextAzimuthValid  = 0;
 			}
 
 			if (psxAttrib->mask & SPU_VOICE_LSAX)
@@ -981,11 +1177,20 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 			if (psxAttrib->mask & SPU_VOICE_VOLR)
 				voice->attr.volume.right = psxAttrib->volume.right;
 
+			// libsd negates volume.right for "wide stereo" (diffuse ambience)
+			// channels — KDT CC 0x0F -> wide_flag_21. Latch it from the signs
+			// while both sides are live; (0,0) keeps the last state so a note
+			// fading to silence doesn't snap back to the front stage.
+			if (voice->attr.volume.left > 0 && voice->attr.volume.right < 0)
+				voice->isWide = 1;
+			else if (voice->attr.volume.left != 0 || voice->attr.volume.right != 0)
+				voice->isWide = 0;
+
 			// PSX direct-mode voice volume is signed: negative = phase-inverted
-			// playback at |vol| amplitude (libsd negates the right channel for
-			// "wide stereo" tracks, smf_io.c wide_flag_21). A mono OpenAL source
-			// can't invert one channel, and averaging signed gains cancels
-			// L + (-L) to 0 — take magnitudes so wide voices keep their loudness.
+			// playback at |vol| amplitude (the wide-stereo trick above). A mono
+			// OpenAL source can't invert one channel, and averaging signed gains
+			// cancels L + (-L) to 0 — take magnitudes so wide voices keep their
+			// loudness.
 			float left_gain = fabsf((float)(voice->attr.volume.left)) / (float)(16384);
 			float right_gain = fabsf((float)(voice->attr.volume.right)) / (float)(16384);
 
@@ -995,12 +1200,35 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 			if(right_gain > 1.0f)
 				right_gain = 1.0f;
 
-			float pan = (acosf(left_gain) + asinf(right_gain)) / ((float)(M_PI)); // average angle in [0,1]
-			pan = 2.0f * pan - 1.0f; // convert to [-1, 1]
-			pan = pan * 0.5f; // 0.5 = sin(30') for a +/- 30 degree arc
-			alSource3f(alSource, AL_POSITION, pan * STEREO_FACTOR, 0, -sqrtf(1.0f - pan * pan));
+			if (voice->azimuthValid)
+			{
+				// True 3D: game code recovered the emitter's camera-relative
+				// azimuth before collapsing it to L/R balance — place on the
+				// full circle (rears included on surround layouts). Gain uses
+				// the louder side: the balance attenuation is already baked
+				// into L/R and AL panning would apply it a second time.
+				float az = (float)voice->azimuthQ12 * (float)(M_PI / 2048.0);
+				alSource3f(alSource, AL_POSITION, sinf(az), 0.0f, -cosf(az));
 
-			voice->baseGain = (left_gain + right_gain) * 0.5f;
+				voice->baseGain = (left_gain > right_gain) ? left_gain : right_gain;
+			}
+			else
+			{
+				float pan = (acosf(left_gain) + asinf(right_gain)) / ((float)(M_PI)); // average angle in [0,1]
+				pan = 2.0f * pan - 1.0f; // convert to [-1, 1]
+				pan = pan * 0.5f; // 0.5 = sin(30') for a +/- 30 degree arc
+
+				// Wide (diffuse) voices belong on the surrounds when the
+				// layout has them: mirror the frontal arc behind the listener.
+				// On stereo output this is a no-op (front placement), keeping
+				// the pre-surround mix byte-identical.
+				float z = sqrtf(1.0f - pan * pan);
+				if (s_surroundActive && voice->isWide)
+					z = -z;
+				alSource3f(alSource, AL_POSITION, pan * STEREO_FACTOR, 0, -z);
+
+				voice->baseGain = (left_gain + right_gain) * 0.5f;
+			}
 
 			// While an envelope is running it owns the source gain (the tick
 			// applies baseGain*level); otherwise apply the volume directly.
