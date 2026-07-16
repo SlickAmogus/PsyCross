@@ -99,9 +99,16 @@
 #endif
 */
 
+/* VRAM holds each 16-bit PSX pixel as two bytes, and the shaders decode it with
+ * floor(sample.rg * 255.0 + 0.5), so only 8 bits per channel are ever observed.
+ * RG32F therefore bought nothing but made GR_UpdateVRAM upload 1024x512 bytes
+ * into a 4 MB float texture, forcing a per-texel byte->float conversion in the
+ * driver every frame. RG8 is the same 8-bit-normalised value to the shader, at
+ * 1 MB and a straight copy. Costs a few ms on fast drivers; on weak GL 3.1
+ * iGPUs the converting path is the difference between playable and ~3 FPS. */
 #if defined(RENDERER_OGL)
 #	define VRAM_FORMAT            GL_RG
-#	define VRAM_INTERNAL_FORMAT   GL_RG32F
+#	define VRAM_INTERNAL_FORMAT   GL_RG8
 #elif defined(RENDERER_OGLES)
 #	define VRAM_FORMAT            GL_LUMINANCE_ALPHA
 #	define VRAM_INTERNAL_FORMAT   GL_LUMINANCE_ALPHA
