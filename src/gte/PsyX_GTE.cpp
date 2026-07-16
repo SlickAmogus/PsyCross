@@ -303,6 +303,7 @@ extern "C" void VShadow_Store(void* addr, float x, float y, float z); /* PsyX_GP
  * whole town projects at the correct scale instead of freezing ~6 cells out.
  * 0 (default) = untouched legacy path, byte-identical. Defined in PsyX_GPU.cpp. */
 extern "C" int g_PsxWholeMapFar;
+extern "C" int g_PsxWholeMapLastSz; /* true (unclamped) SZ of the newest RTPS, whole-map only */
 
 /* Called from the gte_stsxy* store macros (only when g_PsxUsePgxp): the macro
  * just wrote the integer screen coord for FIFO slot `slot` (SXY0=0, SXY1=1,
@@ -364,6 +365,10 @@ int GTE_RotTransPers(int idx, int lm)
 	if (g_PsxWholeMapFar)
 	{
 		long long fz = gte_shift(m_mac3, 1); /* unclamped SZ3 */
+		/* Export the true depth of the newest projection for game-side far
+		 * consumers (billboard size divisor: SZ3 pegs at 0xFFFF ~256u, freezing
+		 * sprite scale; this carries the real value past the clamp). */
+		g_PsxWholeMapLastSz = (fz > 0x7FFFFFFFLL) ? 0x7FFFFFFF : ((fz < 0) ? 0 : (int)fz);
 		if (fz > 0 && (fz > 0xffff || C2_MAC1 != C2_IR1 || C2_MAC2 != C2_IR2))
 		{
 			double r   = (double)C2_H / (double)fz;

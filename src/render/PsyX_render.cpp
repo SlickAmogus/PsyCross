@@ -752,6 +752,7 @@ typedef struct
 	GLint fogStrengthLoc;
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
+	GLint pgxpFarWLoc;
 	GLint flashlightOnLoc;
 	GLint flStyleLoc;
 	GLint flLightPosLoc;
@@ -791,6 +792,7 @@ GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
+GLint u_pgxpFarWLoc;
 GLint u_flashlightOnLoc;
 GLint u_flStyleLoc;
 GLint u_flLightPosLoc;
@@ -1019,6 +1021,7 @@ int g_PsxFogToBlack = 0;
 		"	if (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) {\n"\
 		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
 		"		float W = a_pgxp.z;\n"\
+		"		if (u_pgxpFarW > 0.0) W = min(W, u_pgxpFarW);\n"\
 		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
 		"	} else {\n"\
 		"		gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
@@ -1036,6 +1039,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform float u_szMax;\n"\
+	"	uniform float u_pgxpFarW;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -1066,7 +1070,7 @@ int g_PsxFogToBlack = 0;
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
 	 * shader. This also stays coherent for mixed PGXP/fallback triangles. */\
 	"		float shadowInvZ = (a_viewpos.z > 0.0) ? (1.0 / a_viewpos.z) : 0.0;\n"\
-	"		float shadowClipW = (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) ? a_pgxp.z : 1.0;\n"\
+	"		float shadowClipW = (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) ? ((u_pgxpFarW > 0.0) ? min(a_pgxp.z, u_pgxpFarW) : a_pgxp.z) : 1.0;\n"\
 	"		v_shadowViewPos = vec4(a_viewpos * shadowInvZ, shadowInvZ) * shadowClipW;\n"\
 	"	}\n"
 
@@ -1542,6 +1546,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
+	sh->pgxpFarWLoc = glGetUniformLocation(sh->shader, "u_pgxpFarW");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
 	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
 	sh->flLightPosLoc = glGetUniformLocation(sh->shader, "u_flLightPos");
@@ -1876,6 +1881,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
+		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_4.flLightPosLoc;
@@ -1908,6 +1914,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
+		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_8.flLightPosLoc;
@@ -1940,6 +1947,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
+		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_16.flLightPosLoc;
@@ -1972,6 +1980,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
+		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_32_rgba.flLightPosLoc;
@@ -2004,6 +2013,11 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
 	if (u_szMaxLoc != -1)
 		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
+	{
+		extern float g_PgxpFarWClamp;
+		if (u_pgxpFarWLoc != -1)
+			glUniform1f(u_pgxpFarWLoc, g_PgxpFarWClamp);
+	}
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);

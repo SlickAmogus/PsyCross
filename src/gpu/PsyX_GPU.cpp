@@ -189,6 +189,19 @@ extern "C" { int g_PgxpUseUnquantizedDepth = 1; }
  * game to Pc_WholeMapDrawActive() around the world-chunk draw so GTE_RotTransPers
  * re-projects far vertices from unclamped view coords. 0 = legacy path untouched. */
 extern "C" { int g_PsxWholeMapFar = 0; }
+/* True (unclamped) SZ of the newest RTPS while the whole-map flag is set; the
+ * game reads it right after RotTransPers for far billboard sizing. */
+extern "C" { int g_PsxWholeMapLastSz = 0; }
+
+/* PGXP far-W clamp (u_pgxpFarW, SZ units; 256 = 1 world unit; 0 = disabled).
+ * Beyond this view depth the per-vertex W stops growing, so varying
+ * interpolation converges to AFFINE — the PSX-authentic distant look. Fixes
+ * the "distant road looks worse with PGXP on" report: perspective-correct UVs
+ * at grazing angles sample the compressed horizon gradient with no mipmaps ->
+ * texel shimmer/moire, where affine smears smoothly. Near geometry (< clamp)
+ * keeps full perspective correction. NDC positions are unaffected (W scales
+ * clip coords homogeneously). Console `PGXPFARW <sz>` tunes it live. */
+extern "C" { float g_PgxpFarWClamp = 12288.0f; } /* ~48 world units */
 
 /* PGXP near-plane clipping (docs/PGXP_NearClip_Design.md). A poly that straddles
  * the camera plane has behind-the-eye vertices with no valid projection (SZ3==0 ->
@@ -1843,7 +1856,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			//   3. Unmapped high address (Windows user mode tops at
 			//      0x7FFF'FFFF'FFFF; anything past that is kernel)   — break
 			//   4. Wild but technically-mapped — can't catch without
-			//      VirtualQuery; rely on the 16384 safety counter.
+			//      VirtualQuery; rely on the 1<<20 node safety counter.
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
 			if (nextPtr < 0x10000 ||
 			    nextPtr == static_cast<uintptr_t>(-1) ||
