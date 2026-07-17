@@ -101,6 +101,7 @@ float g_PsxWorldHScale = 1.0f;
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
+int g_PreviousDepthFuncAlways = 0; /* 0 = glDepthFunc(GL_LEQUAL) (init default), 1 = GL_ALWAYS */
 int g_PreviousStencilMode = 0;
 int g_PreviousScissorState = 0;
 int g_PreviousOffscreenState = 0;
@@ -3109,6 +3110,7 @@ void GR_ShadowPassEnd(void)
 	g_lastBoundTexture     = (TextureID)-1;
 	g_PreviousBlendMode    = -999;
 	g_PreviousDepthMode    = -999;
+	g_PreviousDepthFuncAlways = 0; /* this fn just set glDepthFunc(GL_LEQUAL) */
 	g_PreviousStencilMode  = -999;
 	g_PreviousScissorState = -999;
 	glEnable(GL_STENCIL_TEST);
@@ -3491,6 +3493,22 @@ void GR_EnableDepth(int enable)
 		glEnable(GL_DEPTH_TEST);
 	else
 		glDisable(GL_DEPTH_TEST);
+#endif
+}
+
+/* PGXP coplanar fix: switch the depth comparison between GL_ALWAYS (static-world
+ * painter pass — every world face passes so coplanar faces resolve by OT order,
+ * not depth test) and GL_LEQUAL (everything else). Only called on the PGXP-on
+ * path (DrawSplit gates on g_PsxUsePgxp); when off, glDepthFunc stays at its
+ * GL_LEQUAL init default and this never runs. State-cached like the siblings. */
+void GR_SetDepthFuncAlways(int enable)
+{
+	enable = enable ? 1 : 0;
+	if (g_PreviousDepthFuncAlways == enable)
+		return;
+	g_PreviousDepthFuncAlways = enable;
+#if USE_OPENGL
+	glDepthFunc(enable ? GL_ALWAYS : GL_LEQUAL);
 #endif
 }
 

@@ -550,10 +550,21 @@ int g_DrawPrimMode = 0;
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
+/* PGXP coplanar depth fix (docs/PGXP_PR51_Vetting.md). Each per-prim SZ entry
+ * also records how its depth was produced: FLAT = the static world-mesh drawer
+ * (Gfx_MeshDraw, the SOLE caller of PsyX_SetNextPrimSz), EXACT = decals/inventory
+ * authored Z (PsyX_SetNextPrimSzExact). This is the WORLD-vs-actor discriminator:
+ * FLAT prims are drawn GL_ALWAYS (painter order among themselves) so coplanar
+ * static faces — rugs on floors, paper on desks, distant road/wall panels — stop
+ * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
+ * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
+enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2 };
+enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
+
 /* sz widened u16 -> u32: the whole-town far-depth substitution below feeds true
  * cell-center view depths that exceed the 0xFFFF SZ clamp. u16 values still fit
  * exactly, so normal play is numerically identical. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned char kind; };
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
 /* Whole-town far depth (docs/WholeMap_Far_Projection_Task.md). The GTE SZ3
@@ -588,6 +599,7 @@ extern "C" float PGXP_GetSzMax(void)
 // next PsyX_CaptureGteDepths invocation uses the correct per-vertex depths.
 static uint32_t g_primSzNext[4];
 static int g_primSzNextValid = 0;
+static unsigned char g_primSzNextKind = SZ_KIND_NONE; /* producer kind for the next captured prim */
 
 extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int arg3)
 {
@@ -618,6 +630,7 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_FLAT; /* SOLE caller is Gfx_MeshDraw (static world) */
 }
 
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
@@ -629,6 +642,7 @@ extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, un
 	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
 	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
 	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_EXACT; /* decals / inventory authored Z — NOT world painter */
 }
 
 extern "C" void PsyX_CaptureGteDepths(void* prim)
@@ -644,13 +658,17 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
 
 	uint32_t s0, s1, s2, s3;
+	unsigned char kind;
 	if (g_primSzNextValid) {
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
+		kind = g_primSzNextKind;
 		g_primSzNextValid = 0;
+		g_primSzNextKind = SZ_KIND_NONE;
 	} else {
 		s0 = (uint16_t)C2_SZ0; s1 = (uint16_t)C2_SZ1;
 		s2 = (uint16_t)C2_SZ2; s3 = (uint16_t)C2_SZ3;
+		kind = SZ_KIND_NONE;
 	}
 
 	// Track per-frame SZ maximum for global depth calibration
@@ -665,6 +683,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 			g_szTable[s].key = key;
 			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
+			g_szTable[s].kind = kind;
 			return;
 		}
 	}
@@ -672,6 +691,27 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	g_szTable[slot].key = key;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
+	g_szTable[slot].kind = kind;
+}
+
+/* Depth mode for a prim's split: WORLD only for static-world-mesh (FLAT) opaque
+ * geometry, so it draws GL_ALWAYS in painter order (coplanar z-fight fix). Hard-
+ * gated on g_PsxUsePgxp -> returns DISABLED when PGXP is off, so the kind byte is
+ * never consulted and split classification/batching is byte-identical to today. */
+static int SplitDepthForPrim(const void* prim)
+{
+	if (!g_PsxUsePgxp)
+		return SPLIT_DEPTH_DISABLED;
+	uintptr_t key = (uintptr_t)prim;
+	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
+	for (int i = 0; i < 16; i++) {
+		int s = (slot + i) & SZ_TABLE_MASK;
+		if (g_szTable[s].key == key)
+			return g_szTable[s].kind == SZ_KIND_FLAT ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED;
+		if (g_szTable[s].key == 0)
+			break;
+	}
+	return SPLIT_DEPTH_DISABLED;
 }
 
 extern "C" void PsyX_ClearGteDepthTable(void)
@@ -761,6 +801,7 @@ struct GPUDrawSplit
 	TextureID		textureId;
 
 	int				drawPrimMode;
+	int				depthMode; /* SplitDepthMode; always DISABLED when PGXP off (byte-identical) */
 
 	unsigned int	startVertex; /* widened from u_short: MAX_VERTEX_BUFFER_SIZE now > 65535 */
 	unsigned int	numVerts;
@@ -1535,7 +1576,7 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 
 //------------------------------------------------------------------------------------------------------------------------
 
-static void AddSplit(bool semiTrans, bool textured)
+static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
@@ -1555,6 +1596,9 @@ static void AddSplit(bool semiTrans, bool textured)
 	if (curSplit.blendMode == blendMode &&
 		curSplit.texFormat == texFormat &&
 		curSplit.textureId == textureId &&
+		/* keep world-painter prims out of non-world batches (else GL_ALWAYS
+		 * would leak onto actors sharing a texture). Always DISABLED when off. */
+		curSplit.depthMode == depthMode &&
 		/* tw.x/y carry the hi-res override UV offset: two chunks of the same
 		 * override texture with different tpage origins must NOT batch
 		 * together (same textureId!) or they'd share one offset uniform. */
@@ -1584,6 +1628,7 @@ static void AddSplit(bool semiTrans, bool textured)
 	split.texFormat = texFormat;
 	split.textureId = textureId;
 	split.drawPrimMode = g_DrawPrimMode;
+	split.depthMode = depthMode;
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
 	split.debugText = currentSplitDebugText;
@@ -1644,6 +1689,19 @@ void DrawSplit(const GPUDrawSplit& split)
 	GR_SetOffscreenState(&split.drawenv.clip, !drawOnScreen);
 
 	GR_SetBlendMode(split.blendMode);
+
+	/* PGXP coplanar fix (docs/PGXP_PR51_Vetting.md): draw static-world opaque
+	 * geometry with GL_ALWAYS instead of GL_LEQUAL, keeping GR_SetBlendMode's
+	 * depth test+write on. Coplanar world faces then resolve by painter (OT)
+	 * order among themselves — no z-fight — while still leaving a per-pixel depth
+	 * buffer that actors/effects LEQUAL-test against. Every on-path split sets the
+	 * func explicitly, so a world split's GL_ALWAYS can't leak onto the next.
+	 * Gate is folded into the arg (not an `if`) so a runtime PGXP on->off toggle
+	 * still self-heals GL_ALWAYS back to LEQUAL on the first off frame; on steady
+	 * off the cache is already 0 and GR_SetDepthFuncAlways early-returns without
+	 * touching glDepthFunc, so pixels stay byte-identical. (depthMode is always
+	 * DISABLED when off.) */
+	GR_SetDepthFuncAlways(g_PsxUsePgxp && split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE);
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
 		GR_EnableDepth(1);
@@ -1929,7 +1987,7 @@ static int ProcessFlatLines(P_TAG* polyTag)
 	{
 		LINE_F2* poly = (LINE_F2*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		VERTTYPE* p0 = &poly->x0;
 		VERTTYPE* p1 = &poly->x1;
@@ -1955,7 +2013,7 @@ static int ProcessFlatLines(P_TAG* polyTag)
 	{
 		LINE_F3* poly = (LINE_F3*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		{
 			VERTTYPE* p0 = &poly->x0;
@@ -2004,7 +2062,7 @@ static int ProcessFlatLines(P_TAG* polyTag)
 		int i;
 		LINE_F4* poly = (LINE_F4*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		{
 			VERTTYPE* p0 = &poly->x0;
@@ -2086,7 +2144,7 @@ static int ProcessGouraudLines(P_TAG* polyTag)
 	{
 		LINE_G2* poly = (LINE_G2*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		VERTTYPE* p0 = &poly->x0;
 		VERTTYPE* p1 = &poly->x1;
@@ -2139,7 +2197,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	{
 		POLY_F3* poly = (POLY_F3*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
@@ -2164,7 +2222,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		{
 			ApplyHiresOverride(poly->tpage, poly->clut);
 
-			AddSplit(semiTrans, true);
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
@@ -2184,7 +2242,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	{
 		POLY_F4* poly = (POLY_F4*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
@@ -2255,7 +2313,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
@@ -2292,7 +2350,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_G3* poly = (POLY_G3*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
@@ -2319,7 +2377,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
@@ -2343,7 +2401,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_G4* poly = (POLY_G4*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
@@ -2372,7 +2430,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
@@ -2413,7 +2471,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE* poly = (TILE*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
@@ -2434,7 +2492,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		SPRT* poly = (SPRT*)polyTag;
 		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
@@ -2454,7 +2512,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE_1* poly = (TILE_1*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, 1, 1, gteIndex);
@@ -2474,7 +2532,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE_8* poly = (TILE_8*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
@@ -2495,7 +2553,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		SPRT_8* poly = (SPRT_8*)polyTag;
 		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
@@ -2515,7 +2573,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE_16* poly = (TILE_16*)polyTag;
 
-		AddSplit(semiTrans, false);
+		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
@@ -2536,7 +2594,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		SPRT_16* poly = (SPRT_16*)polyTag;
 		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true);
+		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
