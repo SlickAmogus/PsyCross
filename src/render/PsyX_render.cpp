@@ -121,6 +121,7 @@ TextureID g_fbTexture = -1;
 TextureID g_offscreenRTTexture = -1;
 
 TextureID g_whiteTexture = -1;
+TextureID g_rgLutTexture = -1;
 TextureID g_lastBoundTexture = -1;
 
 int g_windowWidth = 0;
@@ -672,6 +673,7 @@ void GR_Shutdown()
 	GR_DestroyTexture(g_vramTexturesDouble[1]);
 
 	GR_DestroyTexture(g_whiteTexture);
+	GR_DestroyTexture(g_rgLutTexture);
 	GR_DestroyTexture(g_fbTexture);
 	GR_DestroyTexture(g_offscreenRTTexture);
 #endif
@@ -832,25 +834,15 @@ float g_PsyX_FogStrength = 1.1f;
  * GR_SetBlendMode; pushed to the shader as u_fogToBlack. */
 int g_PsxFogToBlack = 0;
 
-#define GPU_PACK_RG\
-	"		float color_16 = (color_rg.y * 256.0 + color_rg.x) * 255.0;\n"
-
-#define GPU_DISCARD\
-	"		if (color_16 == 0.0) { discard; }\n"
-
-#define GPU_DECODE_RG\
-	"		fragColor = fract(floor(color_16 / vec4(1.0, 32.0, 1024.0, 32768.0)) / 32.0);\n"
-
+/* Driver-independent decode: index a CPU-baked exact lookup table instead of
+ * reconstructing colour with float floor() (see GR_InitRG8LUT). rg holds the
+ * two VRAM bytes; the 256x256 LUT on unit 2 returns the decoded RGBA. */
 #define GPU_PACK_RG_FUNC\
-	"	const float c_PackRange = 255.001;\n"\
-	"	float packRG(vec2 rg) { return (rg.y * 256.0 + rg.x) * c_PackRange;}\n"
+	"	uniform sampler2D s_rgLut;\n"\
+	"	const vec2 c_LUTTexel = vec2(1.0 / 256.0, 1.0 / 256.0);\n"
 
 #define GPU_DECODE_RG_FUNC\
-	" vec4 decodeRG(float rg) {\n"\
-	" 	vec4 value = fract(floor(rg / vec4(1.0, 32.0, 1024.0, 32768.0)) / 32.0);\n"\
-	" 	return vec4(value.xyz, rg == 0.0 ? rg : (1.0 - value.w * 16.0));\n"\
-	" }\n"
-	//"	vec4 decodeRG(float rg) { return fract(floor(rg / vec4(1.0, 32.0, 1024.0, 32768.0)) / 32.0); }\n"
+	"	vec4 lut(vec2 rg) { return texture2D(s_rgLut, rg - c_LUTTexel * 0.0001); }\n"
 
 #if defined(RENDERER_OGL) || (OGLES_VERSION == 3)
 
@@ -929,36 +921,34 @@ int g_PsxFogToBlack = 0;
 #endif
 
 #define GPU_SAMPLE_TEXTURE_4BIT_FUNC\
-    "   // returns 16 bit colour\n"\
-    "   float samplePSX(vec2 tc){\n"\
+    "   // returns the two VRAM bytes (LUT index)\n"\
+    "   vec2 samplePSX(vec2 tc){\n"\
     "       vec2 uv = (tc * vec2(0.25, 1.0) + v_page_clut.xy) * c_VRAMTexel;\n"\
     "       vec2 comp = VRAM(uv);\n"\
     "       int index = int(fract(tc.x / 4.0 + 0.0001) * 4.0);\n"\
-    "       float v = _idx2(comp, index / 2) * (c_PackRange / 16.0);\n"\
-    "       float f = floor(v);\n"\
+    "       float v = _idx2(comp, index / 2) * (255.0 / 16.0);\n"\
+    "       float f = floor(v + 0.001);\n"\
     "       vec2 c = vec2( (v - f) * 16.0, f );\n"\
     "       vec2 clut_pos = v_page_clut.zw;\n"\
     "       clut_pos.x += mix(c[0], c[1], mod(float(index), 2.0)) * c_VRAMTexel.x;\n"\
-    "       return packRG(VRAM(clut_pos));\n"\
+    "       return VRAM(clut_pos);\n"\
     "   }\n"
 
 #define GPU_SAMPLE_TEXTURE_8BIT_FUNC\
-	"	// returns 16 bit colour\n"\
-	"	float samplePSX(vec2 tc){\n"\
+	"	// returns the two VRAM bytes (LUT index)\n"\
+	"	vec2 samplePSX(vec2 tc){\n"\
 	"		vec2 uv = (tc * vec2(0.5, 1.0) + v_page_clut.xy) * c_VRAMTexel;\n"\
 	"		vec2 comp = VRAM(uv);\n"\
 	"		vec2 clut_pos = v_page_clut.zw;\n"\
 	"		int index = int(mod(tc.x, 2.0));\n"\
-	"		clut_pos.x += _idx2(comp, index) * c_PackRange * c_VRAMTexel.x;\n"\
-	"		vec2 color_rg = VRAM(clut_pos);\n"\
-	"		return packRG(VRAM(clut_pos));\n"\
+	"		clut_pos.x += _idx2(comp, index) * 255.0 * c_VRAMTexel.x;\n"\
+	"		return VRAM(clut_pos);\n"\
 	"	}\n"
 
 #define GPU_SAMPLE_TEXTURE_16BIT_FUNC\
-	"	float samplePSX(vec2 tc){\n"\
+	"	vec2 samplePSX(vec2 tc){\n"\
 	"		vec2 uv = (tc + v_page_clut.xy) * c_VRAMTexel;\n"\
-	"		vec2 color_rg = VRAM(uv);\n"\
-	"		return packRG(color_rg);\n"\
+	"		return VRAM(uv);\n"\
 	"	}\n"
 
 
@@ -968,34 +958,36 @@ int g_PsxFogToBlack = 0;
 	"	vec4 BilinearTextureSample(vec2 P) {\n"\
 	"		vec2 frac = fract(P);\n"\
 	"		vec2 pixel = floor(P);\n"\
-	"		float C11 = samplePSX(pixel);\n"\
-	"		float C21 = samplePSX(pixel + vec2(c_onePixel, 0.0));\n"\
-	"		float C12 = samplePSX(pixel + vec2(0.0, c_onePixel));\n"\
-	"		float C22 = samplePSX(pixel + vec2(c_onePixel, c_onePixel));\n"\
-	"		float ax1 = mix(float(C11 > 0.0), float(C21 > 0.0), frac.x);\n"\
-	"		float ax2 = mix(float(C12 > 0.0), float(C22 > 0.0), frac.x);\n"\
+	"		vec2 C11 = samplePSX(pixel);\n"\
+	"		vec2 C21 = samplePSX(pixel + vec2(c_onePixel, 0.0));\n"\
+	"		vec2 C12 = samplePSX(pixel + vec2(0.0, c_onePixel));\n"\
+	"		vec2 C22 = samplePSX(pixel + vec2(c_onePixel, c_onePixel));\n"\
+	"		float ax1 = mix(float(C11.x + C11.y > 0.0), float(C21.x + C21.y > 0.0), frac.x);\n"\
+	"		float ax2 = mix(float(C12.x + C12.y > 0.0), float(C22.x + C22.y > 0.0), frac.x);\n"\
 	"		if(mix(ax1, ax2, frac.y) < 0.5) { discard; }\n"\
-	"		vec4 x1 = mix(decodeRG(C11), decodeRG(C21), frac.x);\n"\
-	"		vec4 x2 = mix(decodeRG(C12), decodeRG(C22), frac.x);\n"\
-	"		return mix(x1, x2, frac.y);\n"\
+	"		vec4 x1 = mix(lut(C11), lut(C21), frac.x);\n"\
+	"		vec4 x2 = mix(lut(C12), lut(C22), frac.x);\n"\
+	"		vec4 t = mix(x1, x2, frac.y);\n"\
+	"		t.w = 1.0 - t.w;\n"\
+	"		return t;\n"\
 	"	}\n"
 
 #define GPU_NEAREST_SAMPLE_FUNC \
 	"vec4 NearestTextureSample(vec2 P) {\n"\
-	"	float color_16 = samplePSX(P);\n"\
-	"	if(color_16 == 0.0) {discard;}\n"\
-	"	return decodeRG(color_16);\n"\
+	"	vec2 rg = samplePSX(P);\n"\
+	"	if(rg.x + rg.y == 0.0) {discard;}\n"\
+	"	vec4 t = lut(rg);\n"\
+	"	t.w = 1.0 - t.w;\n"\
+	"	return t;\n"\
 	"}\n"
 
 /* The VRAM texture stores each 16-bit PSX pixel as two normalised bytes
- * (low/high). Every downstream step — packRG, the 4/8-bit CLUT index math,
- * and the 5-bit channel decode — treats the sampled value as an exact k/255
- * and feeds it to floor(). The Windows GL driver normalises UNSIGNED_BYTE ->
- * float precisely enough that this holds; Mesa (Steam Deck / Proton) rounds
- * slightly differently, so floor() lands one bucket off and colours / palette
- * lookups corrupt. Snap each channel to its exact integer byte right at the
- * source so all downstream math is bit-exact on every driver (a no-op where
- * normalisation is already exact). */
+ * (low/high). Snap each channel to its exact integer byte right at the source
+ * so the 4/8-bit CLUT index math and the LUT lookup index are bit-exact on
+ * every driver (a no-op where normalisation is already exact). The 5-bit
+ * channel decode itself no longer runs on the GPU: colour comes from the
+ * CPU-baked s_rgLut table, so there is no per-pixel floor() left to diverge
+ * between the Windows driver and Mesa. */
 #if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
 #define GPU_FETCH_VRAM_FUNC\
 		"	uniform sampler2D s_texture;\n"\
@@ -1479,8 +1471,11 @@ ShaderID GR_Shader_Compile(const char* source)
 		eprinterr("Failed to link Shader!\n");
 
 	GLint sampler = 0;
+	GLint lutSampler = 2;
 	glUseProgram(program);
 	glUniform1iv(glGetUniformLocation(program, "s_texture"), 1, &sampler);
+	/* s_rgLut lives on unit 2; -1 (shaders without the LUT) makes this a no-op. */
+	glUniform1iv(glGetUniformLocation(program, "s_rgLut"), 1, &lutSampler);
 	glUseProgram(0);
 
 	return program;
@@ -1490,6 +1485,29 @@ ShaderID GR_Shader_Compile(const char* source)
 #endif
 
 //--------------------------------------------------------------------------------------------
+
+static u_char rgLUT[LUT_WIDTH * LUT_HEIGHT * 4];
+
+/* Build the 16-bit-PSX -> RGBA table ONCE on the CPU with exact integer bit
+ * math. The GPU decodes a texel by indexing this table (lut() in the shader)
+ * instead of reconstructing colour with driver-sensitive float floor().
+ * Ported from OpenDriver2/PsyCross GR_InitRG8LUT. */
+void GR_InitRG8LUT()
+{
+	for (int y = 0; y < LUT_HEIGHT; y++)
+	{
+		u_char* row = rgLUT + y * (LUT_WIDTH * 4);
+		for (int x = 0; x < LUT_WIDTH; x++)
+		{
+			const unsigned short c = (unsigned short)((y << 8) | x);
+			u_char* pixel = row + x * 4;
+			pixel[0] = (u_char)((c) & 31) << 3;         /* R: bits 0-4   */
+			pixel[1] = (u_char)((c >> 5) & 31) << 3;    /* G: bits 5-9   */
+			pixel[2] = (u_char)((c >> 10) & 31) << 3;   /* B: bits 10-14 */
+			pixel[3] = (u_char)((c >> 15) & 1) << 7;    /* A: STP mask   */
+		}
+	}
+}
 
 void GR_GenerateCommonTextures()
 {
@@ -1505,6 +1523,23 @@ void GR_GenerateCommonTextures()
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &pixelData);
 
 		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	/* RG -> colour lookup table on texture unit 2 (unit 0 = scene, unit 1 =
+	 * shadow map). The table is immutable — built and uploaded once here — and
+	 * re-bound on every shader bind (in the sampler-shader setup) so it
+	 * self-heals if any pass ever leaves another texture on unit 2. */
+	GR_InitRG8LUT();
+	glGenTextures(1, &g_rgLutTexture);
+	{
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, g_rgLutTexture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, LUT_WIDTH, LUT_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgLUT);
+		glActiveTexture(GL_TEXTURE0);
 	}
 #endif
 }
@@ -2099,6 +2134,13 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 			glActiveTexture(GL_TEXTURE0);
 		}
 	}
+
+	/* The RG->colour LUT sampler is on unit 2; re-bind it here (like the shadow
+	 * map above) on every shader bind so it self-heals if another pass ever
+	 * left a texture on unit 2. Immutable table — just a cheap re-assert. */
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, g_rgLutTexture);
+	glActiveTexture(GL_TEXTURE0);
 
 	/* Push the dither-force uniform every shader bind. Cheap (single
 	 * float upload) and ensures runtime config changes (if we add a
