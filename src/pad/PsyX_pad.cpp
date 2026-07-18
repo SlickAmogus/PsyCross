@@ -28,6 +28,7 @@ int						g_cfg_controllerToSlotMapping[MAX_CONTROLLERS] = { -1, -1 };
  * 1 = d-pad only (digital), 2 = both (default). Set from config in main_pc.c.
  * Drives whether the emulated pad sits in analog (0x73) or digital (0x41) mode. */
 int						g_cfg_controllerMovement = 2;
+int						g_cfg_disableDpadMovement = 0; /* 1 = controller D-pad no longer drives movement (freed for action binds); keyboard arrows unaffected */
 
 PsyXController			g_controllers[MAX_CONTROLLERS];
 
@@ -379,6 +380,14 @@ void PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad
 	controller->hystWord[0] = w1;
 	controller->hystWord[1] = w2;
 	ret = w1 & w2;
+
+	/* "Disable D-pad for movement": un-press the controller D-pad bits (active-low,
+	 * so OR them back to 1) so the D-pad no longer drives walk/turn. Keyboard arrows
+	 * use a separate word (unaffected), and actions bound to the D-pad read the raw
+	 * controller via PsyX_RawControllerButtonHeld, so binding still works. Bits:
+	 * UP 0x10, DOWN 0x40, LEFT 0x80, RIGHT 0x20. */
+	if (g_cfg_disableDpadMovement)
+		ret |= 0x10 | 0x40 | 0x80 | 0x20;
 
 	leftX = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_x);
 	leftY = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_y);
