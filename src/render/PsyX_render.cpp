@@ -165,7 +165,6 @@ int g_cfg_bilinearFiltering = 0;
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
 int g_cfg_menuFilter = 0;
-int g_cfg_sharp2dOverrides = 0; /* 1 = nearest-sample HD 2D/menu texture mods (kills font-atlas edge bleed) */
 int g_cfg_affineTextures = 0;
 /* When non-zero, the GPU_DITHERING macro applies the 4x4 PSX-style ordered
  * dither to every fragment regardless of the per-primitive `a_texcoord.w`
@@ -1306,7 +1305,7 @@ const char* gte_shader_32_rgba =
 	 * bleed at cell edges. (0,0) = free linear, no clamp (no-override path). */
 	"		vec2 uvn = v_texcoord.xy + u_texOffset;\n"\
 	"		vec2 cell = floor(uvn);\n"\
-	"		vec2 hc = abs(u_hiresHalf); vec2 tc = (cell + clamp(uvn - cell, hc, vec2(1.0) - hc)) * texelSize; if (u_hiresHalf.x < 0.0) { vec2 htx = 2.0 * hc * texelSize; tc = floor(tc / htx + 0.5) * htx; }\n"\
+	"		vec2 tc = (cell + clamp(uvn - cell, u_hiresHalf, vec2(1.0) - u_hiresHalf)) * texelSize;\n"\
 	"		fragColor = texture2D(s_texture, tc);\n"\
 	/* PSX colour-0 transparency for hi-res overrides: alpha 0 texels are
 	 * holes on ANY prim (opaque prims ignore blending, so without the
@@ -2179,15 +2178,6 @@ void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
 		float hh[2];
 		hh[0] = (hx > 0.5f) ? 0.5f : hx;
 		hh[1] = (hy > 0.5f) ? 0.5f : hy;
-		/* Sharp 2D texture-mod mode: pass u_hiresHalf NEGATIVE so the fragment shader
-		 * snaps to the nearest hires texel (nearest sampling) instead of linear —
-		 * removes HD font-atlas glyph-edge bleed ("ghost text"). Only on 2D/menu
-		 * frames, and only when BOTH hires dims are known so the shader divide is safe. */
-		if (g_cfg_sharp2dOverrides && g_PsxDitherSuppressed && hh[0] > 0.0f && hh[1] > 0.0f)
-		{
-			hh[0] = -hh[0];
-			hh[1] = -hh[1];
-		}
 		glUniform2fv(u_hiresHalfLoc, 1, hh);
 	}
 }
