@@ -162,6 +162,9 @@ int g_cfg_pgxpZBuffer = 1;
  * (config key: use_pgxp). */
 int g_PsxUsePgxp = 0;
 int g_cfg_bilinearFiltering = 0;
+/* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
+ * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
+int g_cfg_menuFilter = 0;
 int g_cfg_affineTextures = 0;
 /* When non-zero, the GPU_DITHERING macro applies the 4x4 PSX-style ordered
  * dither to every fragment regardless of the per-primitive `a_texcoord.w`
@@ -1214,7 +1217,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
-	"		if(bilinearFilter > 0 && v_is3d > 0.5)\n"\
+	"		if((bilinearFilter == 1 && v_is3d > 0.5) || bilinearFilter >= 2)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
@@ -2133,7 +2136,9 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
 	if(u_bilinearFilterLoc != -1)
-		glUniform1i(u_bilinearFilterLoc, g_cfg_bilinearFiltering && !g_PsxDitherSuppressed);
+		/* 1 = 3D bilinear (v_is3d-gated); 2 = menu/2D-frame filter (ignores v_is3d,
+		 * independent of psx_dither). Menu frames set g_PsxDitherSuppressed. */
+		glUniform1i(u_bilinearFilterLoc, g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0) : (g_cfg_bilinearFiltering ? 1 : 0));
 
 #endif
 
@@ -2146,8 +2151,14 @@ void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
 	if(u_texelSizeLoc == -1)
 		return;
 
-	// WebGL is fucking around with glUniform2f, so use vector version
-	float vec[] = { 1.0f / (float)width, 1.0f / (float)height };
+	// WebGL is fucking around with glUniform2f, so use vector version.
+	// width/height are a pool slot's nativeW/nativeH; a slot whose registration
+	// aborted mid-way (an Intel-HD-4600 upload failure) leaves nativeW==0, so
+	// 1.0/width == +Inf -> NaN texture coords. NaN sampling is implementation-
+	// defined (Intel returns arbitrary texels: the half-screen garbage quad), so
+	// clamp the divisor to >=1 to keep coords finite. Valid slots are unaffected.
+	float vec[] = { 1.0f / (float)(width  > 0 ? width  : 1),
+	                1.0f / (float)(height > 0 ? height : 1) };
 	glUniform2fv(u_texelSizeLoc, 1, vec);
 
 	if(u_texOffsetLoc != -1)

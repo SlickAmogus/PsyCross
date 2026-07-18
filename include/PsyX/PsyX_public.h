@@ -65,6 +65,7 @@ extern GameOnTextInputHandler		g_cfg_gameOnTextInput;
 extern int							g_cfg_swapInterval;
 extern int							g_cfg_pgxpZBuffer;
 extern int							g_cfg_bilinearFiltering;
+extern int							g_cfg_menuFilter;
 extern int							g_cfg_affineTextures;
 extern int							g_cfg_psxDither;
 extern int							g_cfg_pgxpTextureCorrection;
