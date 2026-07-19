@@ -474,6 +474,10 @@ DRAWENV activeDrawEnv;
 
 static const char* currentSplitDebugText = nullptr;
 TextureID overrideTexture = 0;
+/* Companion normal map for overrideTexture (0 = none). No producer yet — the
+ * flashlight normal-map path sets it. Declared here so the batch key can
+ * account for it before anything binds it. */
+TextureID overrideNormalTexture = 0;
 int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
 int overrideTextureOffsetX = 0;
@@ -506,9 +510,10 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
 }
 
 /* Route a textured prim through the (otherwise dormant) overrideTexture
- * path when the host has a hi-res replacement for its tpage/clut. AddSplit
- * keys splits on textureId, so batches open/close exactly at matching
- * prims; overrideTextureWidth/Height feed texelSize with the NATIVE size,
+ * path when the host has a hi-res replacement for its tpage/clut. textureId
+ * is one of AddSplit's key terms (see the full list there — it is NOT the
+ * only one), so batches open/close exactly at matching prims;
+ * overrideTextureWidth/Height feed texelSize with the NATIVE size,
  * so the prim's tpage-relative UVs map 0..1 across any upscale factor.
  * The offset shifts those UVs when the prim's tpage sits partway into the
  * replaced TIM (surfaces wider than one tpage draw as several prims whose
@@ -799,6 +804,7 @@ struct GPUDrawSplit
 
 	TexFormat		texFormat;
 	TextureID		textureId;
+	TextureID		normalTextureId;
 
 	int				drawPrimMode;
 	int				depthMode; /* SplitDepthMode; always DISABLED when PGXP off (byte-identical) */
@@ -1592,10 +1598,18 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		textureId = overrideTexture;
 	}
 
+	/* Gated exactly like the colour handle above, NOT read straight off the
+	 * global: an ungated read would key untextured/white splits on override
+	 * state they never sample, fragmenting them once normal maps exist. */
+	TextureID normalTextureId = (textured && overrideTexture != 0) ? overrideNormalTexture : 0;
+
 	// FIXME: compare drawing environment too?
 	if (curSplit.blendMode == blendMode &&
 		curSplit.texFormat == texFormat &&
 		curSplit.textureId == textureId &&
+		/* a second bound texture needs its own key term: two surfaces sharing
+		 * one colour texture but wanting different normal maps must not batch. */
+		curSplit.normalTextureId == normalTextureId &&
 		/* keep world-painter prims out of non-world batches (else GL_ALWAYS
 		 * would leak onto actors sharing a texture). Always DISABLED when off. */
 		curSplit.depthMode == depthMode &&
@@ -1627,6 +1641,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.blendMode = blendMode;
 	split.texFormat = texFormat;
 	split.textureId = textureId;
+	split.normalTextureId = normalTextureId;
 	split.drawPrimMode = g_DrawPrimMode;
 	split.depthMode = depthMode;
 	split.drawenv = activeDrawEnv;
