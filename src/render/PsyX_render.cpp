@@ -3330,8 +3330,21 @@ static const char* s_fbPackShaderSrc =
 	"}\n"
 	"#else\n"
 	"uniform sampler2D s_texture;\n"
+	/* Feedback damping. The game redraws the sampled buffer at 128/128 (identity)
+	 * or 127/128, so with a buffer that is never cleared the store feeds on its
+	 * own output: stored = 0.992*stored + frame, which settles at ~122x one
+	 * frame — an overexposed pile of ghosts smearing sideways. On PSX the draw
+	 * buffer is CLEARED every frame (isbg=1, set by GsDefDispBuff2), so the blur
+	 * composites exactly ONE previous frame: the subtle ghost on fast-moving
+	 * extremities (head/hands/feet) and nothing more.
+	 *
+	 * We have no VRAM double-buffer to clear, so damp the loop to the same
+	 * steady state instead: stored = k*(0.992*stored + frame) settles at
+	 * k/(1 - 0.992k), and k = 0.5 gives ~1.0x — i.e. one frame's worth of ghost,
+	 * matching hardware. Lower this if the trail still reads too strong. */
+	"	const float c_FeedbackDamp = 0.5;\n"
 	"void main() {\n"
-	"	vec3 c = texture2D(s_texture, v_uv).rgb;\n"
+	"	vec3 c = texture2D(s_texture, v_uv).rgb * c_FeedbackDamp;\n"
 	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
 	"	float g5 = floor(c.g * 31.0 + 0.5);\n"
 	"	float b5 = floor(c.b * 31.0 + 0.5);\n"
