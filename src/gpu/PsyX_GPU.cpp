@@ -1739,6 +1739,13 @@ static bool ShadowTriangleCanCast(const GrVertex* vertex)
 	{
 		if (vertex[i].ny < 0.5f || vertex[i].nx > 0.5f || !(vertex[i].vsz > 0.0f))
 			return false;
+		/* Geometry sanity, not just provenance: !(vsz>0) rejects NaN but +inf
+		 * passes it, and vsx/vsy were never checked. One non-finite/huge caster
+		 * vertex rasterizes a near-full-map depth splat -> a giant false shadow
+		 * wedge over the scene (the PR#8 wedge class, from the depth side). */
+		if (!isfinite(vertex[i].vsx) || !isfinite(vertex[i].vsy) || !isfinite(vertex[i].vsz) ||
+		    fabsf(vertex[i].vsx) > 1.0e6f || fabsf(vertex[i].vsy) > 1.0e6f || vertex[i].vsz > 1.0e6f)
+			return false;
 	}
 	return true;
 }

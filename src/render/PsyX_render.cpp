@@ -3928,7 +3928,11 @@ void GR_SetBlendMode(BlendMode blendMode)
 	}
 	else
 	{
-		if(g_PreviousBlendMode == BM_NONE)
+		/* g_PreviousBlendMode < 0 is the post-shadow-pass "unknown" sentinel
+		 * (-999): the pass glDisable()d blending, so treat it like BM_NONE here
+		 * or the first blended split after the pass renders opaque (solid black
+		 * where a subtractive/average prim was expected). */
+		if(g_PreviousBlendMode == BM_NONE || g_PreviousBlendMode < 0)
 		{
 			glBlendColor(0.25f, 0.25f, 0.25f, 0.5f);
 			glEnable(GL_BLEND);
