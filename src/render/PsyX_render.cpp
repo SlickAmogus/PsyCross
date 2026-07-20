@@ -2418,6 +2418,16 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 	return (fx >= 0.0f && fx <= 1.0f && fy >= 0.0f && fy <= 1.0f) ? 1 : 0;
 }
 
+/* PC port: the window sub-rect the game is actually presented into (pillarbox
+ * leaves black bars at the sides). The framebuffer-feedback capture must read
+ * THIS, not the whole window: squashing the full window into the 320x224
+ * feedback buffer shrinks the image horizontally by vpW/windowWidth, and because
+ * the effect re-reads its own output every frame that scale compounds — the
+ * picture collapses toward the centre and builds up a vertical line after a few
+ * seconds. Recorded from the same block that calls GR_SetViewPort so the two can
+ * never disagree. */
+static int g_presentVp[4] = { 0, 0, 0, 0 };
+
 void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 {
 	if (enable)
@@ -2557,6 +2567,10 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				}
 			}
 			GR_SetViewPort(vpX, vpY, vpW, vpH);
+
+			/* Source rect for the framebuffer-feedback capture. */
+			g_presentVp[0] = vpX; g_presentVp[1] = vpY;
+			g_presentVp[2] = vpW; g_presentVp[3] = vpH;
 		}
 
 	}
@@ -3455,13 +3469,22 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	}
 #endif
 
-	/* Unflipped downscale of the window into the 320x224 capture; the pack
-	 * shader does the one flip needed to land screen-top on the rect's first
-	 * VRAM row. LINEAR because this is a large downsample feeding a blur. */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbPackFBO);
-	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, w, h,
-		GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	/* Unflipped downscale of the PRESENTED VIEWPORT into the 320x224 capture;
+	 * the pack shader does the one flip needed to land screen-top on the rect's
+	 * first VRAM row. Reading the whole window instead would include the
+	 * pillarbox bars and rescale the picture every frame — and this effect feeds
+	 * on its own output, so that scale compounds into a collapsing image.
+	 * LINEAR because this is a large downsample feeding a blur. */
+	{
+		int sx = g_presentVp[0], sy = g_presentVp[1];
+		int sw = g_presentVp[2], sh = g_presentVp[3];
+		if (sw <= 0 || sh <= 0) { sx = 0; sy = 0; sw = g_windowWidth; sh = g_windowHeight; }
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbPackFBO);
+		glBlitFramebuffer(sx, sy, sx + sw, sy + sh, 0, 0, w, h,
+			GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
