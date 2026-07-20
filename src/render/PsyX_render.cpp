@@ -3248,39 +3248,250 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 	}
 }
 
-/* Blit the stored frame into the latched scene scratch rect of the CURRENT
- * g_vramTexture. Caller has already validated g_fbStoreValid. Uses the same
- * Y-flipped destination addressing as the display-region blits so the strips'
- * V coordinates read the image the same way up as the display pages. */
+/* ===================== framebuffer feedback (packed RGB555) =================
+ * Silent Hill DOES read rendered pixels back from VRAM: Screen_BackgroundMotionBlur
+ * (the Harry-running loading-screen trail, every frame from GameBoot_LoadingScreen)
+ * and the per-map ghosting/dream overlays all sample getTPage(2, 0, ...) display
+ * pages. Those pages must therefore hold the previous frame.
+ *
+ * The catch that broke the first attempt at this: VRAM is a GL_RG8 texture whose
+ * two channels hold the packed BYTES of a 16-bit PSX pixel — the sampling shader
+ * reconstructs it as
+ *     color_16 = (rg.y * 256.0 + rg.x) * 255.0
+ *     rgb      = fract(floor(color_16 / vec4(1.0, 32.0, 1024.0, ...)) / 32.0)
+ * i.e. bit 0-4 = R, 5-9 = G, 10-14 = B, 15 = mask; R channel = low byte, G = high.
+ * A raw glBlitFramebuffer from the RGBA8 frame therefore CANNOT work: GL drops B/A
+ * and keeps the R,G *colour* bytes, which the shader then decodes as a bit-packed
+ * 555 word — saturated garbage stripes. (The CPU helper GR_CopyRGBAFramebufferToVRAM
+ * packs R and B the wrong way round against this shader, so it is no use either.)
+ *
+ * So the store is a shader pass that packs RGBA8 -> RGB555 into RG, rendered
+ * straight into the VRAM texture. Mask bit is left 0, so a pure-black source pixel
+ * packs to word 0 and the sampler's `if (color_16 == 0.0) discard;` treats it as
+ * transparent — exactly PSX texel-0 behaviour, which is what makes the loading
+ * screen show a trail of Harry rather than an opaque black rectangle. */
+static ShaderID g_fbPackShader = (ShaderID)-1;
+static GLuint   g_fbPackVAO = 0;
+static GLuint   g_fbPackTex = 0;   /* captured frame, RGBA8 */
+static GLuint   g_fbPackFBO = 0;
+static int      g_fbPackW = 0, g_fbPackH = 0;
+static int      g_fbPackValid = 0; /* a frame has been captured this session */
+
+/* PSX display-buffer rects recorded from GsDefDispBuff2 (SH: (0,32)/(0,256),
+ * 320x224). The PC libgs stub collapses both display envs to (0,0) because there
+ * is no VRAM double-buffering here, so activeDispEnv.disp is NOT a usable store
+ * target — it would land on the CLUT strip at y<32 (paper map at (224,15)). */
+static RECT16 g_psxDispBuf[2] = { {0,0,0,0}, {0,0,0,0} };
+static int    g_psxDispBufValid = 0;
+
+extern "C" void GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int h)
+{
+	int gap;
+	g_psxDispBuf[0].x = x0; g_psxDispBuf[0].y = y0;
+	g_psxDispBuf[1].x = x1; g_psxDispBuf[1].y = y1;
+
+	/* Clamp so buffer 0 can never spill into buffer 1's rows (SH's are exactly
+	 * adjacent: 32 + 224 == 256). */
+	gap = (y1 > y0) ? (y1 - y0) : h;
+	if (gap > 0 && h > gap)
+		h = gap;
+
+	g_psxDispBuf[0].w = g_psxDispBuf[1].w = w;
+	g_psxDispBuf[0].h = g_psxDispBuf[1].h = h;
+	g_psxDispBufValid = (w > 0 && h > 0);
+}
+
+static const char* s_fbPackShaderSrc =
+	"varying vec2 v_uv;\n"
+	"#ifdef VERTEX\n"
+	"void main() {\n"
+	"	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0, float((gl_VertexID & 2) << 1) - 1.0);\n"
+	"	v_uv = (p + 1.0) * 0.5;\n"
+	/* The capture below is an unflipped window->texture blit, so texture row 0 is
+	 * the screen BOTTOM. VRAM rows run downward with screen rows (the game samples
+	 * buffer 0 from v=32 at the top of the screen), and viewport y=0 is the rect's
+	 * first VRAM row — so the first VRAM row must receive the screen TOP. Flip. */
+	"	v_uv.y = 1.0 - v_uv.y;\n"
+	"	gl_Position = vec4(p, 0.0, 1.0);\n"
+	"}\n"
+	"#else\n"
+	"uniform sampler2D s_texture;\n"
+	"void main() {\n"
+	"	vec3 c = texture2D(s_texture, v_uv).rgb;\n"
+	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
+	"	float g5 = floor(c.g * 31.0 + 0.5);\n"
+	"	float b5 = floor(c.b * 31.0 + 0.5);\n"
+	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"  /* mask bit left 0 */
+	"	float hi  = floor(w16 / 256.0);\n"
+	"	float lo  = w16 - hi * 256.0;\n"
+	"	fragColor = vec4(lo / 255.0, hi / 255.0, 0.0, 1.0);\n"
+	"}\n"
+	"#endif\n";
+
+static void GR_EnsureFbPackTarget(int w, int h)
+{
+	if (g_fbPackShader == (ShaderID)-1)
+	{
+		g_fbPackShader = GR_Shader_Compile(s_fbPackShaderSrc);
+		glUseProgram(g_fbPackShader);
+		{
+			GLint loc = glGetUniformLocation(g_fbPackShader, "s_texture");
+			if (loc != -1) glUniform1i(loc, 0);
+		}
+		glUseProgram(0);
+		glGenVertexArrays(1, &g_fbPackVAO);
+		glGenTextures(1, &g_fbPackTex);
+		glGenFramebuffers(1, &g_fbPackFBO);
+	}
+
+	if (g_fbPackW == w && g_fbPackH == h)
+		return;
+
+	g_fbPackW = w;
+	g_fbPackH = h;
+
+	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fbPackFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbPackTex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
+ * invalidates the renderer's cached GL state, so this is safe to run mid-frame
+ * (GR_UpdateVRAM calls it after a full vram[] re-upload). */
+static void GR_PackFrameToVramRect(int x, int y, int w, int h)
+{
+#if USE_OPENGL
+	GLint vp[4];
+
+	if (!g_fbPackValid || w <= 0 || h <= 0)
+		return;
+
+	glGetIntegerv(GL_VIEWPORT, vp);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+	glViewport(x, y, w, h);
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_STENCIL_TEST);
+
+	glUseProgram(g_fbPackShader);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
+	glBindVertexArray(g_fbPackVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+
+	glEnable(GL_STENCIL_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(vp[0], vp[1], vp[2], vp[3]);
+
+	/* Actual GL state now: blend off, depth off, scissor off. Sync the trackers
+	 * and force shader/texture rebind, exactly as GR_DrawFullscreenTexture does. */
+	g_PreviousShader       = (ShaderID)-1;
+	g_lastBoundTexture     = (TextureID)-1;
+	g_PreviousBlendMode    = BM_NONE;
+	g_PreviousDepthMode    = 0;
+	g_PreviousScissorState = 0;
+#endif
+}
+
+/* Pack the captured frame into every rect the game may read back: both PSX
+ * display buffers, plus a latched scene scratch rect if one is active. */
+static void GR_PackFrameToAllFeedbackRects(void)
+{
+	if (!g_psxDispBufValid)
+		return;
+
+	GR_PackFrameToVramRect(g_psxDispBuf[0].x, g_psxDispBuf[0].y,
+	                       g_psxDispBuf[0].w, g_psxDispBuf[0].h);
+	GR_PackFrameToVramRect(g_psxDispBuf[1].x, g_psxDispBuf[1].y,
+	                       g_psxDispBuf[1].w, g_psxDispBuf[1].h);
+
+	if (g_sceneFbRedirectTtl > 0)
+	{
+		GR_PackFrameToVramRect(g_sceneFbRedirect.x, g_sceneFbRedirect.y,
+		                       g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+	}
+}
+
+/* Called once per present: capture the composed frame, then pack it into the
+ * feedback rects. */
+extern "C" void GR_StoreFrameBufferPsx(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	int w, h;
+	GLuint readFBO = 0;
+
+	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
+		return;
+
+	w = g_psxDispBuf[0].w;
+	h = g_psxDispBuf[0].h;
+
+	GR_EnsureFbPackTarget(w, h);
+
+#if PSYX_HAS_POSTPROCESS
+	/* MSAA: a multisample backbuffer cannot be the source of a scaled blit —
+	 * resolve same-size into the post texture first, then downscale from there. */
+	if (g_cfg_msaaSamples > 0)
+	{
+		GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
+		glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH,
+			GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		readFBO = g_postFBO;
+	}
+#endif
+
+	/* Unflipped downscale of the window into the 320x224 capture; the pack
+	 * shader does the one flip needed to land screen-top on the rect's first
+	 * VRAM row. LINEAR because this is a large downsample feeding a blur. */
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbPackFBO);
+	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, w, h,
+		GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+	g_fbPackValid = 1;
+
+	GR_PackFrameToAllFeedbackRects();
+
+	if (g_sceneFbRedirectTtl > 0)
+		g_sceneFbRedirectTtl--;
+#endif
+}
+
+/* Re-pack after a full vram[] re-upload has stamped CPU bytes over the feedback
+ * rects (GR_UpdateVRAM). */
+extern "C" void GR_RepackFrameToVramBuffers(void)
+{
+	if (!g_fbPackValid || g_PsxSkipFramebufferStore)
+		return;
+
+	GR_PackFrameToAllFeedbackRects();
+}
+
+/* Legacy raw-blit scene-redirect helper, superseded by the packed path above.
+ * Kept as a no-op shim so the old call site in GR_StoreFrameBuffer (which is
+ * itself compiled out) does not need to change. */
 static void GR_BlitStoredFrameToSceneRedirect(void)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
 	if (g_sceneFbRedirectTtl <= 0)
 		return;
-
-	const int x = g_sceneFbRedirect.x;
-	const int y = g_sceneFbRedirect.y;
-	const int w = g_sceneFbRedirect.w;
-	const int h = g_sceneFbRedirect.h;
-
-	if (w <= 0 || h <= 0)
-		return;
-
-	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glBlitFramebuffer);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
-
-	/* Source is the whole stored frame (g_fbTexture is
-	 * g_PreviousFramebuffer.w/h — 320x224 in-game, same as the scratch). */
-	glBlitFramebuffer(0, 0, g_PreviousFramebuffer.w, g_PreviousFramebuffer.h,
-		x, y + h, x + w, y,
-		GL_COLOR_BUFFER_BIT, GL_NEAREST);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 #endif
 }
 
@@ -3490,6 +3701,11 @@ void GR_UpdateVRAM()
 #endif
 
 	GR_RestoreStoredFramebufferRegion();
+
+	/* PC port: the full vram[] re-upload just stamped CPU bytes over the
+	 * framebuffer-feedback pages — re-pack the last captured frame into them so
+	 * TIM streaming mid-scene can't blank the motion-blur / dream source. */
+	GR_RepackFrameToVramBuffers();
 
 #endif
 }

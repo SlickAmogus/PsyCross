@@ -216,6 +216,19 @@ extern void			GR_StoreFrameBuffer(int x, int y, int w, int h);
 extern void			GR_UpdateVRAM();
 extern void			GR_ReadFramebufferDataToVRAM();
 
+/* PC port: framebuffer feedback. Silent Hill reads rendered pixels back from
+ * VRAM (Screen_BackgroundMotionBlur = the Harry-running loading-screen trail;
+ * the per-map ghosting/dream overlays), so the composed frame must be present
+ * in the PSX display-buffer pages. GR_SetPsxDisplayBuffers records where those
+ * pages are (the PC libgs stub collapses both display envs to (0,0), so
+ * activeDispEnv.disp cannot be used); GR_StoreFrameBufferPsx packs the frame
+ * into them each present, and GR_RepackFrameToVramBuffers restores it after a
+ * full vram[] re-upload. The store is a PACKING SHADER, not a blit: VRAM is
+ * GL_RG8 holding the two bytes of a 16-bit RGB555 pixel. */
+extern void			GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int h);
+extern void			GR_StoreFrameBufferPsx(void);
+extern void			GR_RepackFrameToVramBuffers(void);
+
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */
