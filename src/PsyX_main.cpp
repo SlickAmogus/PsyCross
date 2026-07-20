@@ -985,8 +985,20 @@ void PsyX_EndScene()
 	GR_EndScene();
 
 #ifndef PSYX_SKIP_FRAMEBUFFER_STORE
+	/* The naive whole-display-rect store. Disabled for Silent Hill: the PC
+	 * libgs stub reports disp as (0,0), so this lands on the CLUT strip at
+	 * y<32 and destroys freshly uploaded CLUTs (paper map at (224,15)). */
 	GR_StoreFrameBuffer(activeDispEnv.disp.x, activeDispEnv.disp.y, activeDispEnv.disp.w, activeDispEnv.disp.h);
 #endif
+
+	/* PC port: the CORRECT store — into the PSX display-buffer rects the game
+	 * actually reads back ((0,32)/(0,256) 320x224 in SH), which carry no CLUT
+	 * or texture data. Without it every framebuffer-feedback effect samples
+	 * unrelated VRAM: the Harry-running loading-screen motion blur never
+	 * appeared, and the map dream/ghosting overlays composited stray TIMs.
+	 * No-op until the game calls GsDefDispBuff2, and honours the same
+	 * g_PsxSkipFramebufferStore per-frame opt-out as the store above. */
+	GR_StoreFrameBufferPsx();
 
 	/* PC port: g_PsxSkipFramebufferStore is a per-frame opt-out — the game must
 	 * re-set it each tick during a TIM-protect screen (e.g. paper-map pickup). */
