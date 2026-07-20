@@ -3298,6 +3298,41 @@ static int      g_fbPackValid = 0; /* a frame has been captured this session */
 static RECT16 g_psxDispBuf[2] = { {0,0,0,0}, {0,0,0,0} };
 static int    g_psxDispBufValid = 0;
 
+/* Frames remaining for which the feedback store stands down because the game
+ * uploaded its own data into a display-buffer rect (see GR_CopyVRAM). A few
+ * frames of hysteresis so a scene that uploads intermittently doesn't flicker
+ * the effect on between uploads. */
+static int g_fbFeedbackSuppress = 0;
+
+void GR_NoteVramUploadForFeedback(int x, int y, int w, int h)
+{
+	int i;
+
+	if (!g_psxDispBufValid)
+		return;
+
+	for (i = 0; i < 2; i++)
+	{
+		const RECT16* b = &g_psxDispBuf[i];
+		if (b->w <= 0 || b->h <= 0)
+			continue;
+		/* rect overlap */
+		if (x < b->x + b->w && x + w > b->x &&
+		    y < b->y + b->h && y + h > b->y)
+		{
+			static int s_logged = 0;
+			if (!s_logged) {
+				s_logged = 1;
+				eprintinfo("[FBFEEDBACK] VRAM upload (%d,%d %dx%d) lands in display buffer %d "
+					"(%d,%d %dx%d) — feedback store standing down\n",
+					x, y, w, h, i, b->x, b->y, b->w, b->h);
+			}
+			g_fbFeedbackSuppress = 4;
+			return;
+		}
+	}
+}
+
 extern "C" void GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int h)
 {
 	int gap;
@@ -3462,6 +3497,14 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 
 	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
 		return;
+
+	/* The game just wrote its own data into a display-buffer rect — leave it
+	 * alone until it stops (see GR_NoteVramUploadForFeedback). */
+	if (g_fbFeedbackSuppress > 0)
+	{
+		g_fbFeedbackSuppress--;
+		return;
+	}
 
 	w = g_psxDispBuf[0].w;
 	h = g_psxDispBuf[0].h;
@@ -3695,6 +3738,17 @@ void GR_CopyVRAM(unsigned short* src, int x, int y, int w, int h, int dst_x, int
 	if (dst_y + h > VRAM_HEIGHT) h = VRAM_HEIGHT - dst_y;
 	if (w <= 0 || h <= 0)
 		return;
+
+	/* PC port: self-protect the framebuffer-feedback store. It repacks the frame
+	 * into the PSX display-buffer rects every present, which is safe only while
+	 * nothing else lives there. Most scenes keep CLUTs above the buffers (y<32)
+	 * or below them (y>=480) — but some cutscenes LoadImage CLUTs straight into
+	 * the display region as characters appear (map7_s03's endings hand-guard
+	 * exactly that with g_PsxSkipFramebufferStore). Rather than rely on finding
+	 * every such scene by hand, notice the upload here and stand the store down
+	 * for a few frames so the game's own data always wins. Scenes that keep
+	 * uploading there simply keep the effect off, which is the correct trade. */
+	GR_NoteVramUploadForFeedback(dst_x, dst_y, w, h);
 
 	unsigned short* dst = vram + dst_x + dst_y * VRAM_WIDTH;
 
