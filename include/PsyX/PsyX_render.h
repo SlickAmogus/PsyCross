@@ -216,18 +216,6 @@ extern void			GR_StoreFrameBuffer(int x, int y, int w, int h);
 extern void			GR_UpdateVRAM();
 extern void			GR_ReadFramebufferDataToVRAM();
 
-/* PC port: record the PSX display-buffer origins the game set up via
- * GsDefDispBuff2. The PC libgs stub collapses both display envs to (0,0), so
- * activeDispEnv.disp cannot be used as a framebuffer store target — it would
- * land on the CLUT strip at y<32. Silent Hill: (0,32) and (0,256), 320x224. */
-extern void			GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int h);
-
-/* PC port: store the composed frame into those PSX display-buffer rects so the
- * game's framebuffer-feedback effects (Screen_BackgroundMotionBlur — the
- * Harry-running loading-screen trail — and the per-map ghosting/dream overlays)
- * can sample the previous frame back out of VRAM. */
-extern void			GR_StoreFrameBufferPsx(void);
-
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */
