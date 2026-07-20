@@ -481,7 +481,11 @@ void DrawOTag(u_long* p)
 
 		ParsePrimitivesLinkedList(p, 0);
 
-		glFinish();
+		/* No glFinish here: the parse is CPU-side and the GL command stream is
+		 * ordered, so DrawAllSplits needs no completion barrier. The old
+		 * unconditional glFinish drained the pipeline 2-3x per frame (OT0 +
+		 * OT2 + water OT), serializing CPU against GPU — on 2012-era Intel
+		 * that alone pushed frames onto multi-vblank boundaries (~10fps). */
 
 		DrawAllSplits();
 	} while (g_dbg_emulatorPaused);

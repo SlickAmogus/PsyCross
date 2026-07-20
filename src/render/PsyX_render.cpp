@@ -2363,6 +2363,15 @@ void GR_ReadFramebufferDataToVRAM()
 	w = g_PreviousFramebuffer.w;
 	h = g_PreviousFramebuffer.h;
 
+	/* The only writer of g_PreviousFramebuffer (GR_StoreFrameBuffer) is
+	 * compiled out under PSYX_SKIP_FRAMEBUFFER_STORE, so this rect is 0x0 in
+	 * the PC-port build — the 2 MB glGetTexImage + glMapBuffer readback below
+	 * ran every frame only to feed a zero-iteration copy. Near-free on modern
+	 * drivers (async PBO DMA); a synchronous full-pipeline flush per frame on
+	 * the old-Intel GL 3.1 tier — the reported 10fps class. */
+	if (w <= 0 || h <= 0)
+		return;
+
 	// now we can read it back to VRAM texture
 
 #if USE_OPENGL && defined(USE_PBO)
