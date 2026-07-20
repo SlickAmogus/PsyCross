@@ -179,6 +179,15 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
  * Hor+), at the cost of larger off-screen NDC. Live-tunable via console `pgxpedge`. */
 extern "C" { float g_PgxpEdgeMax = 8192.0f; }
 
+/* [PGXP-SPIKE] diagnostic: counts per-frame how many precise vertices project
+ * PAST the guard band (|screen coord| > g_PgxpEdgeMax) and get position-clamped.
+ * A clamped precise vertex is a bounded-but-visible thin spike (the clamp is a
+ * guard band, not a true clip; the ortho shader path makes screen pos = ppx/ppy
+ * with W cancelling, so a large ppx IS a spike). Reported on the [PGXP] cov line.
+ * If the Nowhere blue-spike/black-wedge frames show clamp>0 while clean frames
+ * show 0, the near-camera precise-projection is the source. Pure observation. */
+static unsigned int s_pgxpClamp = 0;
+
 /* PGXP perspective-W precision. 1 (default) = use the unquantized GTE accumulator
  * (gte_shift(m_mac3,1)) for the shader's per-vertex W instead of the clamped 16-bit
  * SZ3 register; coincident edges then get a matching 1/W so seams stop widening with
@@ -245,6 +254,7 @@ static inline bool GetPreciseVertex(const void* addr, unsigned value, int rawX, 
 		const float m = g_PgxpEdgeMax;
 		float px = e->x < -m ? -m : (e->x > m ? m : e->x);
 		float py = e->y < -m ? -m : (e->y > m ? m : e->y);
+		if (px != e->x || py != e->y) s_pgxpClamp++;
 		*ox = px + ofsX; *oy = py + ofsY; *ow = e->w; return true;
 	}
 	*ox = (float)rawX + ofsX; *oy = (float)rawY + ofsY; *ow = 0.0f; return false;
@@ -298,17 +308,17 @@ static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0, s_pgxpClip 
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
-	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = 0; return; }
+	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u spikeclamp=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
 				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
-				s_pgxpClip);
-		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = 0;
+				s_pgxpClip, s_pgxpClamp);
+		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = s_pgxpClamp = 0;
 	}
 }
 
