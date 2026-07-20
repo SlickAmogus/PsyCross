@@ -200,6 +200,11 @@ extern int PsyX_LookupKeyboardMapping(const char* str, int default_value);
 /* Returns controller mapping index */
 extern int PsyX_LookupGameControllerMapping(const char* str, int default_value);
 
+/* Is a bind held on any attached physical controller? Takes a value encoded by
+ * PsyX_LookupGameControllerMapping, so it accepts axes (the triggers) as well as
+ * digital buttons — unlike PsyX_RawControllerButtonHeld, which is buttons only. */
+extern int PsyX_RawControllerBindHeld(int buttonOrAxis);
+
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);
 

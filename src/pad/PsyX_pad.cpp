@@ -320,6 +320,29 @@ extern "C" int PsyX_RawControllerButtonHeld(int sdlGameControllerButton)
 	return 0;
 }
 
+/* PC port: as above, but accepts a bind encoded by PsyX_LookupGameControllerMapping
+ * — i.e. a digital button OR an axis (CONTROLLER_MAP_FLAG_AXIS), which is how
+ * "lefttrigger"/"righttrigger" are represented. The PSX-button binds always went
+ * through that encoding (pad_cross defaults to righttrigger), but the port's own
+ * action binds resolved with SDL_GameControllerGetButtonFromString, which knows
+ * only digital buttons and returns INVALID for a trigger — so binding an action to
+ * L2/R2 silently did nothing. Digitised with the same >16384 half-scale threshold
+ * the pad word uses elsewhere. */
+extern "C" int PsyX_RawControllerBindHeld(int buttonOrAxis)
+{
+	int i;
+	if (buttonOrAxis < 0)
+		return 0;
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* gc = g_controllers[i].gc;
+		if (gc && SDL_GameControllerGetAttached(gc) &&
+		    abs(GetControllerButtonState(gc, buttonOrAxis)) > 16384)
+			return 1;
+	}
+	return 0;
+}
+
 /* PC port: Schmitt-trigger digitization. An analog input (trigger/stick) mapped to a
    button presses only above HIGH and releases only below LOW, so a value wavering near a
    single 50% threshold can't chatter the digital bit -- that chatter double-fired the gun
