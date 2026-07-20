@@ -3215,6 +3215,75 @@ void GR_PresentLastFrame(void)
 #endif
 }
 
+/* PC port: some cutscenes (map4_s04 Lisa dream, map3_s02 sibling) redirect the
+ * PSX draw-area into an offscreen VRAM scratch rect (e.g. (320,256) 320x224),
+ * render the frame THERE, and repaint the visible screen from it via 4
+ * blend-layer SPRT strips — the dream-blur effect. GL never rasterizes into
+ * VRAM, so on PC those strips sampled whatever TIMs happened to occupy the
+ * scratch pages: a rainbow noise band, or a whole character atlas blown up on
+ * screen, varying run to run with VRAM contents. ProcessDrawEnv latches the
+ * redirect rect when a DR_AREA targets x >= 320 (display buffer columns are
+ * always x < 320); while latched, the stored frame is blitted into the scratch
+ * rect of g_vramTexture each present (and after every full VRAM re-upload), so
+ * the strips composite the previous frame — the effect's actual source on PSX.
+ * By PSX construction nothing else can live in the scene's scratch rect while
+ * the scene runs, so the blit cannot clobber a live texture. */
+static RECT16 g_sceneFbRedirect = { 0, 0, 0, 0 };
+static int    g_sceneFbRedirectTtl = 0;
+
+extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
+{
+	g_sceneFbRedirect.x = x;
+	g_sceneFbRedirect.y = y;
+	g_sceneFbRedirect.w = w;
+	g_sceneFbRedirect.h = h;
+	/* Refreshed every frame the scene submits its DR_AREA; a small TTL lets
+	 * the blit die out a couple of presents after the scene stops. */
+	g_sceneFbRedirectTtl = 3;
+
+	static int s_latchLogged = 0;
+	if (!s_latchLogged) {
+		s_latchLogged = 1;
+		eprintinfo("[FBSCRATCH] scene draw-area redirect (%d,%d %dx%d) — feedback blit active\n", x, y, w, h);
+	}
+}
+
+/* Blit the stored frame into the latched scene scratch rect of the CURRENT
+ * g_vramTexture. Caller has already validated g_fbStoreValid. Uses the same
+ * Y-flipped destination addressing as the display-region blits so the strips'
+ * V coordinates read the image the same way up as the display pages. */
+static void GR_BlitStoredFrameToSceneRedirect(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (g_sceneFbRedirectTtl <= 0)
+		return;
+
+	const int x = g_sceneFbRedirect.x;
+	const int y = g_sceneFbRedirect.y;
+	const int w = g_sceneFbRedirect.w;
+	const int h = g_sceneFbRedirect.h;
+
+	if (w <= 0 || h <= 0)
+		return;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glBlitFramebuffer);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glVRAMFramebuffer);
+
+	/* Source is the whole stored frame (g_fbTexture is
+	 * g_PreviousFramebuffer.w/h — 320x224 in-game, same as the scratch). */
+	glBlitFramebuffer(0, 0, g_PreviousFramebuffer.w, g_PreviousFramebuffer.h,
+		x, y + h, x + w, y,
+		GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#endif
+}
+
 void GR_StoreFrameBuffer(int x, int y, int w, int h)
 {
 	/* PC port: skip the entire framebuffer→VRAM blit when a TIM-protect
@@ -3295,6 +3364,13 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 	g_fbStoreValid = 1;
 
+	/* Scene scratch-redirect feedback (see GR_SetSceneFbRedirect): give the
+	 * effect's SPRT strips the frame they expect to find at the redirect rect.
+	 * TTL decremented here — once per present. */
+	GR_BlitStoredFrameToSceneRedirect();
+	if (g_sceneFbRedirectTtl > 0)
+		g_sceneFbRedirectTtl--;
+
 	// after drawing
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glFlush();
@@ -3339,6 +3415,10 @@ static void GR_RestoreStoredFramebufferRegion(void)
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	/* A full vram[] re-upload also stamped TIM bytes over the scene scratch
+	 * rect — re-blit the stored frame there too (no TTL decrement here). */
+	GR_BlitStoredFrameToSceneRedirect();
 #endif
 }
 

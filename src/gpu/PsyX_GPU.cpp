@@ -494,6 +494,10 @@ static TextureID drPsyxTexOverride = 0;
 static int drPsyxTexOverrideWidth = 0;
 static int drPsyxTexOverrideHeight = 0;
 
+/* Scene VRAM-scratch redirect latch (PsyX_render.cpp) — see ProcessDrawEnv
+ * case 0x4. */
+extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h);
+
 /* Hi-res texture overrides (host side, e.g. pc_port/src/hires_override.c).
  * Returns a GL texture + the ORIGINAL TIM's native pixel size + the
  * tpage-origin offset inside that TIM when the host registered a
@@ -2672,6 +2676,20 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 
 			activeDrawEnv.clip.w -= activeDrawEnv.clip.x;
 			activeDrawEnv.clip.h -= activeDrawEnv.clip.y;
+
+			/* Scene VRAM-scratch redirect: a draw-area at x >= 320 can't be a
+			 * display buffer (both live in the x < 320 column) — it's a scene
+			 * rendering the frame into offscreen VRAM to resample it as a
+			 * texture (map4_s04 Lisa dream strips, map3_s02 sibling). GL never
+			 * rasterizes into VRAM, so latch the rect and let the render side
+			 * blit the stored frame there each present (GR_SetSceneFbRedirect).
+			 * Size floor skips small CLUT/strip areas. */
+			if (activeDrawEnv.clip.x >= 320 &&
+			    activeDrawEnv.clip.w >= 64 && activeDrawEnv.clip.h >= 64)
+			{
+				GR_SetSceneFbRedirect(activeDrawEnv.clip.x, activeDrawEnv.clip.y,
+				                      activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+			}
 			break;
 		}
 		case 0x5:
