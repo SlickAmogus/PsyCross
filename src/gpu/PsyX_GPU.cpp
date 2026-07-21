@@ -252,10 +252,21 @@ static inline bool GetPreciseVertex(const void* addr, unsigned value, int rawX, 
 		 * Only W=0 verts -- behind / at the near plane (no valid projection), set in
 		 * PsyX_GTE.cpp -- fall through to affine below. */
 		const float m = g_PgxpEdgeMax;
-		float px = e->x < -m ? -m : (e->x > m ? m : e->x);
-		float py = e->y < -m ? -m : (e->y > m ? m : e->y);
-		if (px != e->x || py != e->y) s_pgxpClamp++;
-		*ox = px + ofsX; *oy = py + ofsY; *ow = e->w; return true;
+		/* Past the guard band the precise projection is a near-camera grazing
+		 * vertex whose TRUE screen coord is enormous. The old code clamped the
+		 * POSITION to +/-m but kept the small true W — so the GPU interpolated a
+		 * thin spike from the on-screen verts toward that clamp point (the Nowhere
+		 * blue-spike / black-wedge report; [PGXP-SPIKE] spikeclamp confirmed it
+		 * fires 300-747x/60f on the artifact frames). Drop this vertex to affine
+		 * instead: PgxpFillVertex's whole-poly consistency then renders the poly
+		 * with the GTE integer coords, which the GTE already saturates to the
+		 * +/-0x400 screen box (PsyX_GTE.cpp) — bounded, PSX-authentic, no spike.
+		 * Only verts ALREADY being clamped change; |proj| <= m is byte-identical. */
+		if (e->x < -m || e->x > m || e->y < -m || e->y > m) {
+			s_pgxpClamp++;
+			*ox = (float)rawX + ofsX; *oy = (float)rawY + ofsY; *ow = 0.0f; return false;
+		}
+		*ox = e->x + ofsX; *oy = e->y + ofsY; *ow = e->w; return true;
 	}
 	*ox = (float)rawX + ofsX; *oy = (float)rawY + ofsY; *ow = 0.0f; return false;
 }
@@ -1755,6 +1766,15 @@ static bool ShadowTriangleCanCast(const GrVertex* vertex)
 		 * wedge over the scene (the PR#8 wedge class, from the depth side). */
 		if (!isfinite(vertex[i].vsx) || !isfinite(vertex[i].vsy) || !isfinite(vertex[i].vsz) ||
 		    fabsf(vertex[i].vsx) > 1.0e6f || fabsf(vertex[i].vsy) > 1.0e6f || vertex[i].vsz > 1.0e6f)
+			return false;
+		/* Inside the near plane = degenerate caster. A vertex closer than the
+		 * near-clip distance projects to an extreme shadow-map coord and paints a
+		 * black wedge; this is the mode-3 half of the Nowhere report and, unlike
+		 * the blue spike, is PGXP-independent (the shadow pass reads a_viewpos
+		 * whether or not PGXP is on) — which is why the artifact survived flipping
+		 * use_pgxp. Legit casters sit beyond the near plane, so this only drops
+		 * geometry clipping the lens. */
+		if (vertex[i].vsz < g_PgxpNearZ)
 			return false;
 	}
 	return true;
