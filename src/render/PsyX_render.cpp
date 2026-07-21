@@ -288,6 +288,13 @@ float g_PsyX_FlashlightShadowFpsDrop = 0.0f;
 float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
 float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
 
+/* Image adjustments applied to the final frame ALWAYS (not gated on the
+ * post_process filter). 1.0 = neutral for all three. Set from the Brightness
+ * screen. When any is off-neutral, GR_PostProcess runs even with no filter. */
+float g_cfg_brightness = 1.0f;
+float g_cfg_contrast   = 1.0f;
+float g_cfg_saturation = 1.0f;
+
 /* Defined later in the file (post-process module); called from GR_InitialisePSX
  * and PsyX_EndScene. */
 void GR_InitPostProcess(void);
@@ -2697,6 +2704,14 @@ static GLint    g_postLoc_time = -1;
 static GLint    g_postLoc_tonemap = -1;
 static GLint    g_postLoc_postInt = -1;
 static GLint    g_postLoc_tmInt = -1;
+static GLint    g_postLoc_bright = -1;
+static GLint    g_postLoc_contrast = -1;
+static GLint    g_postLoc_satur = -1;
+static GLint    g_postLoc_calib = -1;
+
+/* Set nonzero by the Brightness screen so GR_PostProcess overlays the reference
+ * bar; cleared when it exits. */
+extern "C" { int g_cfg_calibBar = 0; }
 static GLuint   g_postVAO = 0;
 static GLuint   g_postFBO = 0;
 static TextureID g_postTex = (TextureID)-1;
@@ -2720,6 +2735,10 @@ static const char* s_postShaderSrc =
 	"uniform int   u_tonemap;\n"
 	"uniform float u_postIntensity;\n"
 	"uniform float u_tmIntensity;\n"
+	"uniform float u_brightness;\n"     /* image adjust, 1.0 = neutral */
+	"uniform float u_contrast;\n"
+	"uniform float u_saturation;\n"
+	"uniform int   u_calibBar;\n"       /* 1 = overlay the reference bar (Brightness screen) */
 	"float hash(vec2 p) {\n"
 	"	p = fract(p * vec2(123.34, 456.21));\n"
 	"	p += dot(p, p + 45.32);\n"
@@ -2800,6 +2819,30 @@ static const char* s_postShaderSrc =
 	"	}\n"
 	"	col = mix(origCol, col, u_postIntensity);\n"
 	"	col = mix(col, tonemap(col), u_tmIntensity);\n"
+	/* Reference bar (Brightness screen): a black->white ramp across the top with a
+	 * primary-colour strip beneath it, so brightness/contrast/saturation changes
+	 * are visible against a known target. Drawn BEFORE the adjustments so the bar
+	 * is graded exactly like the game image. */
+	"	if (u_calibBar == 1) {\n"
+	"		if (uv.y < 0.09) { float g = clamp(uv.x, 0.0, 1.0); col = vec3(g); }\n"
+	"		else if (uv.y < 0.15) {\n"
+	"			float s = uv.x * 6.0;\n"
+	"			if      (s < 1.0) col = vec3(1.0, 0.0, 0.0);\n"
+	"			else if (s < 2.0) col = vec3(0.0, 1.0, 0.0);\n"
+	"			else if (s < 3.0) col = vec3(0.0, 0.0, 1.0);\n"
+	"			else if (s < 4.0) col = vec3(1.0, 1.0, 0.0);\n"
+	"			else if (s < 5.0) col = vec3(0.0, 1.0, 1.0);\n"
+	"			else              col = vec3(1.0, 0.0, 1.0);\n"
+	"		}\n"
+	"	}\n"
+	/* Image adjustments (always applied; 1.0 = neutral each). Saturation toward
+	 * Rec.601 luma, contrast around mid-grey, then brightness scale. */
+	"	{\n"
+	"		float luma = dot(col, vec3(0.299, 0.587, 0.114));\n"
+	"		col = mix(vec3(luma), col, u_saturation);\n"
+	"		col = (col - 0.5) * u_contrast + 0.5;\n"
+	"		col *= u_brightness;\n"
+	"	}\n"
 	"	fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);\n"
 	"}\n"
 	"#endif\n";
@@ -2816,6 +2859,10 @@ void GR_InitPostProcess(void)
 	g_postLoc_tonemap = glGetUniformLocation(g_postShader, "u_tonemap");
 	g_postLoc_postInt = glGetUniformLocation(g_postShader, "u_postIntensity");
 	g_postLoc_tmInt   = glGetUniformLocation(g_postShader, "u_tmIntensity");
+	g_postLoc_bright   = glGetUniformLocation(g_postShader, "u_brightness");
+	g_postLoc_contrast = glGetUniformLocation(g_postShader, "u_contrast");
+	g_postLoc_satur    = glGetUniformLocation(g_postShader, "u_saturation");
+	g_postLoc_calib    = glGetUniformLocation(g_postShader, "u_calibBar");
 
 	glGenVertexArrays(1, &g_postVAO);
 }
@@ -2876,6 +2923,14 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 		glUniform1f(g_postLoc_postInt, g_cfg_postProcessIntensity);
 	if (g_postLoc_tmInt != -1)
 		glUniform1f(g_postLoc_tmInt, g_cfg_tonemapIntensity);
+	if (g_postLoc_bright != -1)
+		glUniform1f(g_postLoc_bright, g_cfg_brightness);
+	if (g_postLoc_contrast != -1)
+		glUniform1f(g_postLoc_contrast, g_cfg_contrast);
+	if (g_postLoc_satur != -1)
+		glUniform1f(g_postLoc_satur, g_cfg_saturation);
+	if (g_postLoc_calib != -1)
+		glUniform1i(g_postLoc_calib, g_cfg_calibBar);
 
 	glBindTexture(GL_TEXTURE_2D, tex);
 	glBindVertexArray(g_postVAO);
@@ -2899,7 +2954,11 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
  * full-screen through the selected look. No-op when g_cfg_postProcess <= 0. */
 void GR_PostProcess(void)
 {
-	if (g_cfg_postProcess <= 0 && g_cfg_tonemap <= 0)
+	/* Also run when an image adjustment is off-neutral or the calibration bar is
+	 * requested, so brightness/contrast/saturation apply with no filter selected. */
+	const int bcsActive = (g_cfg_brightness != 1.0f) || (g_cfg_contrast != 1.0f) ||
+	                      (g_cfg_saturation != 1.0f) || (g_cfg_calibBar != 0);
+	if (g_cfg_postProcess <= 0 && g_cfg_tonemap <= 0 && !bcsActive)
 		return;
 	if (g_postShader == (ShaderID)-1)
 		GR_InitPostProcess();
