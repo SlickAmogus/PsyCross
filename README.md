@@ -11,7 +11,7 @@ Compatibility framework for building and running Psy-Q SDK - based Playstation g
 - Psy-Q - compatible headers
 - Implements Geometry Transformation Engine (GTE) in software and adapts it's macros and calls
 - Optimized Precise GTE Vertex Cache with *modern 3D hardware perspective transform* and *Z-buffer* support (PGXP-Z)
-- *LibSPU* with ADPCM decoding on OpenAL (SPU-AL)
+- *LibSPU* with the original OpenAL backend plus optional software SPU renderers
 - *LibGPU* with Playstation-style polygon and image handling
 - *LibCD* with ISO 9660 BIN/CUE image support by Playstation CD API
 - Already proven to be *95% compatible* with the Psy-Q Playstation SDK - Psy-X game look almost identical to the Playstation game
@@ -30,12 +30,27 @@ Compatibility framework for building and running Psy-Q SDK - based Playstation g
 - OpenAL-soft (1.21.x or newer)
 - SDL2 (2.0.16 or newer)
 
+### SPU backends
+
+`PsyX_SPUAL_ConfigureRenderer` selects one of four backends:
+
+| Value | Backend | Description |
+| ---: | --- | --- |
+| 0 | Legacy | Original PsyCross OpenAL implementation; default |
+| 1 | Exact | Integer software SPU using the PSX Gaussian table and RAM reverb |
+| 2 | Ideal | PSX Gaussian kernel and reverb topology with high-precision arithmetic |
+| 3 | Reference | Adaptive sinc reconstruction, high-rate mixing, and modern reverb |
+
+The software SPU implements 24 voices, SPU ADPCM, ADSR, signed volume and
+sweeps, pitch modulation, noise, key state, ENDX, CD/XA input, and the
+RAM-backed PSX reverb algorithm. It does not currently implement SPU IRQ
+behavior or the four hardware capture buffers.
+
 ## TODO
 - CMake dependency/build scripts
 - Add some missing **LibGTE** functions
 - MDEC implementation in **LibPress**
 - CD Audio/XA decoding and playback
-- SPU Attack-Decay-Sustain-Release (ADSR) support, *maybe through own mixer?*
 
 ### Credits
 - SoapyMan - more GTE functions, SPU-AL, PGXP-Z

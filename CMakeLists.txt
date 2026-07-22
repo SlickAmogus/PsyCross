@@ -5,9 +5,16 @@ file(GLOB_RECURSE PSYCROSS_SRCS_C
 file(GLOB_RECURSE PSYCROSS_SRCS_CPP
 	"*.cpp"
 )
+list(FILTER PSYCROSS_SRCS_CPP EXCLUDE REGEX "/tests/")
 
 set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES LANGUAGE C)
 set_source_files_properties( ${PSYCROSS_SRCS_CPP} PROPERTIES LANGUAGE CXX)
+set_source_files_properties(
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPULegacy.cpp"
+	PROPERTIES COMPILE_DEFINITIONS "PSYX_SPUAL_LEGACY_BACKEND")
+set_source_files_properties(
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUSoftware.cpp"
+	PROPERTIES COMPILE_DEFINITIONS "PSYX_SPUAL_SOFTWARE_BACKEND")
 
 # C11 uses _Static_assert, but PsyCross headers use C++ style static_assert
 # Add compatibility define for C compilation
@@ -34,7 +41,7 @@ target_include_directories(psycross_static PUBLIC "include" "include/psx")
 #     rename. Exporting these interposed libc for ALL loaded libraries —
 #     Mesa's read() of the GPU's PCI sysfs `vendor` node during GL context
 #     creation was dispatched to the game's read() and hung startup.
-#   - PsyX_SPUAL.cpp holds alGenEffects/... as global function-pointer
+#   - PsyX_SPULegacy.cpp holds alGenEffects/... as global function-pointer
 #     variables, which interposed libopenal's EFX functions.
 # -rdynamic cannot export hidden-visibility symbols, so compile just these
 # TUs hidden. They're still used normally within the module; nothing
@@ -42,7 +49,8 @@ target_include_directories(psycross_static PUBLIC "include" "include/psx")
 if(NOT WIN32)
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/src/psx/libapi.c"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUAL.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPULegacy.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUSoftware.cpp"
         PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden")
 endif()
 
@@ -51,11 +59,6 @@ target_link_libraries(psycross_static ${SDL2_LIBRARIES})
 target_include_directories(psycross_static PRIVATE ${SDL2_INCLUDE_DIRS})
 
 find_package(OpenAL REQUIRED)
-# find_package(OpenAL) exposes different handles depending on how OpenAL was
-# found: the imported target OpenAL::OpenAL (openal-soft's CMake config, or
-# CMake's FindOpenAL in 3.x), a bare `OpenAL` target (some MSYS2 configs), or
-# just the OPENAL_LIBRARY / OPENAL_INCLUDE_DIR variables. Prefer the imported
-# target; fall back so this links on both MinGW and Linux.
 if(TARGET OpenAL::OpenAL)
     target_link_libraries(psycross_static OpenAL::OpenAL)
 elseif(TARGET OpenAL)
@@ -64,12 +67,21 @@ else()
     target_link_libraries(psycross_static ${OPENAL_LIBRARY})
     target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
 endif()
-# Guard against an empty OpenAL_SOURCE_DIR (e.g. macOS Homebrew / system
-# framework, where find_package uses the imported target, not an in-tree build)
-# expanding to a bogus "/include" path.
 if(OpenAL_SOURCE_DIR)
     target_include_directories(psycross_static PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
 endif()
 if(OPENAL_INCLUDE_DIR)
     target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
+endif()
+
+if(WIN32)
+    target_link_libraries(psycross_static ole32 ksguid avrt propsys)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(psycross_spu_dispatch_test
+        tests/audio/PsyX_SPUDispatch_test.cpp
+        src/audio/PsyX_SPUDispatch.cpp)
+    target_include_directories(psycross_spu_dispatch_test PRIVATE "include" "include/psx" "src")
+    add_test(NAME psycross_spu_dispatch_test COMMAND psycross_spu_dispatch_test)
 endif()
