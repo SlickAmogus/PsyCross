@@ -20,7 +20,16 @@
 
 namespace
 {
-PsyX::SPUCore g_spu;
+/* Constructed on first use, not at static init: SPUCore embeds 512 KiB of SPU
+ * RAM plus the Ideal (2 MiB) and Reference (~4.6 MiB) reverb delay lines, all
+ * zero-filled by its ctor. As a namespace-scope object that cost was paid by
+ * every launch, including the default legacy OpenAL backend which never
+ * touches this TU. */
+PsyX::SPUCore& g_spu()
+{
+	static PsyX::SPUCore instance;
+	return instance;
+}
 PsyX_XAStream* g_xa = nullptr;
 PsyX_ReferenceXA* g_referenceXa = nullptr;
 SDL_mutex* g_spuMutex = nullptr;
@@ -52,9 +61,9 @@ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
     uint32_t xaFrames = g_xa && !g_xaPaused ?
         PsyX_XAStream_Pop44100Stereo(g_xa, xa.data(), frames) : 0;
     for (uint32_t i = 0; i < xaFrames; ++i)
-        g_spu.PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
+        g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
 
-    g_spu.RenderFrames(output, static_cast<int>(frames));
+    g_spu().RenderFrames(output, static_cast<int>(frames));
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -69,7 +78,7 @@ uint32_t RenderAudioFloat64(void*, double* output, uint32_t frames)
         const size_t xaFrames = g_referenceXa && !g_xaPaused
             ? PsyX_ReferenceXA_PullStereo(g_referenceXa, xa.data(), frames) : 0;
         for (size_t i = 0; i < xaFrames; ++i)
-            g_spu.PushCdStereoFrameDouble(xa[i * 2], xa[i * 2 + 1]);
+            g_spu().PushCdStereoFrameDouble(xa[i * 2], xa[i * 2 + 1]);
     }
     else
     {
@@ -85,9 +94,9 @@ uint32_t RenderAudioFloat64(void*, double* output, uint32_t frames)
         const uint32_t xaFrames = g_xa && !g_xaPaused
             ? PsyX_XAStream_Pop44100Stereo(g_xa, xa.data(), logicalFrames) : 0;
         for (uint32_t i = 0; i < xaFrames; ++i)
-            g_spu.PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
+            g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
     }
-    g_spu.RenderFramesDouble(output, static_cast<int>(frames));
+    g_spu().RenderFramesDouble(output, static_cast<int>(frames));
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -148,7 +157,7 @@ PSX_API_EXPORT int PsyX_SPUAL_ConfigureRenderer(
     g_clipMode = static_cast<PsyX::ClipMode>(
         renderer == 1 ? idealClip : renderer == 2 ? referenceClip : 1);
     g_dither = referenceDither ? PSYX_AUDIO_DITHER_TPDF : PSYX_AUDIO_DITHER_NONE;
-    g_spu.SetRenderer(g_renderer, g_clipMode);
+    g_spu().SetRenderer(g_renderer, g_clipMode);
     if (g_renderer != PsyX::RendererMode::Exact)
     {
         g_audioConfig.flags |= PSYX_AUDIO_FLAG_ALLOW_FAMILY_RATE_EXPANSION |
@@ -184,8 +193,8 @@ int PsyX_SPUAL_InitSound()
         return 0;
 
     SDL_LockMutex(g_spuMutex);
-    g_spu.Reset();
-    g_spu.SetTransferMode(PsyX::TransferMode::DmaWrite);
+    g_spu().Reset();
+    g_spu().SetTransferMode(PsyX::TransferMode::DmaWrite);
     PsyX_XAStream_Reset(g_xa);
     PsyX_ReferenceXA_Reset(g_referenceXa);
     g_xaPaused = false;
@@ -193,7 +202,7 @@ int PsyX_SPUAL_InitSound()
     SDL_UnlockMutex(g_spuMutex);
 
     EnsureConfig();
-    const uint32_t nativeRate = g_spu.GetNativeSampleRate();
+    const uint32_t nativeRate = g_spu().GetNativeSampleRate();
     PsyXAudioResult result = g_renderer == PsyX::RendererMode::Exact
         ? PsyX_AudioStart(&g_audioConfig, RenderAudio, nullptr)
         : PsyX_AudioStartFloat64(
@@ -243,7 +252,7 @@ void PsyX_SPUAL_ShutdownSound()
 int PsyX_SPUAL_Alloc(int size)
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.Malloc(static_cast<uint32_t>(size));
+    uint32_t result = g_spu().Malloc(static_cast<uint32_t>(size));
     SDL_UnlockMutex(g_spuMutex);
     return static_cast<int>(result);
 }
@@ -251,7 +260,7 @@ int PsyX_SPUAL_Alloc(int size)
 int PsyX_SPUAL_AllocAt(u_int addr, int size)
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.MallocWithStartAddr(addr, static_cast<uint32_t>(size));
+    uint32_t result = g_spu().MallocWithStartAddr(addr, static_cast<uint32_t>(size));
     SDL_UnlockMutex(g_spuMutex);
     return static_cast<int>(result);
 }
@@ -259,7 +268,7 @@ int PsyX_SPUAL_AllocAt(u_int addr, int size)
 int PsyX_SPUAL_InitAlloc(int num, char*)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.InitMalloc(num, 0x1010);
+    g_spu().InitMalloc(num, 0x1010);
     SDL_UnlockMutex(g_spuMutex);
     return 0;
 }
@@ -267,14 +276,14 @@ int PsyX_SPUAL_InitAlloc(int num, char*)
 void PsyX_SPUAL_Free(u_int addr)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.Free(addr);
+    g_spu().Free(addr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
 u_int PsyX_SPUAL_SetTransferStartAddr(u_int addr)
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.SetTransferStartAddr(addr);
+    uint32_t result = g_spu().SetTransferStartAddr(addr);
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -282,7 +291,7 @@ u_int PsyX_SPUAL_SetTransferStartAddr(u_int addr)
 int PsyX_SPUAL_SetTransferMode(int mode)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetTransferMode(ToTransferMode(mode));
+    g_spu().SetTransferMode(ToTransferMode(mode));
     SDL_UnlockMutex(g_spuMutex);
     return mode == SPU_TRANSFER_BY_IO ? SPU_TRANSFER_BY_IO : SPU_TRANSFER_BY_DMA;
 }
@@ -290,7 +299,7 @@ int PsyX_SPUAL_SetTransferMode(int mode)
 u_int PsyX_SPUAL_Write(u_char* addr, u_int size)
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.Write(addr, size);
+    uint32_t result = g_spu().Write(addr, size);
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -298,7 +307,7 @@ u_int PsyX_SPUAL_Write(u_char* addr, u_int size)
 u_int PsyX_SPUAL_Read(u_char* addr, u_int size)
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.Read(addr, size);
+    uint32_t result = g_spu().Read(addr, size);
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -307,7 +316,7 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* attr)
 {
     if (!attr) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetVoiceAttr(*attr);
+    g_spu().SetVoiceAttr(*attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -315,7 +324,7 @@ void PsyX_SPUAL_GetVoiceAttr(SpuVoiceAttr* attr)
 {
     if (!attr) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetVoiceAttr(*attr);
+    g_spu().GetVoiceAttr(*attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -323,7 +332,7 @@ void PsyX_SPUAL_SetCommonAttr(SpuCommonAttr* attr)
 {
     if (!attr) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetCommonAttr(*attr);
+    g_spu().SetCommonAttr(*attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -331,21 +340,21 @@ void PsyX_SPUAL_GetCommonAttr(SpuCommonAttr* attr)
 {
     if (!attr) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetCommonAttr(*attr);
+    g_spu().GetCommonAttr(*attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
 void PsyX_SPUAL_SetKey(int onOff, u_int voiceBits)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetKey(onOff, voiceBits);
+    g_spu().SetKey(onOff, voiceBits);
     SDL_UnlockMutex(g_spuMutex);
 }
 
 int PsyX_SPUAL_GetKeyStatus(u_int voiceBit)
 {
     SDL_LockMutex(g_spuMutex);
-    int result = g_spu.GetKeyStatus(voiceBit);
+    int result = g_spu().GetKeyStatus(voiceBit);
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -354,21 +363,21 @@ void PsyX_SPUAL_GetAllKeysStatus(char* status)
 {
     if (!status) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetAllKeysStatus(status);
+    g_spu().GetAllKeysStatus(status);
     SDL_UnlockMutex(g_spuMutex);
 }
 
 void PsyX_SPUAL_GetVoiceVolume(int voice, short* left, short* right)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetVoiceVolume(voice, left, right);
+    g_spu().GetVoiceVolume(voice, left, right);
     SDL_UnlockMutex(g_spuMutex);
 }
 
 void PsyX_SPUAL_GetVoicePitch(int voice, u_short* pitch)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetVoicePitch(voice, pitch);
+    g_spu().GetVoicePitch(voice, pitch);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -389,7 +398,7 @@ PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int, int) {}
 int PsyX_SPUAL_SetMute(int onOff)
 {
     SDL_LockMutex(g_spuMutex);
-    int result = g_spu.SetMute(onOff);
+    int result = g_spu().SetMute(onOff);
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -397,8 +406,8 @@ int PsyX_SPUAL_SetMute(int onOff)
 int PsyX_SPUAL_SetReverb(int onOff)
 {
     SDL_LockMutex(g_spuMutex);
-    int previous = g_spu.GetReverbMasterEnable() ? 1 : 0;
-    g_spu.SetReverbMasterEnable(onOff != 0);
+    int previous = g_spu().GetReverbMasterEnable() ? 1 : 0;
+    g_spu().SetReverbMasterEnable(onOff != 0);
     SDL_UnlockMutex(g_spuMutex);
     return previous;
 }
@@ -406,7 +415,7 @@ int PsyX_SPUAL_SetReverb(int onOff)
 int PsyX_SPUAL_GetReverbState()
 {
     SDL_LockMutex(g_spuMutex);
-    int result = g_spu.GetReverbMasterEnable() ? 1 : 0;
+    int result = g_spu().GetReverbMasterEnable() ? 1 : 0;
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -414,8 +423,8 @@ int PsyX_SPUAL_GetReverbState()
 u_int PsyX_SPUAL_SetReverbVoice(int onOff, u_int voiceBits)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetVoiceReverbSend(voiceBits, onOff != 0);
-    uint32_t result = g_spu.GetVoiceReverbSendMask();
+    g_spu().SetVoiceReverbSend(voiceBits, onOff != 0);
+    uint32_t result = g_spu().GetVoiceReverbSendMask();
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -423,7 +432,7 @@ u_int PsyX_SPUAL_SetReverbVoice(int onOff, u_int voiceBits)
 u_int PsyX_SPUAL_GetReverbVoice()
 {
     SDL_LockMutex(g_spuMutex);
-    uint32_t result = g_spu.GetVoiceReverbSendMask();
+    uint32_t result = g_spu().GetVoiceReverbSendMask();
     SDL_UnlockMutex(g_spuMutex);
     return result;
 }
@@ -435,7 +444,7 @@ void PsyX_SPUAL_SetReverbDepthMasked(int maskL, int maskR, short depthL, short d
     attr.depth.left = depthL;
     attr.depth.right = depthR;
     SDL_LockMutex(g_spuMutex);
-    g_spu.SetReverbModeParam(attr);
+    g_spu().SetReverbModeParam(attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -443,12 +452,12 @@ int PsyX_SPUAL_SetReverbMode(int mode)
 {
     SpuReverbAttr current{};
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetReverbModeParam(current);
+    g_spu().GetReverbModeParam(current);
     int previous = current.mode;
     SpuReverbAttr attr{};
     attr.mask = SPU_REV_MODE;
     attr.mode = mode;
-    g_spu.SetReverbModeParam(attr);
+    g_spu().SetReverbModeParam(attr);
     SDL_UnlockMutex(g_spuMutex);
     return previous;
 }
@@ -457,7 +466,7 @@ void PsyX_SPUAL_GetReverbModeParam(SpuReverbAttr* attr)
 {
     if (!attr) return;
     SDL_LockMutex(g_spuMutex);
-    g_spu.GetReverbModeParam(*attr);
+    g_spu().GetReverbModeParam(*attr);
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -467,7 +476,7 @@ float PsyX_SPUAL_GetReverbDepthScale(void) { return 1.0f; }
 int PsyX_SPUAL_ClearReverbWorkArea(void)
 {
     SDL_LockMutex(g_spuMutex);
-    g_spu.ClearReverbWorkArea();
+    g_spu().ClearReverbWorkArea();
     SDL_UnlockMutex(g_spuMutex);
     return 0;
 }
@@ -489,7 +498,7 @@ void PsyX_SPUAL_ResetXa(void)
     SDL_LockMutex(g_spuMutex);
     PsyX_XAStream_Reset(g_xa);
     PsyX_ReferenceXA_Reset(g_referenceXa);
-    g_spu.ClearCdQueue();
+    g_spu().ClearCdQueue();
     SDL_UnlockMutex(g_spuMutex);
 }
 
@@ -519,7 +528,7 @@ void PsyX_SPUAL_SetXaMasterGain(double gain)
 {
     if (g_spuMutex)
         SDL_LockMutex(g_spuMutex);
-    g_spu.SetXaMasterGain(gain);
+    g_spu().SetXaMasterGain(gain);
     if (g_spuMutex)
         SDL_UnlockMutex(g_spuMutex);
 }
