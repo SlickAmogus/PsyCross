@@ -5,9 +5,9 @@
 | Value | Backend | Description |
 | ---: | --- | --- |
 | 0 | Legacy | Original PsyCross OpenAL implementation; default |
-| 1 | Exact | Integer software SPU using the PSX Gaussian table and RAM reverb |
-| 2 | Ideal | PSX Gaussian kernel and reverb topology with high-precision arithmetic |
-| 3 | Reference | Adaptive sinc reconstruction, high-rate mixing, and modern reverb |
+| 1 | Authentic | Emulates the original PSX SPU algorithms, arithmetic, and quirks |
+| 2 | High Precision | Preserves the original PSX DSP algorithms and character using modern numerical precision |
+| 3 | Modern | Recreates the intended result using contemporary high-quality DSP designs |
 
 The software SPU implements 24 voices, SPU ADPCM, ADSR, signed volume and
 sweeps, pitch modulation, noise, key state, ENDX, CD/XA input, and the

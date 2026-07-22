@@ -16,7 +16,7 @@ extern int PsyX_SPUAL_ClearReverbWorkArea(void);
 
 extern void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, int bitPerfect);
 extern int PsyX_SPUAL_ConfigureRenderer(
-	int renderer, int idealClip, int referenceClip, int referenceDither);
+	int renderer, int highPrecisionClip, int modernClip, int modernDither);
 
 extern int PsyX_SPUAL_PushXaFrames(
 	const short* samples, u_int frames, int sourceRate, int channels);
