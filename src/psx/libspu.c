@@ -1,6 +1,6 @@
 #define HAVE_M_PI
 #include "../PsyX_main.h"
-#include "../audio/PsyX_SPUAL.h"
+#include "../audio/PsyX_SPUAL_ext.h"
 #include "psx/libapi.h"
 #include "psx/libetc.h"
 

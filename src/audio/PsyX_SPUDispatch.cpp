@@ -1,4 +1,4 @@
-#include "PsyX_SPUAL.h"
+#include "PsyX_SPUAL_ext.h"
 #include "PsyX/PsyX_audio.h"
 
 extern "C"

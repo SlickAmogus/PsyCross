@@ -1,4 +1,6 @@
-#include "PsyX_SPUAL.h"
+#define PSYX_SPUAL_BACKEND_PREFIX PsyX_SPUSoftware
+#include "PsyX_SPUBackendRename.h"
+#include "PsyX_SPUAL_ext.h"
 #include "PsyX_SPUCore.h"
 #include "PsyX_XAStream.h"
 #include "PsyX_ReferenceXA.h"

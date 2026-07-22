@@ -1,4 +1,4 @@
-#include "audio/PsyX_SPUAL.h"
+#include "audio/PsyX_SPUAL_ext.h"
 
 #include <cassert>
 

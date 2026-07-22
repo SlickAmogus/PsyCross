@@ -6,15 +6,11 @@ file(GLOB_RECURSE PSYCROSS_SRCS_CPP
 	"*.cpp"
 )
 list(FILTER PSYCROSS_SRCS_CPP EXCLUDE REGEX "/tests/")
+list(REMOVE_ITEM PSYCROSS_SRCS_CPP
+	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUAL.cpp")
 
 set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES LANGUAGE C)
 set_source_files_properties( ${PSYCROSS_SRCS_CPP} PROPERTIES LANGUAGE CXX)
-set_source_files_properties(
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPULegacy.cpp"
-	PROPERTIES COMPILE_DEFINITIONS "PSYX_SPUAL_LEGACY_BACKEND")
-set_source_files_properties(
-	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUSoftware.cpp"
-	PROPERTIES COMPILE_DEFINITIONS "PSYX_SPUAL_SOFTWARE_BACKEND")
 
 # C11 uses _Static_assert, but PsyCross headers use C++ style static_assert
 # Add compatibility define for C compilation
@@ -41,7 +37,8 @@ target_include_directories(psycross_static PUBLIC "include" "include/psx")
 #     rename. Exporting these interposed libc for ALL loaded libraries —
 #     Mesa's read() of the GPU's PCI sysfs `vendor` node during GL context
 #     creation was dispatched to the game's read() and hung startup.
-#   - PsyX_SPULegacy.cpp holds alGenEffects/... as global function-pointer
+#   - PsyX_SPULegacy.cpp includes PsyX_SPUAL.cpp and holds alGenEffects/... as
+#     global function-pointer
 #     variables, which interposed libopenal's EFX functions.
 # -rdynamic cannot export hidden-visibility symbols, so compile just these
 # TUs hidden. They're still used normally within the module; nothing
