@@ -274,6 +274,8 @@ uint32_t SPUCore::Malloc(uint32_t sizeBytes)
         SPUMallocState::Block& b = m_malloc.blocks[i];
         if (!b.free || b.size < alignedSize)
             continue;
+        if (b.addr + alignedSize > m_malloc.heapEnd)
+            continue;
 
         uint32_t addr = b.addr;
         if (b.size > alignedSize)
@@ -301,6 +303,9 @@ uint32_t SPUCore::MallocWithStartAddr(uint32_t addr, uint32_t sizeBytes)
         return 0;
 
     uint32_t alignedSize = (sizeBytes + 7u) & ~7u;
+    if (addr + alignedSize > m_malloc.heapEnd)
+        return 0;
+
     for (size_t i = 0; i < m_malloc.blocks.size(); ++i)
     {
         SPUMallocState::Block& b = m_malloc.blocks[i];
@@ -752,6 +757,11 @@ void SPUCore::SetReverbModeParam(const SpuReverbAttr& attr)
             const PsyX_SPUReverb::Preset& preset = PsyX_SPUReverb::GetPreset(presetId);
             m_reverb.LoadPreset(presetId);
             m_reverb.SetBaseAddress(static_cast<uint16_t>((kSpuRamSize - preset.workAreaBytes) / 8u));
+            // The reverb writes [kSpuRamSize - workAreaBytes, kSpuRamSize) every
+            // tick, so the allocator must stop below it or a sample allocated up
+            // there is overwritten with reverb state. PsyQ does this via
+            // SpuReserveReverbWorkArea; there is no such entry point here.
+            m_malloc.heapEnd = kSpuRamSize - preset.workAreaBytes;
         }
         m_reverbAttr.mode = attr.mode;
     }

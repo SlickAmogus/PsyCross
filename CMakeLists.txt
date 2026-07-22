@@ -76,9 +76,41 @@ if(WIN32)
 endif()
 
 if(BUILD_TESTING)
-    add_executable(psycross_spu_dispatch_test
+    # Without this add_test() registers nothing and ctest reports "No tests
+    # were found" — PsyCross has no project() of its own.
+    enable_testing()
+
+    # Each test file carries its own main(), so each builds as its own binary
+    # against just the DSP translation units it exercises — none of them link
+    # psycross_static, so they stay free of SDL/OpenAL/GL.
+    set(PSYCROSS_SPU_CORE_SRCS
+        src/audio/PsyX_SPUCore.cpp
+        src/audio/PsyX_SPUReverb.cpp
+        src/audio/PsyX_IdealReverb.cpp
+        src/audio/PsyX_ReferenceReverb.cpp
+        src/audio/PsyX_ReferenceResampler.cpp)
+
+    function(psycross_add_audio_test name)
+        add_executable(${name} ${ARGN})
+        target_include_directories(${name} PRIVATE
+            "include" "include/psx" "src" "src/audio")
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+
+    psycross_add_audio_test(psycross_spu_dispatch_test
         tests/audio/PsyX_SPUDispatch_test.cpp
         src/audio/PsyX_SPUDispatch.cpp)
-    target_include_directories(psycross_spu_dispatch_test PRIVATE "include" "include/psx" "src")
-    add_test(NAME psycross_spu_dispatch_test COMMAND psycross_spu_dispatch_test)
+    psycross_add_audio_test(psycross_spu_core_test
+        tests/audio/PsyX_SPUCore_test.cpp ${PSYCROSS_SPU_CORE_SRCS})
+    psycross_add_audio_test(psycross_spu_enhanced_test
+        tests/audio/PsyX_SPUEnhanced_test.cpp ${PSYCROSS_SPU_CORE_SRCS})
+    psycross_add_audio_test(psycross_ideal_reverb_test
+        tests/audio/PsyX_IdealReverb_test.cpp src/audio/PsyX_IdealReverb.cpp)
+    psycross_add_audio_test(psycross_reference_reverb_test
+        tests/audio/PsyX_ReferenceReverb_test.cpp src/audio/PsyX_ReferenceReverb.cpp)
+    psycross_add_audio_test(psycross_reference_resampler_test
+        tests/audio/PsyX_ReferenceResampler_test.cpp src/audio/PsyX_ReferenceResampler.cpp)
+    psycross_add_audio_test(psycross_reference_xa_test
+        tests/audio/PsyX_ReferenceXA_test.cpp
+        src/audio/PsyX_ReferenceXA.cpp src/audio/PsyX_ReferenceResampler.cpp)
 endif()
