@@ -344,6 +344,33 @@ void PsyX_SPUAL_GetCommonAttr(SpuCommonAttr* attr)
     SDL_UnlockMutex(g_spuMutex);
 }
 
+int PsyX_SPUAL_SetNoiseClock(int nClock)
+{
+    SDL_LockMutex(g_spuMutex);
+    g_spu().SetNoiseClock(nClock);
+    const int result = g_spu().GetNoiseClock();
+    SDL_UnlockMutex(g_spuMutex);
+    return result;
+}
+
+u_int PsyX_SPUAL_SetNoiseVoice(int onOff, u_int voiceBits)
+{
+    SDL_LockMutex(g_spuMutex);
+    g_spu().SetVoiceNoiseMode(voiceBits, onOff != 0);
+    const u_int result = g_spu().GetVoiceNoiseModeMask();
+    SDL_UnlockMutex(g_spuMutex);
+    return result;
+}
+
+u_int PsyX_SPUAL_SetPitchLFOVoice(int onOff, u_int voiceBits)
+{
+    SDL_LockMutex(g_spuMutex);
+    g_spu().SetVoicePitchModEnable(voiceBits, onOff != 0);
+    const u_int result = g_spu().GetVoicePitchModEnableMask();
+    SDL_UnlockMutex(g_spuMutex);
+    return result;
+}
+
 void PsyX_SPUAL_SetKey(int onOff, u_int voiceBits)
 {
     SDL_LockMutex(g_spuMutex);

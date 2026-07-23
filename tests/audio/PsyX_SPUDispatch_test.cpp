@@ -6,6 +6,9 @@ static int g_legacyInit;
 static int g_softwareInit;
 static int g_softwareRenderer = -1;
 static int g_legacyAdsr = -1;
+static int g_noiseClock = -1;
+static u_int g_noiseVoices;
+static u_int g_pitchLfoVoices;
 
 extern "C"
 {
@@ -63,6 +66,23 @@ int PsyX_SPUSoftware_AllocAt(u_int, int) { return 0; }
 int PsyX_SPUSoftware_SetTransferMode(int mode) { return mode; }
 void PsyX_SPUSoftware_SetCommonAttr(SpuCommonAttr*) {}
 void PsyX_SPUSoftware_GetCommonAttr(SpuCommonAttr*) {}
+int PsyX_SPUSoftware_SetNoiseClock(int clock)
+{
+	g_noiseClock = clock;
+	return clock;
+}
+u_int PsyX_SPUSoftware_SetNoiseVoice(int onOff, u_int voiceBits)
+{
+	if (onOff) g_noiseVoices |= voiceBits;
+	else g_noiseVoices &= ~voiceBits;
+	return g_noiseVoices;
+}
+u_int PsyX_SPUSoftware_SetPitchLFOVoice(int onOff, u_int voiceBits)
+{
+	if (onOff) g_pitchLfoVoices |= voiceBits;
+	else g_pitchLfoVoices &= ~voiceBits;
+	return g_pitchLfoVoices;
+}
 void PsyX_SPUSoftware_GetReverbModeParam(SpuReverbAttr*) {}
 int PsyX_SPUSoftware_ClearReverbWorkArea() { return 0; }
 void PsyX_SPUSoftware_ConfigureOutput(int, int, int, int) {}
@@ -106,5 +126,11 @@ int main()
 	assert(g_softwareRenderer == 2);
 	assert(PsyX_SPUAL_PushXaFrames(&sample, 1, 37800, 1) == 17);
 	assert(PsyX_SPUAL_GetQueuedXaFrames() == 23);
+	assert(PsyX_SPUAL_SetNoiseClock(17) == 17);
+	assert(g_noiseClock == 17);
+	assert(PsyX_SPUAL_SetNoiseVoice(1, SPU_VOICECH(2)) == SPU_VOICECH(2));
+	assert(PsyX_SPUAL_SetPitchLFOVoice(1, SPU_VOICECH(3)) == SPU_VOICECH(3));
+	assert(PsyX_SPUAL_SetNoiseVoice(0, SPU_VOICECH(2)) == 0);
+	assert(PsyX_SPUAL_SetPitchLFOVoice(0, SPU_VOICECH(3)) == 0);
 	return 0;
 }

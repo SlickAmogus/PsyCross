@@ -11,6 +11,9 @@ extern int PsyX_SPUAL_AllocAt(u_int addr, int size);
 extern int PsyX_SPUAL_SetTransferMode(int mode);
 extern void PsyX_SPUAL_SetCommonAttr(SpuCommonAttr* psxAttrib);
 extern void PsyX_SPUAL_GetCommonAttr(SpuCommonAttr* psxAttrib);
+extern int PsyX_SPUAL_SetNoiseClock(int nClock);
+extern u_int PsyX_SPUAL_SetNoiseVoice(int onOff, u_int voiceBits);
+extern u_int PsyX_SPUAL_SetPitchLFOVoice(int onOff, u_int voiceBits);
 extern void PsyX_SPUAL_GetReverbModeParam(SpuReverbAttr* attr);
 extern int PsyX_SPUAL_ClearReverbWorkArea(void);
 

@@ -47,6 +47,9 @@ int PsyX_SPUSoftware_AllocAt(u_int, int);
 int PsyX_SPUSoftware_SetTransferMode(int);
 void PsyX_SPUSoftware_SetCommonAttr(SpuCommonAttr*);
 void PsyX_SPUSoftware_GetCommonAttr(SpuCommonAttr*);
+int PsyX_SPUSoftware_SetNoiseClock(int);
+u_int PsyX_SPUSoftware_SetNoiseVoice(int, u_int);
+u_int PsyX_SPUSoftware_SetPitchLFOVoice(int, u_int);
 void PsyX_SPUSoftware_GetReverbModeParam(SpuReverbAttr*);
 int PsyX_SPUSoftware_ClearReverbWorkArea();
 void PsyX_SPUSoftware_ConfigureOutput(int, int, int, int);
@@ -149,6 +152,20 @@ void PsyX_SPUAL_SetCommonAttr(SpuCommonAttr* attr)
 void PsyX_SPUAL_GetCommonAttr(SpuCommonAttr* attr)
 {
 	if (UseSoftware()) PsyX_SPUSoftware_GetCommonAttr(attr);
+}
+int PsyX_SPUAL_SetNoiseClock(int nClock)
+{
+	return UseSoftware() ? PsyX_SPUSoftware_SetNoiseClock(nClock) : 0;
+}
+u_int PsyX_SPUAL_SetNoiseVoice(int onOff, u_int voiceBits)
+{
+	return UseSoftware() ? PsyX_SPUSoftware_SetNoiseVoice(onOff, voiceBits) : 0;
+}
+u_int PsyX_SPUAL_SetPitchLFOVoice(int onOff, u_int voiceBits)
+{
+	return UseSoftware()
+		? PsyX_SPUSoftware_SetPitchLFOVoice(onOff, voiceBits)
+		: 0;
 }
 void PsyX_SPUAL_SetKey(int onOff, u_int voiceBits) { DISPATCH_VOID(SetKey, (onOff, voiceBits)); }
 void PsyX_SPUAL_Update() { DISPATCH_VOID(Update, ()); }

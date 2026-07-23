@@ -130,9 +130,13 @@ bool Configure(PsyX_ReferenceXA* src, uint32_t sourceRateHz, uint32_t channels)
 
 StereoFrame InputAt(const PsyX_ReferenceXA* src, int64_t index)
 {
-    if (index < 0 || static_cast<uint64_t>(index) >= src->inputFrames)
+    if (index < 0 ||
+        static_cast<uint64_t>(index) < src->inputBase ||
+        static_cast<uint64_t>(index) >= src->inputFrames)
         return { 0.0, 0.0 };
     const uint64_t relative = static_cast<uint64_t>(index) - src->inputBase;
+    if (relative >= src->input.size())
+        return { 0.0, 0.0 };
     return src->input[static_cast<size_t>(relative)];
 }
 

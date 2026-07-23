@@ -323,6 +323,21 @@ extern void SpuSetVoiceSL(int vNum, unsigned short SL)
 	VOICE_ATTRIB_SETTER_SHORTCUT(SPU_VOICE_ADSR_SL, sl, SL);
 }
 
+int SpuSetNoiseClock(int n_clock)
+{
+	return PsyX_SPUAL_SetNoiseClock(n_clock);
+}
+
+unsigned int SpuSetNoiseVoice(int on_off, unsigned int voice_bit)
+{
+	return PsyX_SPUAL_SetNoiseVoice(on_off, voice_bit);
+}
+
+unsigned int SpuSetPitchLFOVoice(int on_off, unsigned int voice_bit)
+{
+	return PsyX_SPUAL_SetPitchLFOVoice(on_off, voice_bit);
+}
+
 void SpuSetVoiceADSRAttr(int vNum,
 	unsigned short AR, unsigned short DR,
 	unsigned short SR, unsigned short RR,
