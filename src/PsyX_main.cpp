@@ -783,7 +783,6 @@ void PsyX_Sys_DoDebugMouseMotion(int x, int y);
 void PsyX_Exit();
 
 int g_activeKeyboardControllers = 0x1;
-int g_altKeyState = 0;
 
 /* Mouse wheel is event-based (a notch, not a held state), so latch each scroll
  * for a few pad reads to give the game clean press/release edges — a scroll
@@ -842,15 +841,17 @@ void PsyX_Sys_DoPollEvent()
 			{
 				int nKey = event.key.keysym.scancode;
 
-				if (nKey == SDL_SCANCODE_RALT)
+				if (nKey == SDL_SCANCODE_RETURN)
 				{
-					g_altKeyState = (event.type == SDL_KEYDOWN);
-				}
-				else if (nKey == SDL_SCANCODE_RETURN)
-				{
-					if (g_altKeyState && event.type == SDL_KEYDOWN)
+					/* Alt+Enter toggles fullscreen. Gate it on SDL's LIVE modifier
+					 * state, not a hand-tracked alt flag: that flag missed the Alt
+					 * key-up whenever the window lost focus (alt-tab), stuck true,
+					 * and then a plain Enter — e.g. skipping an intro — flipped the
+					 * window mode and read as the game alt-tabbing out. SDL clears
+					 * its modifier state on focus loss, so it can't stick. */
+					if ((SDL_GetModState() & KMOD_ALT) && event.type == SDL_KEYDOWN)
 					{
-						int fullscreen = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN > 0;
+						int fullscreen = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) > 0;
 
 						SDL_SetWindowFullscreen(g_window, fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
 
@@ -1126,7 +1127,9 @@ void PsyX_UpdateInput()
 	if (SDL_ShowCursor(SDL_QUERY) != SDL_DISABLE)
 		SDL_ShowCursor(SDL_DISABLE);
 
-	if(!g_altKeyState)
+	/* Skip pad polling while Alt is held (Alt+Tab / Alt+Enter) — live SDL modifier
+	 * state, so it can't stick true and freeze the pad after a focus change. */
+	if (!(SDL_GetModState() & KMOD_ALT))
 		PsyX_Pad_InternalPadUpdates();
 }
 
