@@ -305,6 +305,17 @@ int vram_need_update = 1;
 /* PC port: runtime gate for framebuffer→VRAM feedback. See PsyX_render.h. */
 int g_PsxSkipFramebufferStore = 0;
 
+/* PC port: framebuffer feedback is LOADING-SCREEN ONLY for now. The generic
+ * store also drives the per-map dream/ghosting overlays (map6 otherworld,
+ * cutscene ghosts, the rifle scene, ...), which were never made correct on PC
+ * and corrupt (striping / ghosted subtitles). Screen_BackgroundMotionBlur — the
+ * only loading/transition blur — arms this to 2 each frame it draws (a short
+ * trailing window so a 1-frame gap doesn't flip it off). While it is 0,
+ * GR_StoreFrameBufferPsx stamps the feedback rects BLACK (word 0 → the samplers
+ * discard → draw nothing) instead of leaving a real/stale frame for those
+ * overlays to ghost. Re-enable per-scene once their geometry is fixed. */
+int g_PsxFeedbackStoreAllowed = 0;
+
 /* PC port: freeze-frame presentation for pause/console/message states.
  * PSX hardware never auto-cleared the framebuffer, so SH1's pause screen
  * simply stopped drawing the world and the last gameplay frame stayed
@@ -3555,6 +3566,51 @@ static void GR_PackFrameToAllFeedbackRects(void)
 	}
 }
 
+/* Stamp a VRAM rect to packed word 0 (RG = 0,0), which the samplers treat as
+ * texel-0 = transparent (discard). Used to blank the feedback rects when the
+ * loading blur is not active, so the per-map overlay samplers draw nothing. */
+static void GR_ClearVramRect(int x, int y, int w, int h)
+{
+#if USE_OPENGL
+	GLfloat cc[4];
+
+	if (w <= 0 || h <= 0)
+		return;
+
+	glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_glVRAMFramebuffer);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(x, y, w, h);
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(cc[0], cc[1], cc[2], cc[3]);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	g_PreviousBlendMode    = BM_NONE;
+	g_PreviousDepthMode    = 0;
+	g_PreviousScissorState = 0;
+#endif
+}
+
+static void GR_ClearAllFeedbackRects(void)
+{
+	if (!g_psxDispBufValid)
+		return;
+
+	GR_ClearVramRect(g_psxDispBuf[0].x, g_psxDispBuf[0].y, g_psxDispBuf[0].w, g_psxDispBuf[0].h);
+	GR_ClearVramRect(g_psxDispBuf[1].x, g_psxDispBuf[1].y, g_psxDispBuf[1].w, g_psxDispBuf[1].h);
+
+	if (g_sceneFbRedirectTtl > 0)
+		GR_ClearVramRect(g_sceneFbRedirect.x, g_sceneFbRedirect.y, g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+}
+
 /* Called once per present: capture the composed frame, then pack it into the
  * feedback rects. */
 extern "C" void GR_StoreFrameBufferPsx(void)
@@ -3573,6 +3629,17 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 		g_fbFeedbackSuppress--;
 		return;
 	}
+
+	/* Loading-screen-only: while the loading/transition blur is not drawing,
+	 * blank the feedback rects (word 0 → transparent) so the per-map overlays
+	 * this store would otherwise drive read nothing instead of a stale/garbage
+	 * frame. See g_PsxFeedbackStoreAllowed. */
+	if (g_PsxFeedbackStoreAllowed <= 0)
+	{
+		GR_ClearAllFeedbackRects();
+		return;
+	}
+	g_PsxFeedbackStoreAllowed--;
 
 	w = g_psxDispBuf[0].w;
 	h = g_psxDispBuf[0].h;
@@ -3625,7 +3692,19 @@ extern "C" void GR_StoreFrameBufferPsx(void)
  * rects (GR_UpdateVRAM). */
 extern "C" void GR_RepackFrameToVramBuffers(void)
 {
-	if (!g_fbPackValid || g_PsxSkipFramebufferStore)
+	if (g_PsxSkipFramebufferStore)
+		return;
+
+	/* Re-blank (not re-pack) when the loading blur is off, so a full vram[]
+	 * re-upload that just stamped CPU bytes over the feedback rects can't leave
+	 * garbage for the per-map overlay samplers. */
+	if (g_PsxFeedbackStoreAllowed <= 0)
+	{
+		GR_ClearAllFeedbackRects();
+		return;
+	}
+
+	if (!g_fbPackValid)
 		return;
 
 	GR_PackFrameToAllFeedbackRects();
