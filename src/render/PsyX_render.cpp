@@ -558,7 +558,18 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		eprinterr("Failed to initialise SDL window!\n");
 		return 0;
 	}
-	
+
+#if !defined(__ANDROID__) && !defined(RENDERER_OGLES)
+	/* PC port: take the foreground on launch. The launcher spawns the game and
+	 * keeps keyboard focus itself, so the FIRST Enter the player presses to skip
+	 * the intro lands on the launcher's default (Launch) button and spawns ANOTHER
+	 * copy of the game — repeatedly. Windows lets a child of the foreground process
+	 * set foreground, so raising the freshly-created window puts intro-skip (and
+	 * all) input on the game where it belongs. */
+	SDL_ShowWindow(g_window);
+	SDL_RaiseWindow(g_window);
+#endif
+
 #if defined(RENDERER_OGLES)
 
 #if defined(__ANDROID__)
