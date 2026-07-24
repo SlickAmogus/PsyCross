@@ -48,6 +48,9 @@ float g_otBucketDepth = 0.0f;
  * left at a packet address reused by a later frame is rejected on lookup. */
 static unsigned s_pgxpGen = 1;
 extern "C" void PGXP_BumpGen(void) { s_pgxpGen++; }
+/* The exact-transform twin tables (PsyX_GTE.cpp) gen-stamp against this same
+ * per-frame counter so they share one "clear" and never allocate. */
+extern "C" unsigned PGXP_CurGen(void) { return s_pgxpGen; }
 
 /* Shadow entry: precise projection of the word at `key`. value = the packed
  * integer (s16 x | s16 y<<16) that lives at key; a draw that reused the address

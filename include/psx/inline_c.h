@@ -26,6 +26,17 @@ extern int CFC2_S(int reg);
 /* performs cop2 opcode */
 extern int doCOP2(int op);
 
+/* PGXP exact-transform twin capture (PsyX_GTE.cpp). Each folds an
+ * `if (!g_PsxUsePgxp) return;` in, so these are no-ops with PGXP off; the
+ * macro-site calls below are additionally #ifdef SH_PC_PORT so only the game
+ * build (never PsyCross's internal GTE emulation) captures. */
+extern void PGXP_MatrixSetRot(const void* matrix);
+extern void PGXP_MatrixSetTrans(const void* matrix);
+extern void PGXP_VectorLoad(const void* vector, int slot);
+extern void PGXP_MatrixLoadColumn(const void* column);
+extern void PGXP_MatrixStoreColumn(void* column);
+extern void PGXP_MatrixCaptureCurrent(void* matrix);
+
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }
 #endif
@@ -195,12 +206,22 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+16), 20);}
 
 // load ctc2 0-4
+#ifdef SH_PC_PORT
+#define gte_SetRotMatrix( r0 )	\
+	{	CTC2(*(uint*)((char*)(r0)), 0);\
+		CTC2(*(uint*)((char*)(r0)+4), 1);\
+		CTC2(*(uint*)((char*)(r0)+8), 2);\
+		CTC2(*(uint*)((char*)(r0)+12), 3);\
+		CTC2(*(uint*)((char*)(r0)+16), 4);\
+		PGXP_MatrixSetRot((const void*)(r0));}
+#else
 #define gte_SetRotMatrix( r0 )	\
 	{	CTC2(*(uint*)((char*)(r0)), 0);\
 		CTC2(*(uint*)((char*)(r0)+4), 1);\
 		CTC2(*(uint*)((char*)(r0)+8), 2);\
 		CTC2(*(uint*)((char*)(r0)+12), 3);\
 		CTC2(*(uint*)((char*)(r0)+16), 4);}
+#endif
 
 // load ctc2 5-7
 #define gte_SetTransVector( r0 )\
@@ -209,10 +230,18 @@ extern int doCOP2(int op);
 		CTC2_S(*(int*)((char*)(r0)+8), 7);}
 
 // load ctc2 5-7
+#ifdef SH_PC_PORT
+#define gte_SetTransMatrix( r0 ) \
+	{	CTC2(*(uint*)((char*)(r0)+20), 5);\
+		CTC2(*(uint*)((char*)(r0)+24), 6);\
+		CTC2(*(uint*)((char*)(r0)+28), 7);\
+		PGXP_MatrixSetTrans((const void*)(r0));}
+#else
 #define gte_SetTransMatrix( r0 ) \
 	{	CTC2(*(uint*)((char*)(r0)+20), 5);\
 		CTC2(*(uint*)((char*)(r0)+24), 6);\
 		CTC2(*(uint*)((char*)(r0)+28), 7);}
+#endif
 
 // ctc2 8-12
 #define gte_SetLightMatrix( r0 )\
