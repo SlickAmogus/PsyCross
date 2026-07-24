@@ -602,14 +602,16 @@ extern "C" void PGXP_MatrixInvalidate(MATRIX* matrix) {
 	short k[9]; MatKeyMem(matrix, k); RegisterMatrixInvalid(matrix, k);
 }
 extern "C" void PGXP_MatrixInvalidateCurrent(void) {
+	if (!g_PsxUsePgxp) return;
 	s_currentRotation.valid = false; s_columnMultiply = ColumnMul{};
 }
-extern "C" void PGXP_MatrixInvalidateCurrentTranslation(void) { s_currentTranslation.valid = false; }
-extern "C" void PGXP_VectorInvalidateCurrent(int slot) { if ((unsigned)slot <= 2u) s_currentVector[slot].valid = false; }
+extern "C" void PGXP_MatrixInvalidateCurrentTranslation(void) { if (!g_PsxUsePgxp) return; s_currentTranslation.valid = false; }
+extern "C" void PGXP_VectorInvalidateCurrent(int slot) { if (!g_PsxUsePgxp) return; if ((unsigned)slot <= 2u) s_currentVector[slot].valid = false; }
 
 extern "C" void PGXP_MatrixSetRot(const void* matrix) {
+	if (!g_PsxUsePgxp) return;
 	s_currentRotation.valid = false; s_columnMultiply = ColumnMul{};
-	if (!g_PsxUsePgxp || !matrix) return;
+	if (!matrix) return;
 	short memKey[9], gteKey[9]; MatKeyMem(matrix, memKey); MatKeyGte(gteKey);
 	double e[9];
 	if (Eq9(memKey, gteKey) && LookupMatrix(matrix, e)) {
@@ -618,8 +620,9 @@ extern "C" void PGXP_MatrixSetRot(const void* matrix) {
 	}
 }
 extern "C" void PGXP_MatrixSetTrans(const void* matrix) {
+	if (!g_PsxUsePgxp) return;
 	s_currentTranslation.valid = false;
-	if (!g_PsxUsePgxp || !matrix) return;
+	if (!matrix) return;
 	int memKey[3], gteKey[3]; TransKeyMem(matrix, memKey); TransKeyGte(gteKey);
 	double e[3];
 	if (Eq3i(memKey, gteKey) && LookupTranslation(matrix, e)) {
@@ -628,9 +631,10 @@ extern "C" void PGXP_MatrixSetTrans(const void* matrix) {
 	}
 }
 extern "C" void PGXP_VectorLoad(const void* vector, int slot) {
+	if (!g_PsxUsePgxp) return;
 	if ((unsigned)slot > 2u) return;
 	s_currentVector[slot].valid = false;
-	if (!g_PsxUsePgxp || !vector) return;
+	if (!vector) return;
 	short memKey[3], gteKey[3]; VecKeyMem(vector, memKey); VecKeyGte(slot, gteKey);
 	double e[3];
 	if (Eq3s(memKey, gteKey) && LookupVector(vector, e)) {
