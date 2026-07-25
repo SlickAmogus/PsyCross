@@ -2008,10 +2008,15 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 						flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
 						DrawAllSplits();
 					}
-					g_otPrimitiveDepthTie = (unsigned char)(depthTieRank < 127 ? depthTieRank : 127);
+					/* Global wrapping rank (0..127), NOT reset per bucket: a coplanar
+					 * decal drawn right after its host surface then always outranks it
+					 * even when the two land in different OT buckets (which per-bucket
+					 * reset left tied at rank 0 -> no nudge -> flicker). Collisions only
+					 * for prims drawn 128 apart, which coplanar pairs never are. */
+					g_otPrimitiveDepthTie = (unsigned char)(depthTieRank & 0x7F);
 					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
-					if (depthTieRank < 127) depthTieRank++;
+					depthTieRank++;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
 
@@ -2045,7 +2050,6 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 				// OT bucket boundary — advance to the next bucket's depth.
 				g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 				if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
-				depthTieRank = 0; /* new bucket: restart the coplanar painter rank */
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)
