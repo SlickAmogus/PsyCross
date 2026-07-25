@@ -1506,6 +1506,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_extra, "a_extra");
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
+	glBindAttribLocation(program, a_depth, "a_depth");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -4223,6 +4224,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_normal);
 	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
 	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_depth, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->depth);
+	glEnableVertexAttribArray(a_depth);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;

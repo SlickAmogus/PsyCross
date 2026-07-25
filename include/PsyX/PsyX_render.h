@@ -157,6 +157,14 @@ typedef struct
 	 * shader reads it only under u_flashlightOn, and gates on vsz>0 so untracked
 	 * (zero) verts and 2D prims are never lit. */
 	float		vsx, vsy, vsz;
+
+	/* PGXP per-vertex depth channel (optional): the vertex's own view-space depth,
+	 * written by ApplyGtePerVertexDepth when PGXP is on and consumed by the shader's
+	 * reciprocal window-depth path. Appended at the END so all existing offsets are
+	 * unchanged; the shader only reads it under u_pgxpEnabled and it is zero on the
+	 * affine/PGXP-off path (memset default), so off is byte-identical. The _p1 char
+	 * above carries the per-prim 3D marker (PGXP_PRIM_3D_*) that classifies it. */
+	float		depth;
 } GrVertex;
 #pragma pack(pop)
 
@@ -170,6 +178,7 @@ typedef enum
 	a_pgxp,
 	a_normal,
 	a_viewpos,
+	a_depth,
 } ShaderAttrib;
 
 typedef enum
