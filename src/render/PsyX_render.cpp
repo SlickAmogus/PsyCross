@@ -1082,7 +1082,10 @@ int g_PsxFogToBlack = 0;
 		 * capped to 4 view-depth units so distant real surfaces cannot be reordered
 		 * merely by coarse far reciprocal precision. */\
 		"		if (a_extra.w > 0.5) {\n"\
-		"			float tieNdc = mod(a_texcoord.w, 128.0) * (2.0 / 16777216.0);\n"\
+		/* One rank = ~4 units of a 16-bit depth buffer (our default). PR #11 used
+		 * one 24-bit unit assuming a 24-bit buffer; at 16 bits that is below the
+		 * buffer's precision, so coplanar prims still fought. */\
+		"			float tieNdc = mod(a_texcoord.w, 128.0) * (8.0 / 65536.0);\n"\
 		"			float nearerZ = max(u_depthNear, viewZ - 4.0);\n"\
 		"			float nearer01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / nearerZ);\n"\
 		"			float tieLimit = max(0.0, (depth01 - nearer01) * 2.0);\n"\
