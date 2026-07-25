@@ -623,7 +623,15 @@ static uint32_t g_szMaxPrevFrame = 0;
  * Returns 1 as a safe floor before the first frame. */
 extern "C" float PGXP_GetSzMax(void)
 {
-	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
+	/* Fixed 2^18 far plane for the per-vertex reciprocal depth shader (PR #11,
+	 * Slice 5). The per-vertex depth (ppw) is the UNCLAMPED view depth and the far
+	 * road exceeds the 16-bit SZ range (65535); a content-dependent g_szMaxPrevFrame
+	 * clamped those far verts to the far plane, collapsing the depth gradient (why
+	 * the per-vertex channel showed no change). A constant range large enough to
+	 * cover unclamped far depth keeps the gradient. Consumed only by the
+	 * u_pgxpEnabled-gated depth block, so non-PGXP is unaffected. g_szMaxPrevFrame
+	 * is still tracked below for the legacy CPU flat-depth item safety net. */
+	return 262144.0f;
 }
 
 // World-geometry renderers (Gfx_MeshDraw) bulk-transform vertices before the
