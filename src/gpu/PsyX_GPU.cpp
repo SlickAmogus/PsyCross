@@ -909,6 +909,21 @@ GrVertex g_vertexBuffer[MAX_VERTEX_BUFFER_SIZE];
 GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
 
 int g_vertexIndex = 0;
+
+/* Painter tie-break rank for coplanar prims (PR #11). Set per prim in OT-draw
+ * order (ParsePrimitivesLinkedList), reset at each OT bucket boundary. Packed
+ * into the per-vertex dither byte — which the shader otherwise ignores (dither
+ * is forced globally via u_ditherForce), so bits 0..6 carry the rank and bit 7
+ * the original dither flag with no dither conflict. The shader nudges a higher-
+ * rank coplanar prim slightly forward so a wall decal / item stops z-fighting
+ * the surface behind it. */
+static unsigned char g_otPrimitiveDepthTie = 0;
+static inline unsigned char PackDitherAndDepthTie(unsigned char dither)
+{
+	if (!g_PsxUsePgxp)
+		return dither; /* off: dither byte untouched -> byte-identical */
+	return (unsigned char)((dither ? 0x80u : 0u) | (g_otPrimitiveDepthTie & 0x7Fu));
+}
 int g_splitIndex = 0;
 
 void ClearSplits()
@@ -1165,6 +1180,7 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv1);
 	assert(uv2);
 	assert(uv3);
+	dither = PackDitherAndDepthTie(dither);
 
 	const unsigned char bright = 2;
 	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
@@ -1219,6 +1235,7 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv0);
 	assert(uv1);
 	assert(uv2);
+	dither = PackDitherAndDepthTie(dither);
 
 	const unsigned char bright = 2;
 	// Strip ABR (bits 5-6) and TP (bits 7-8) from tpage - shader only needs X/Y page coords (bits 0-4)
@@ -1353,6 +1370,7 @@ void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
 
 void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 {
+	dither = PackDitherAndDepthTie(dither);
 	const unsigned char bright = 1;
 
 	vertex[0].u = 0;
@@ -1379,6 +1397,7 @@ void MakeTexcoordTriangleZero(GrVertex* vertex, unsigned char dither)
 
 void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 {
+	dither = PackDitherAndDepthTie(dither);
 	const unsigned char bright = 1;
 
 	vertex[0].u = 0;
@@ -1955,6 +1974,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 		g_otBucketDepth = -1.0f;
 		// walk OT_TAG linked list with safety guards
 		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
+		int depthTieRank = 0; /* painter rank within the current OT bucket */
 		/* The safety cap guards against corrupt/cyclic lists, but it counts OT
 		 * NODES (2048 buckets + one per prim) — the whole-town render mode
 		 * legitimately submits far more than the old 16k prims. */
@@ -1988,8 +2008,10 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 						flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
 						DrawAllSplits();
 					}
+					g_otPrimitiveDepthTie = (unsigned char)(depthTieRank < 127 ? depthTieRank : 127);
 					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
+					if (depthTieRank < 127) depthTieRank++;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
 				}
 
@@ -2023,6 +2045,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 				// OT bucket boundary — advance to the next bucket's depth.
 				g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 				if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
+				depthTieRank = 0; /* new bucket: restart the coplanar painter rank */
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)

@@ -1075,6 +1075,19 @@ int g_PsxFogToBlack = 0;
 		"		float viewZ = max(depthZ, u_depthNear);\n"\
 		"		float depth01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / viewZ);\n"\
 		"		b.z = clamp(depth01, 0.0, 1.0) * 2.0 - 1.0;\n"\
+		/* Coplanar painter tie-break (PR #11): a_texcoord.w low 7 bits carry this
+		 * prim's rank within its OT bucket. Nudge a higher-rank coplanar prim (a
+		 * wall decal / item drawn after its host surface) slightly forward so it
+		 * stops z-fighting the surface behind it. One rank = one 24-bit depth unit,
+		 * capped to 4 view-depth units so distant real surfaces cannot be reordered
+		 * merely by coarse far reciprocal precision. */\
+		"		if (a_extra.w > 0.5) {\n"\
+		"			float tieNdc = mod(a_texcoord.w, 128.0) * (2.0 / 16777216.0);\n"\
+		"			float nearerZ = max(u_depthNear, viewZ - 4.0);\n"\
+		"			float nearer01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / nearerZ);\n"\
+		"			float tieLimit = max(0.0, (depth01 - nearer01) * 2.0);\n"\
+		"			b.z = max(-1.0, b.z - min(tieNdc, tieLimit));\n"\
+		"		}\n"\
 		"	}\n"\
 		"	gl_Position = vec4(b.xyz * clipW, b.w * clipW);\n"
 
