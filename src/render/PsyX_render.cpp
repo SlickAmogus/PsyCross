@@ -785,6 +785,7 @@ typedef struct
 	GLint fogStrengthLoc;
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
+	GLint depthNearLoc;
 	GLint pgxpFarWLoc;
 	GLint flashlightOnLoc;
 	GLint flStyleLoc;
@@ -825,6 +826,7 @@ GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
+GLint u_depthNearLoc;
 GLint u_pgxpFarWLoc;
 GLint u_flashlightOnLoc;
 GLint u_flStyleLoc;
@@ -1051,14 +1053,30 @@ int g_PsxFogToBlack = 0;
  * comes purely from un-quantising that flat depth (PsyX_SetNextPrimSz) when
  * PGXP is on. The else-branch is byte-identical to the legacy affine path. */
 #define GTE_PERSPECTIVE_CORRECTION \
+		"	vec4 b;\n"\
+		"	float clipW = 1.0;\n"\
 		"	if (u_pgxpEnabled > 0 && a_pgxp.z > 0.0) {\n"\
-		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
-		"		float W = a_pgxp.z;\n"\
-		"		if (u_pgxpFarW > 0.0) W = min(W, u_pgxpFarW);\n"\
-		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
+		"		b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
+		"		clipW = a_pgxp.z;\n"\
+		"		if (u_pgxpFarW > 0.0) clipW = min(clipW, u_pgxpFarW);\n"\
 		"	} else {\n"\
-		"		gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
-		"	}\n"
+		"		b = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
+		"	}\n"\
+		/* Per-vertex reciprocal window depth (PR #11). a_depth carries this vertex's
+		 * own view depth (PgxpMarkPrimitive3D); replacing the flat per-poly a_zw.x
+		 * depth with a coherent per-vertex curve is what stops a grazing surface into
+		 * the distance from occluding incoherently (the fog void bleeding through the
+		 * road). Gated on u_pgxpEnabled AND depthZ>0, and a_depth is 0 with PGXP off,
+		 * so the off path keeps b.z from a_zw.x above — byte-identical. */\
+		"	float depthZ = a_depth;\n"\
+		"	if (depthZ <= 0.0 && a_extra.w > 0.5)\n"\
+		"		depthZ = max(u_depthNear, (1.0 - clamp(a_zw.x, -1.0, 1.0)) * 0.5 * u_szMax);\n"\
+		"	if (u_pgxpEnabled > 0 && depthZ > 0.0 && u_szMax > u_depthNear) {\n"\
+		"		float viewZ = max(depthZ, u_depthNear);\n"\
+		"		float depth01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / viewZ);\n"\
+		"		b.z = clamp(depth01, 0.0, 1.0) * 2.0 - 1.0;\n"\
+		"	}\n"\
+		"	gl_Position = vec4(b.xyz * clipW, b.w * clipW);\n"
 
 #define GTE_VERTEX_SHADER \
 	"	attribute vec4 a_position;\n"\
@@ -1068,10 +1086,12 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec4 a_zw;\n"\
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
+	"	attribute float a_depth;\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform float u_szMax;\n"\
+	"	uniform float u_depthNear;\n"\
 	"	uniform float u_pgxpFarW;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
@@ -1580,6 +1600,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
+	sh->depthNearLoc = glGetUniformLocation(sh->shader, "u_depthNear");
 	sh->pgxpFarWLoc = glGetUniformLocation(sh->shader, "u_pgxpFarW");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
 	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
@@ -1915,6 +1936,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_4.depthNearLoc;
 		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
@@ -1948,6 +1970,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_8.depthNearLoc;
 		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
@@ -1981,6 +2004,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_16.depthNearLoc;
 		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
@@ -2014,6 +2038,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
+		u_depthNearLoc = g_gte_shader_32_rgba.depthNearLoc;
 		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
@@ -2047,6 +2072,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
 	if (u_szMaxLoc != -1)
 		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
+	if (u_depthNearLoc != -1) {
+		extern float g_PgxpNearZ;
+		glUniform1f(u_depthNearLoc, g_PgxpNearZ < 1.0f ? 1.0f : g_PgxpNearZ);
+	}
 	{
 		extern float g_PgxpFarWClamp;
 		if (u_pgxpFarWLoc != -1)

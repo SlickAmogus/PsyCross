@@ -774,6 +774,53 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curPgxpAffine = false;
 }
 
+/* Per-prim 3D depth-source markers (GrVertex._p1). Ported from PR #11's depth
+ * channel. FLAT = per-prim flat depth (partial/2D-ish); WORLD = static world mesh
+ * (OT-painter-ordered, coplanar-safe); EXACT_SZ = intentional geometry depth
+ * (inventory/decals); VIEW_DEPTH = a coherent per-vertex view depth (the precise
+ * ppw or view-space vsz). The shader reads GrVertex.depth as a per-vertex view
+ * depth ONLY under u_pgxpEnabled — off = untouched. */
+enum {
+	PGXP_PRIM_3D_FLAT       = 1,
+	PGXP_PRIM_3D_WORLD      = 125,
+	PGXP_PRIM_3D_EXACT_SZ   = 126,
+	PGXP_PRIM_3D_VIEW_DEPTH = 127
+};
+
+/* Give a 3D primitive a coherent PER-VERTEX view depth when one is available —
+ * the precise PGXP W (ppw) or the view-space Z (vsz) — instead of the single flat
+ * per-poly depth the OT bucket provides. This is what stops a grazing surface
+ * (road/ground) into the distance from occluding incoherently and letting the fog
+ * void bleed through. PGXP-gated; writes only the appended GrVertex.depth/_p1, so
+ * the off path is untouched. */
+static inline void PgxpMarkPrimitive3D(GrVertex* v, int n)
+{
+	if (!g_PsxUsePgxp)
+		return;
+
+	bool is3D = s_curPgxpAffine;
+	bool allViewDepth = !s_curPgxpAffine;
+	bool allPreciseW = !s_curPgxpAffine;
+	for (int i = 0; i < n; i++) {
+		is3D = is3D || v[i].ny >= 0.5f || v[i].ppw > 0.0f;
+		allViewDepth = allViewDepth && v[i].ny >= 0.5f &&
+		               v[i].vsz >= g_PgxpNearZ && v[i].vsz == v[i].vsz;
+		allPreciseW = allPreciseW && v[i].ppw > 0.0f && v[i].ppw == v[i].ppw;
+	}
+
+	if (is3D) {
+		const int marker = (allViewDepth || allPreciseW)
+			? PGXP_PRIM_3D_VIEW_DEPTH : PGXP_PRIM_3D_FLAT;
+		for (int i = 0; i < n; i++) {
+			v[i]._p1 = (char)marker;
+			if (allViewDepth)
+				v[i].depth = v[i].vsz;
+			else if (allPreciseW)
+				v[i].depth = v[i].ppw;
+		}
+	}
+}
+
 static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz)
 {
 	uintptr_t key = (uintptr_t)prim;
@@ -1019,6 +1066,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = 0.0f;
 	}
 
+	PgxpMarkPrimitive3D(vertex, 3);
 	ScreenCoordsToEmulator(vertex, 3);
 }
 
@@ -1073,6 +1121,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = vertex[3].ppw = 0.0f;
 	}
 
+	PgxpMarkPrimitive3D(vertex, 4);
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
