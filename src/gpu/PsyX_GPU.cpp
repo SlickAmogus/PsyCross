@@ -2813,7 +2813,16 @@ int ParsePrimitive(P_TAG* polyTag)
 		const int primSubType = polyTag->code & 0x0F;
 		if (primSubType == 0x0)
 		{
-			primLength = 3;
+			/* A code=0x00 tag is a NOP / zeroed prim: an unfilled DR-type prim
+			 * from a not-fully-ported builder, or an OLD SetDrawOffset that
+			 * emitted code[0]=0 / setlen(2) (fixed in libgpu.c 0d7a237). Consume
+			 * the tag's DECLARED length so the OT walker stays in sync and draws
+			 * nothing. The hardcoded 3 overshot any len!=3 zeroed prim by
+			 * (3-len)*4 bytes, so a len=2 zeroed prim logged
+			 * "ptag length is not valid (diff=-4)" every frame (86k lines in a
+			 * single session before the SetDrawOffset fix). Mirrors
+			 * ProcessDrawEnv's case 0 (return polyTag->len) — same failure class. */
+			primLength = polyTag->len;
 		}
 		else if (primSubType == 0x1)
 		{
