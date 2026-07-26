@@ -1088,10 +1088,12 @@ int g_PsxFogToBlack = 0;
 		 * via u_tieStrength (console PGXPTIE) since the right value depends on the
 		 * actual depth-buffer precision. Still capped below to 4 view-depth units. */\
 		"			float tieNdc = mod(a_texcoord.w, 128.0) * (u_tieStrength / 65536.0);\n"\
-		"			float nearerZ = max(u_depthNear, viewZ - 4.0);\n"\
-		"			float nearer01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / nearerZ);\n"\
-		"			float tieLimit = max(0.0, (depth01 - nearer01) * 2.0);\n"\
-		"			b.z = max(-1.0, b.z - min(tieNdc, tieLimit));\n"\
+		/* Flat NDC cap (0.02), NOT a reciprocal view-depth cap: at distance the
+		 * reciprocal curve compresses '4 view units' to ~0 NDC, which pinned the
+		 * nudge to nothing exactly where thin coplanar decals clip into the wall
+		 * (and made PGXPTIE inert). A fixed NDC cap keeps the nudge effective at
+		 * all depths while still bounded so it can't reorder truly distinct prims. */\
+		"			b.z = max(-1.0, b.z - min(tieNdc, 0.02));\n"\
 		"		}\n"\
 		"	}\n"\
 		"	gl_Position = vec4(b.xyz * clipW, b.w * clipW);\n"
