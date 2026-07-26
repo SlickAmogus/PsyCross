@@ -345,12 +345,19 @@ extern "C" void PGXP_FrameReset(void) { /* shadow is gen-stamped; no reset neede
  * (PsyX_CaptureGteDepths) records the prim pointer here, and the draw side reads
  * it to force affine. gen-stamped so a reused packet address from last frame is
  * rejected. */
-struct AffineEntry { uintptr_t key; unsigned gen; };
+/* noFl: keep this prim OUT of the per-pixel flashlight (force view-Z<=0 so the
+ * shader's flP.z>0 gate skips it), same idea as g_PsyX_ForceItemDepth. The
+ * reflective sewer-water octagon (water.c func_8008EA68) propagates a real
+ * view-space shadow so its surface would be flashlight-lit, but under PGXP the
+ * bright reflection albedo blows out white; opting it out makes it match the
+ * Classic (no per-pixel) look at all times. Both flags PGXP-on only. */
+struct AffineEntry { uintptr_t key; unsigned gen; unsigned char affine; unsigned char noFl; };
 #define AFFINE_BITS 15
 #define AFFINE_SIZE (1u << AFFINE_BITS)
 #define AFFINE_MASK (AFFINE_SIZE - 1u)
 static AffineEntry s_affine[AFFINE_SIZE];
 static int g_primPgxpForceAffine = 0;
+static int g_primNoFlashlight = 0;
 
 extern "C" void PsyX_SetNextPrimAffine(void)
 {
@@ -358,31 +365,42 @@ extern "C" void PsyX_SetNextPrimAffine(void)
 	g_primPgxpForceAffine = 1;
 }
 
-static void AffineStore(const void* prim) {
+extern "C" void PsyX_SetNextPrimNoFlashlight(void)
+{
+	if (!g_PsxUsePgxp) return;
+	g_primNoFlashlight = 1;
+}
+
+static void AffineStore(const void* prim, unsigned char affine, unsigned char noFl) {
 	uintptr_t key = (uintptr_t)prim;
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & AFFINE_MASK;
 	for (int i = 0; i < 16; i++) {
 		AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
 		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = key; e->gen = s_pgxpGen; return;
+			e->key = key; e->gen = s_pgxpGen; e->affine = affine; e->noFl = noFl; return;
 		}
 	}
-	s_affine[s].key = key; s_affine[s].gen = s_pgxpGen;
+	s_affine[s].key = key; s_affine[s].gen = s_pgxpGen; s_affine[s].affine = affine; s_affine[s].noFl = noFl;
 }
 
-static bool AffineGet(const void* prim) {
+static const AffineEntry* AffineFind(const void* prim) {
 	uintptr_t key = (uintptr_t)prim;
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & AFFINE_MASK;
 	for (int i = 0; i < 16; i++) {
 		const AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
-		if (e->key == key) return e->gen == s_pgxpGen;
-		if (e->key == 0) return false;
+		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == 0) return nullptr;
 	}
-	return false;
+	return nullptr;
 }
 
 static bool s_curPgxpAffine = false;
-static void PGXP_BeginPrim(const void* prim) { s_curPgxpAffine = AffineGet(prim); }
+static bool s_curNoFlashlight = false;
+static void PGXP_BeginPrim(const void* prim) {
+	const AffineEntry* e = AffineFind(prim);
+	s_curPgxpAffine = e && e->affine;
+	s_curNoFlashlight = e && e->noFl;
+}
 
 /* ---- Sub-pixel weld (close PGXP cross-bone joint seams) ---------------------
  * Even with complete coverage a thin residual seam survives: a joint shared by
@@ -472,6 +490,11 @@ static inline void VsFillVertex(GrVertex* v, const void* addr)
 	 * marker for the near clipper: a behind-the-eye vertex legitimately has vsz<=0,
 	 * so presence can't be inferred from the position itself. No shader reads ny. */
 	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f; }
+	/* Opt this prim out of the per-pixel flashlight: a non-positive view-Z is the
+	 * shader's "untracked, not lit" sentinel (flP.z>0 gate). Position/depth are
+	 * unaffected — these prims are also forced affine, so ppw comes from the screen
+	 * path, not vsz. Used for the reflective sewer water (see PsyX_SetNextPrimNoFlashlight). */
+	if (s_curNoFlashlight) v->vsz = -1.0f;
 }
 
 /* True when the near clipper will take this poly: every vertex carries a
@@ -682,9 +705,10 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	/* PGXP: if the next prim was flagged screen-space (billboards), record it so
 	 * the draw side forces affine. Per-prim, then cleared. */
-	if (g_primPgxpForceAffine) {
-		AffineStore(prim);
+	if (g_primPgxpForceAffine || g_primNoFlashlight) {
+		AffineStore(prim, (unsigned char)g_primPgxpForceAffine, (unsigned char)g_primNoFlashlight);
 		g_primPgxpForceAffine = 0;
+		g_primNoFlashlight = 0;
 	}
 
 	uintptr_t key = (uintptr_t)prim;
@@ -772,6 +796,8 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	 * memset would wipe the current frame's entries before use. */
 	g_primPgxpForceAffine = 0;
 	s_curPgxpAffine = false;
+	g_primNoFlashlight = 0;
+	s_curNoFlashlight = false;
 }
 
 static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz)

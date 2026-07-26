@@ -229,6 +229,11 @@ extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsign
  * For screen-space prims (billboards) whose corners are NOT GTE-projected, so
  * the shadow lookup has no real data for them. No-op when PGXP is off. */
 extern void PsyX_SetNextPrimAffine(void);
+/* PGXP: keep the next prim out of the per-pixel flashlight (renders as if the
+ * flashlight were Classic/off). For surfaces that carry a propagated view-space
+ * shadow but whose bright albedo would blow out under the beam (reflective sewer
+ * water). No-op when PGXP is off. */
+extern void PsyX_SetNextPrimNoFlashlight(void);
 /* PGXP: record addr->precise from the gte_stsxy* store macros. Internal. */
 extern void PGXP_StoreAddr(void* addr, int slot);
 /* PGXP shadow propagation: after a drawer copies a vertex word from a GTE scratch
