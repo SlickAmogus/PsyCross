@@ -215,6 +215,12 @@ extern "C" { int g_PsxWholeMapLastSz = 0; }
  * clip coords homogeneously). Console `PGXPFARW <sz>` tunes it live. */
 extern "C" { float g_PgxpFarWClamp = 12288.0f; } /* ~48 world units */
 
+/* Per-vertex depth-channel coplanar tie-break strength: NDC nudge per painter-rank
+ * step, in 1/65536 units (16-bit depth granularity). Console PGXPTIE. Higher =
+ * pushes coplanar decals/items further in front of their host surface (more
+ * flicker relief); the shader still caps the total at 4 view-depth units. */
+extern "C" { float g_PgxpTieStrength = 32.0f; }
+
 /* PGXP near-plane clipping (docs/PGXP_NearClip_Design.md). A poly that straddles
  * the camera plane has behind-the-eye vertices with no valid projection (SZ3==0 ->
  * W=0); PSX hardware — and this port until now — fell back to affine for them,

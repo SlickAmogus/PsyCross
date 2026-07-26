@@ -786,6 +786,7 @@ typedef struct
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
 	GLint depthNearLoc;
+	GLint tieStrengthLoc;
 	GLint pgxpFarWLoc;
 	GLint flashlightOnLoc;
 	GLint flStyleLoc;
@@ -827,6 +828,7 @@ GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
 GLint u_depthNearLoc;
+GLint u_tieStrengthLoc;
 GLint u_pgxpFarWLoc;
 GLint u_flashlightOnLoc;
 GLint u_flStyleLoc;
@@ -1082,10 +1084,10 @@ int g_PsxFogToBlack = 0;
 		 * capped to 4 view-depth units so distant real surfaces cannot be reordered
 		 * merely by coarse far reciprocal precision. */\
 		"		if (a_extra.w > 0.5) {\n"\
-		/* One rank = ~4 units of a 16-bit depth buffer (our default). PR #11 used
-		 * one 24-bit unit assuming a 24-bit buffer; at 16 bits that is below the
-		 * buffer's precision, so coplanar prims still fought. */\
-		"			float tieNdc = mod(a_texcoord.w, 128.0) * (8.0 / 65536.0);\n"\
+		/* Per-rank nudge in units of 1/65536 NDC (a 16-bit depth step). Tunable live
+		 * via u_tieStrength (console PGXPTIE) since the right value depends on the
+		 * actual depth-buffer precision. Still capped below to 4 view-depth units. */\
+		"			float tieNdc = mod(a_texcoord.w, 128.0) * (u_tieStrength / 65536.0);\n"\
 		"			float nearerZ = max(u_depthNear, viewZ - 4.0);\n"\
 		"			float nearer01 = (u_szMax / (u_szMax - u_depthNear)) * (1.0 - u_depthNear / nearerZ);\n"\
 		"			float tieLimit = max(0.0, (depth01 - nearer01) * 2.0);\n"\
@@ -1108,6 +1110,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform float u_szMax;\n"\
 	"	uniform float u_depthNear;\n"\
+	"	uniform float u_tieStrength;\n"\
 	"	uniform float u_pgxpFarW;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
@@ -1617,6 +1620,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
 	sh->depthNearLoc = glGetUniformLocation(sh->shader, "u_depthNear");
+	sh->tieStrengthLoc = glGetUniformLocation(sh->shader, "u_tieStrength");
 	sh->pgxpFarWLoc = glGetUniformLocation(sh->shader, "u_pgxpFarW");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
 	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
@@ -1953,6 +1957,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
 		u_depthNearLoc = g_gte_shader_4.depthNearLoc;
+		u_tieStrengthLoc = g_gte_shader_4.tieStrengthLoc;
 		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
@@ -1987,6 +1992,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
 		u_depthNearLoc = g_gte_shader_8.depthNearLoc;
+		u_tieStrengthLoc = g_gte_shader_8.tieStrengthLoc;
 		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
@@ -2021,6 +2027,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
 		u_depthNearLoc = g_gte_shader_16.depthNearLoc;
+		u_tieStrengthLoc = g_gte_shader_16.tieStrengthLoc;
 		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
@@ -2055,6 +2062,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
 		u_depthNearLoc = g_gte_shader_32_rgba.depthNearLoc;
+		u_tieStrengthLoc = g_gte_shader_32_rgba.tieStrengthLoc;
 		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
 		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
@@ -2091,6 +2099,10 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	if (u_depthNearLoc != -1) {
 		extern float g_PgxpNearZ;
 		glUniform1f(u_depthNearLoc, g_PgxpNearZ < 1.0f ? 1.0f : g_PgxpNearZ);
+	}
+	if (u_tieStrengthLoc != -1) {
+		extern float g_PgxpTieStrength;
+		glUniform1f(u_tieStrengthLoc, g_PgxpTieStrength);
 	}
 	{
 		extern float g_PgxpFarWClamp;
