@@ -1261,7 +1261,7 @@ const char* gte_shader_4 =
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
-	"NOPERSP_VARYING vec3 v_viewpos;\n"
+	"varying vec3 v_viewpos;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1276,7 +1276,7 @@ const char* gte_shader_8 =
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
-	"NOPERSP_VARYING vec3 v_viewpos;\n"
+	"varying vec3 v_viewpos;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1291,7 +1291,7 @@ const char* gte_shader_16 =
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
-	"NOPERSP_VARYING vec3 v_viewpos;\n"
+	"varying vec3 v_viewpos;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1306,7 +1306,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
-	"NOPERSP_VARYING vec3 v_viewpos;\n"
+	"varying vec3 v_viewpos;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1468,25 +1468,6 @@ ShaderID GR_Shader_Compile(const char* source)
 		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
 		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
 	}
-
-	/* v_viewpos is the per-pixel flashlight receiver position. The flashlight's
-	 * distance envelope (func_80057658-derived 1/d^2 term) was calibrated for the
-	 * PSX-style affine/screen-linear view position. PGXP makes gl_Position.w != 1,
-	 * which silently turns v_viewpos perspective-correct and shrinks the true
-	 * per-fragment distance on grazing surfaces -> the sewer water blows out white.
-	 * Force screen-linear interpolation so the flashlight matches the affine look
-	 * regardless of PGXP. With PGXP off gl_Position.w == 1, so noperspective is
-	 * mathematically identical to perspective -> byte-identical off-path. Kept
-	 * independent of the affineTextures option; no centroid (that would move MSAA
-	 * sample positions and break the off-path identity). noperspective is desktop
-	 * GLSL 1.30+; ES2 has no such qualifier so it keeps legacy interpolation. */
-#if defined(ES2_SHADERS)
-	strcat(extra_vs_defines, "#define NOPERSP_VARYING varying\n");
-	strcat(extra_fs_defines, "#define NOPERSP_VARYING varying\n");
-#else
-	strcat(extra_vs_defines, "#define NOPERSP_VARYING noperspective varying\n");
-	strcat(extra_fs_defines, "#define NOPERSP_VARYING noperspective varying\n");
-#endif
 
 	const char* vs_list[] = { GLSL_HEADER_VERT, extra_vs_defines, source };
 	const char* fs_list[] = { GLSL_HEADER_FRAG, extra_fs_defines, source };
