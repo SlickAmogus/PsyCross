@@ -1116,6 +1116,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform int u_fogToBlack;\n"\
 	"	uniform float u_fogStrength;\n"\
 	"	uniform int u_flashlightOn;\n"\
+	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform int u_flStyle;\n"\
 	"	uniform vec3 u_flLightPos;\n"\
 	"	uniform vec3 u_flDir;\n"\
@@ -1223,7 +1224,12 @@ int g_PsxFogToBlack = 0;
 	"					}\n"\
 	"				}\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
-	"				fragColor.rgb += flAlbedo * fl;\n"\
+	"				vec3 flAdd = flAlbedo * fl;\n"\
+	"				if (u_pgxpEnabled > 0) {\n"\
+	"					float flMax = max(flAdd.r, max(flAdd.g, flAdd.b));\n"\
+	"					if (flMax > 0.5) flAdd *= 0.5 / flMax;\n"\
+	"				}\n"\
+	"				fragColor.rgb += flAdd;\n"\
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
