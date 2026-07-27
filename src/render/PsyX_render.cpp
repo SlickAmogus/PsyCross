@@ -2658,6 +2658,45 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		{
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		}
+		else if (g_PreviousOffscreen.w > 0 && g_PreviousOffscreen.h > 0 &&
+		         g_PreviousOffscreen.w <= 64 && g_PreviousOffscreen.h <= 64)
+		{
+			/* Small VRAM-scratch writeback (sewer water caustic 32x32): the
+			 * legacy path below is wrong for these — the raw glBlitFramebuffer
+			 * writes unpacked RGBA into the packed-RG8 VRAM texture (corrupts
+			 * it), and the full-size PBO adds 2 frames of latency. A scratch
+			 * this small is a synchronous glReadPixels of a few KB: read the
+			 * FBO, pack into vram[] (kept authoritative so any later full
+			 * GR_UpdateVRAM upload re-stamps the same bytes), then sub-upload
+			 * the packed region into BOTH double-buffered VRAM textures.
+			 * vram_need_update is NOT set — no 1MB full re-upload per frame. */
+			static u_int  s_scratchRGBA[64 * 64];
+			static ushort s_scratchPacked[64 * 64];
+			const int sw = g_PreviousOffscreen.w, sh = g_PreviousOffscreen.h;
+
+			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
+			glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, s_scratchRGBA);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+			GR_CopyRGBAFramebufferToVRAM(s_scratchRGBA,
+				g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh, 0, 1);
+
+			{
+				const ushort* src = (const ushort*)vram +
+					VRAM_WIDTH * g_PreviousOffscreen.y + g_PreviousOffscreen.x;
+				for (int row = 0; row < sh; row++)
+					memcpy(&s_scratchPacked[row * sw], src + row * VRAM_WIDTH, sw * sizeof(ushort));
+
+				for (int t = 0; t < 2; t++)
+				{
+					glBindTexture(GL_TEXTURE_2D, g_vramTexturesDouble[t]);
+					glTexSubImage2D(GL_TEXTURE_2D, 0,
+						g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh,
+						VRAM_FORMAT, GL_UNSIGNED_BYTE, s_scratchPacked);
+				}
+				glBindTexture(GL_TEXTURE_2D, g_lastBoundTexture);
+			}
+		}
 		else
 		{
 #if USE_OFFSCREEN_BLIT

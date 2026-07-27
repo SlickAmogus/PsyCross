@@ -2755,6 +2755,25 @@ static int ProcessDrawEnv(P_TAG* polyTag)
 			{
 				GR_SetSceneFbRedirect(activeDrawEnv.clip.x, activeDrawEnv.clip.y,
 				                      activeDrawEnv.clip.w, activeDrawEnv.clip.h);
+				activeDrawEnv.dfe = 1;
+			}
+			else if (activeDrawEnv.clip.x >= 320 &&
+			         activeDrawEnv.clip.w > 0 && activeDrawEnv.clip.h > 0)
+			{
+				/* Small offscreen VRAM scratch (sewer water caustic: 832,224
+				 * 32x32, water.c func_8008E5B4): the game renders prims into
+				 * this VRAM tile and later SAMPLES it as a texture. Route the
+				 * split through the offscreen FBO (dfe=0) — GR_SetOffscreenState
+				 * sizes the FBO to this rect and, on the transition back to an
+				 * on-screen split, packs the pixels into vram[] + the VRAM
+				 * textures at (clip.x, clip.y). dfe self-restores at the next
+				 * on-screen DR_AREA below or any DR_TPAGE (case 0x1), so the
+				 * scratch scope is exactly area-prim .. env-restore. */
+				activeDrawEnv.dfe = 0;
+			}
+			else
+			{
+				activeDrawEnv.dfe = 1;
 			}
 			break;
 		}
