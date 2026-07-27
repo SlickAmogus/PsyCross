@@ -319,6 +319,17 @@ extern "C" int PsyX_PGXP_QuadBackface(const void* a0, const void* a1, const void
 /* Coverage instrumentation: precise (det) vs affine (miss) per 3D vertex, dumped
  * ~once a second when PGXP is on. Also bumps the frame generation. */
 static unsigned int s_pgxpDet = 0, s_pgxpMiss = 0, s_pgxpFrames = 0, s_pgxpClip = 0;
+
+/* [PGXPDEPTH] Step-1 probe (temporary; depth-channel plan). Answers, at runtime:
+ * does the GsDrawOt-start wipe discard the frame's captured SZ entries BEFORE
+ * the parse reads them (i.e. is the FLAT/WORLD machinery inert in gameplay),
+ * and is the whole-town vista ordered without parse hits (sort-time ordering)?
+ * Dumped with the [PGXP] coverage line once per 60 frames, PGXP-on only. */
+static unsigned s_dbgWipeFlat = 0, s_dbgWipeExact = 0, s_dbgWipeNone = 0, s_dbgWipeSkips = 0;
+static unsigned s_dbgParseHit = 0, s_dbgParseMiss = 0;
+static unsigned s_dbgParseHitFlat = 0, s_dbgParseHitExact = 0, s_dbgParseHitNone = 0;
+static unsigned s_dbgSplitWorld = 0, s_dbgSzExhaust = 0;
+static int s_dbgSplitHighWater = 0;
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
@@ -332,6 +343,16 @@ extern "C" void PGXP_CoverageTick(void)
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
 				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
 				s_pgxpClip, s_pgxpClamp);
+		if (s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss)
+			eprintinfo("[PGXPDEPTH] wiped F=%u E=%u N=%u skips=%u | parse hit=%u(F=%u E=%u N=%u) miss=%u | splitWORLD=%u | splitHW=%d | szExhaust=%u\n",
+				s_dbgWipeFlat, s_dbgWipeExact, s_dbgWipeNone, s_dbgWipeSkips,
+				s_dbgParseHit, s_dbgParseHitFlat, s_dbgParseHitExact, s_dbgParseHitNone,
+				s_dbgParseMiss, s_dbgSplitWorld, s_dbgSplitHighWater, s_dbgSzExhaust);
+		s_dbgWipeFlat = s_dbgWipeExact = s_dbgWipeNone = s_dbgWipeSkips = 0;
+		s_dbgParseHit = s_dbgParseMiss = 0;
+		s_dbgParseHitFlat = s_dbgParseHitExact = s_dbgParseHitNone = 0;
+		s_dbgSplitWorld = s_dbgSzExhaust = 0;
+		s_dbgSplitHighWater = 0;
 		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = s_pgxpClamp = 0;
 	}
 }
@@ -745,6 +766,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		}
 	}
 	// Probe exhausted — overwrite initial slot
+	if (g_PsxUsePgxp) s_dbgSzExhaust++;
 	g_szTable[slot].key = key;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
@@ -764,7 +786,10 @@ static int SplitDepthForPrim(const void* prim)
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == key)
-			return g_szTable[s].kind == SZ_KIND_FLAT ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED;
+		{
+			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return SPLIT_DEPTH_WORLD; }
+			return SPLIT_DEPTH_DISABLED;
+		}
 		if (g_szTable[s].key == 0)
 			break;
 	}
@@ -789,7 +814,21 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	 * linkage and clash with the C++-linkage file-scope decl / definition — Clang
 	 * (macOS CI) errors "different language linkage"; GCC just ignored it. */
 	if (!g_PsyX_ForceItemDepth)
+	{
+		if (g_PsxUsePgxp)
+		{
+			for (int i = 0; i < SZ_TABLE_SIZE; i++)
+			{
+				if (g_szTable[i].key == 0) continue;
+				if (g_szTable[i].kind == SZ_KIND_FLAT)       s_dbgWipeFlat++;
+				else if (g_szTable[i].kind == SZ_KIND_EXACT) s_dbgWipeExact++;
+				else                                          s_dbgWipeNone++;
+			}
+		}
 		memset(g_szTable, 0, sizeof(g_szTable));
+	}
+	else if (g_PsxUsePgxp)
+		s_dbgWipeSkips++;
 	g_primSzNextValid = 0;
 	/* s_shadow / s_affine are gen-stamped, NOT cleared here: this runs at the start
 	 * of GsDrawOt, after addPrim filled them but before DrawOTag reads them, so a
@@ -800,7 +839,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curNoFlashlight = false;
 }
 
-static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz)
+static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* kindOut = nullptr)
 {
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -809,6 +848,7 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz)
 		if (g_szTable[s].key == key) {
 			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
 			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
+			if (kindOut) *kindOut = g_szTable[s].kind;
 			return true;
 		}
 		if (g_szTable[s].key == 0) break;
@@ -827,8 +867,19 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	if (g_szMaxPrevFrame < 1) return;
 
 	uint32_t sz[4];
-	if (!PsyX_LookupGteDepths(polyTag, sz))
+	unsigned char dbgKind = SZ_KIND_NONE;
+	if (!PsyX_LookupGteDepths(polyTag, sz, &dbgKind))
+	{
+		if (g_PsxUsePgxp) s_dbgParseMiss++;
 		return;
+	}
+	if (g_PsxUsePgxp)
+	{
+		s_dbgParseHit++;
+		if (dbgKind == SZ_KIND_FLAT)       s_dbgParseHitFlat++;
+		else if (dbgKind == SZ_KIND_EXACT) s_dbgParseHitExact++;
+		else                                s_dbgParseHitNone++;
+	}
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
@@ -1887,6 +1938,9 @@ void DrawAllSplits()
 		}
 		GR_ShadowPassEnd();
 	}
+
+	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
+		s_dbgSplitHighWater = g_splitIndex;
 
 	for (int i = 1; i <= g_splitIndex; i++)
 		DrawSplit(g_splits[i]);
