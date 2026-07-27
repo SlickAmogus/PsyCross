@@ -641,7 +641,12 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
 /* sz widened u16 -> u32: the whole-town far-depth substitution below feeds true
  * cell-center view depths that exceed the 0xFFFF SZ clamp. u16 values still fit
  * exactly, so normal play is numerically identical. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned char kind; };
+/* gen: frame stamp (s_pgxpGen, bumped once per frame in PGXP_CoverageTick) so the
+ * table can retire stale entries WITHOUT the GsDrawOt memset — groundwork for the
+ * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
+ * address from a previous frame must then read as a miss, exactly like the
+ * s_shadow / s_affine tables already do). Inert while the memset still runs. */
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; };
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
 /* Whole-town far depth (docs/WholeMap_Far_Projection_Task.md). The GTE SZ3
@@ -722,6 +727,12 @@ extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, un
 	g_primSzNextKind = SZ_KIND_EXACT; /* decals / inventory authored Z — NOT world painter */
 }
 
+extern "C" void PsyX_CancelNextPrimSz(void)
+{
+	g_primSzNextValid = 0;
+	g_primSzNextKind = SZ_KIND_NONE;
+}
+
 extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	/* PGXP: if the next prim was flagged screen-space (billboards), record it so
@@ -757,10 +768,14 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
-		if (g_szTable[s].key == 0 || g_szTable[s].key == key) {
+		/* Stale-gen slots are reclaimable (same probe rule as Shadow_Put/
+		 * AffineStore): identical placement while the memset wipes the table
+		 * (stale entries then never exist mid-probe). */
+		if (g_szTable[s].key == 0 || g_szTable[s].key == key || g_szTable[s].gen != s_pgxpGen) {
 			g_szTable[s].key = key;
 			g_szTable[s].sz[0] = s0; g_szTable[s].sz[1] = s1;
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
+			g_szTable[s].gen = s_pgxpGen;
 			g_szTable[s].kind = kind;
 			return;
 		}
@@ -770,6 +785,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 	g_szTable[slot].key = key;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
+	g_szTable[slot].gen = s_pgxpGen;
 	g_szTable[slot].kind = kind;
 }
 
@@ -787,6 +803,11 @@ static int SplitDepthForPrim(const void* prim)
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == key)
 		{
+			/* Stale-gen = captured a previous frame, not this one: a reused
+			 * packet address must not inherit last frame's kind. (Function is
+			 * already PGXP-gated at entry.) */
+			if (g_szTable[s].gen != s_pgxpGen)
+				return SPLIT_DEPTH_DISABLED;
 			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return SPLIT_DEPTH_WORLD; }
 			return SPLIT_DEPTH_DISABLED;
 		}
@@ -846,6 +867,11 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == key) {
+			/* Gen-validate gated on PGXP: the legacy pgxpZBuffer path (PGXP
+			 * off) keeps its exact historical behavior; when PGXP is on a
+			 * reused packet address from a prior frame reads as a miss. */
+			if (g_PsxUsePgxp && g_szTable[s].gen != s_pgxpGen)
+				return false;
 			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
 			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
 			if (kindOut) *kindOut = g_szTable[s].kind;
