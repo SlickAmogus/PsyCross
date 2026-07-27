@@ -662,6 +662,54 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
 struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; };
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
+/* --- Depth channel Step 3 (docs: PGXP_PR51_Vetting.md; live only when PGXP is
+ * on and outside the inventory item pass) ---------------------------------
+ * One CONSTANT linear viewZ->NDC scale for every depth source so flat testers,
+ * bucket seeds and (Step 4) per-vertex world writes are commensurable by
+ * construction: ndc(vz) = 1 - 2*vz/2^18. Linear (not reciprocal) keeps uniform
+ * far resolution where the distant-gap fix lives, and no depth-buffer format
+ * change is needed — a 16-bit grant degrades ties toward painter order, the
+ * PSX direction. */
+#define PGXP_DEPTH_SZMAX 262144.0f /* 2^18 SZ units (~1024 world units) */
+/* Kill-switch (console PGXPWORLDDEPTH): suppresses FLAT promotion everywhere,
+ * dropping the whole feature back to bucket+painter behavior instantly. */
+extern "C" { int g_PsxPgxpWorldDepth = 1; }
+/* Writer-side far-push margin M in SZ units (console PGXPWALLBIAS): world
+ * geometry is pushed slightly FARTHER so coplanar testers (props against a
+ * wall/floor) win LEQUAL without any tester-side bias or tie-rank. */
+extern "C" { int g_PsxPgxpWorldFarBias = 64; }
+
+static inline float PgxpNdcFromViewZ(float vz)
+{
+	float z = 1.0f - 2.0f * vz * (1.0f / PGXP_DEPTH_SZMAX);
+	if (z < -1.0f) z = -1.0f;
+	if (z >  1.0f) z =  1.0f;
+	return z;
+}
+
+/* OT-bucket -> viewZ shift (shiftEff): the game inserts world prims at
+ * org[SZ >> (arg3+2)] (Gfx_MeshDraw) and TMD actors at org[p >> shift] with
+ * p ~ SZ>>2 (GsSortObject4J drawers), so bucket index b covers viewZ
+ * ~ b << shiftEff. Registered by both producers; a disagreement is logged
+ * once (the world scale wins — testers then read slightly nearer, which only
+ * widens their margin). 0 = never registered -> legacy index-based seeds. */
+static int s_otViewZShift = 0;
+extern "C" void PsyX_SetOtViewZShift(int shiftEff)
+{
+	if (shiftEff <= 0) return;
+	if (s_otViewZShift != 0 && s_otViewZShift != shiftEff)
+	{
+		static int s_shiftWarned = 0;
+		if (!s_shiftWarned)
+		{
+			s_shiftWarned = 1;
+			eprintwarn("[PGXPDEPTH] OT viewZ shift disagreement: %d vs %d (keeping latest)\n",
+				s_otViewZShift, shiftEff);
+		}
+	}
+	s_otViewZShift = shiftEff;
+}
+
 /* Whole-town far depth (docs/WholeMap_Far_Projection_Task.md). The GTE SZ3
  * register saturates at 0xFFFF = ~256 world units, so EVERY poly beyond 256u
  * gets the same clamped depth -> identical GL depth -> GL_LEQUAL ties resolve by
@@ -685,6 +733,11 @@ static uint32_t g_szMaxPrevFrame = 0;
  * Returns 1 as a safe floor before the first frame. */
 extern "C" float PGXP_GetSzMax(void)
 {
+	/* Depth channel: one CONSTANT normalization when PGXP is on, so depth no
+	 * longer wobbles with the prev-frame content maximum. Legacy value kept
+	 * for the off path (and the item pass reads g_szMaxPrevFrame directly). */
+	if (g_PsxUsePgxp)
+		return PGXP_DEPTH_SZMAX;
 	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
 }
 
@@ -716,7 +769,11 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	else
 	{
 		uint32_t avg = ((unsigned)s0 + s1 + s2 + s3) >> 2;
-		avg_q = (avg >> 6) << 6;
+		/* Depth channel: keep the RAW average when PGXP is on — the 64-unit
+		 * quantization existed to force coplanar neighbours into shared depth
+		 * buckets, which the GL_ALWAYS world painter now makes unnecessary.
+		 * Off path keeps the historical quantized value. */
+		avg_q = g_PsxUsePgxp ? avg : ((avg >> 6) << 6);
 		// Calibrate with unquantised real max so character/item GL depths stay accurate.
 		mx = s0 > s1 ? s0 : s1;
 		if (s2 > mx) mx = s2;
@@ -808,7 +865,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
  * never consulted and split classification/batching is byte-identical to today. */
 static int SplitDepthForPrim(const void* prim)
 {
-	if (!g_PsxUsePgxp)
+	if (!g_PsxUsePgxp || !g_PsxPgxpWorldDepth)
 		return SPLIT_DEPTH_DISABLED;
 	uintptr_t key = (uintptr_t)prim;
 	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
@@ -849,17 +906,15 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	 * (macOS CI) errors "different language linkage"; GCC just ignored it. */
 	if (!g_PsyX_ForceItemDepth)
 	{
-		if (g_PsxUsePgxp)
-		{
-			for (int i = 0; i < SZ_TABLE_SIZE; i++)
-			{
-				if (g_szTable[i].key == 0) continue;
-				if (g_szTable[i].kind == SZ_KIND_FLAT)       s_dbgWipeFlat++;
-				else if (g_szTable[i].kind == SZ_KIND_EXACT) s_dbgWipeExact++;
-				else                                          s_dbgWipeNone++;
-			}
-		}
-		memset(g_szTable, 0, sizeof(g_szTable));
+		/* Depth channel: with PGXP on the table is NOT wiped — entries retire
+		 * by gen stamp instead (Step-2 plumbing), so the frame's captured
+		 * FLAT/EXACT kinds finally survive from addPrim to the GsDrawOt parse.
+		 * The [PGXPDEPTH] probe proved the wipe discarded ~70k world entries/s
+		 * with parse hit=0 — the machinery was inert in gameplay. Off path
+		 * wipes exactly as before (byte-identical); a runtime PGXP on->off
+		 * toggle self-heals here on the first off-frame GsDrawOt. */
+		if (!g_PsxUsePgxp)
+			memset(g_szTable, 0, sizeof(g_szTable));
 	}
 	else if (g_PsxUsePgxp)
 		s_dbgWipeSkips++;
@@ -903,11 +958,15 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 // Z-fighting along polygon edges.
 static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
 {
-	if (g_szMaxPrevFrame < 1) return;
+	/* Depth channel (PGXP on, outside the inventory item pass): flat per-prim
+	 * depth on the shared constant linear scale — no prev-frame normalizer
+	 * needed. Everything else keeps the legacy self-normalized behavior. */
+	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth;
+	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
 	uint32_t sz[4];
-	unsigned char dbgKind = SZ_KIND_NONE;
-	if (!PsyX_LookupGteDepths(polyTag, sz, &dbgKind))
+	unsigned char kind = SZ_KIND_NONE;
+	if (!PsyX_LookupGteDepths(polyTag, sz, &kind))
 	{
 		if (g_PsxUsePgxp) s_dbgParseMiss++;
 		return;
@@ -915,9 +974,9 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	if (g_PsxUsePgxp)
 	{
 		s_dbgParseHit++;
-		if (dbgKind == SZ_KIND_FLAT)       s_dbgParseHitFlat++;
-		else if (dbgKind == SZ_KIND_EXACT) s_dbgParseHitExact++;
-		else                                s_dbgParseHitNone++;
+		if (kind == SZ_KIND_FLAT)       s_dbgParseHitFlat++;
+		else if (kind == SZ_KIND_EXACT) s_dbgParseHitExact++;
+		else                             s_dbgParseHitNone++;
 	}
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
@@ -931,6 +990,28 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
+
+	if (pgxpWorldPath)
+	{
+		/* kind NONE = auto-captured GTE FIFO values — documented lighting
+		 * garbage for every GsTMDfast* drawer (NormalClip/NormalColorCol
+		 * clobber the FIFO before addPrim). Those prims keep the bucket seed,
+		 * which is already remapped onto this same linear scale. */
+		if (kind == SZ_KIND_NONE)
+			return;
+		/* Kill-switch: FLAT falls back to bucket behavior entirely. */
+		if (kind == SZ_KIND_FLAT && !g_PsxPgxpWorldDepth)
+			return;
+		/* World geometry is pushed M farther (writer-side margin) so coplanar
+		 * testers — props on floors, posters' host walls vs pickups — win
+		 * LEQUAL without any tester-side bias. EXACT (item/decal authored Z)
+		 * takes the same scale without the margin. */
+		float vz = sz_avg + ((kind == SZ_KIND_FLAT) ? (float)g_PsxPgxpWorldFarBias : 0.0f);
+		float z_val = PgxpNdcFromViewZ(vz);
+		vertex[0].z = vertex[1].z = vertex[2].z = z_val;
+		if (isQuad) vertex[3].z = z_val;
+		return;
+	}
 
 	float z_val = 1.0f - 2.0f * sz_avg * (1.0f / (float)g_szMaxPrevFrame);
 	if (z_val < -1.0f) z_val = -1.0f;
@@ -2153,8 +2234,28 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			else if (tagLength == 0)
 			{
 				// OT bucket boundary — advance to the next bucket's depth.
-				g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
-				if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
+				if (g_PsxUsePgxp && s_otViewZShift > 0)
+				{
+					/* Depth channel: seed the bucket on the SAME constant
+					 * linear viewZ scale the world/EXACT prims use, so
+					 * untracked (kind NONE) content is commensurable by
+					 * construction and inherits its authored OT painter
+					 * placement in depth space. The OT is walked far->near,
+					 * so absolute bucket index = count-1-walked; a bucket
+					 * covers viewZ ~ index << shiftEff (+half a quantum to
+					 * center it). Monotone in walk order, exactly like the
+					 * legacy index seed — today's relations are preserved. */
+					int b = g_currentOTBucketCount - 1 - otBucketIdx;
+					if (b < 0) b = 0;
+					float vz = (float)((unsigned)b << s_otViewZShift)
+					         + 0.5f * (float)(1 << s_otViewZShift);
+					g_otBucketDepth = PgxpNdcFromViewZ(vz);
+				}
+				else
+				{
+					g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
+					if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
+				}
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)

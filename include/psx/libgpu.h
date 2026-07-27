@@ -230,6 +230,11 @@ extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsign
  * payload (world FLAT kind + wrong SZ) to the next unrelated addPrim. Called at
  * every Gfx_MeshDraw exit. */
 extern void PsyX_CancelNextPrimSz(void);
+/* Register the OT-bucket -> viewZ shift (shiftEff): world inserts at
+ * org[SZ >> (arg3+2)] (Gfx_MeshDraw), TMD actors at org[p >> shift] with
+ * p ~ SZ>>2 (GsSortObject4J). Lets the PGXP depth channel seed untracked
+ * OT buckets on the shared linear viewZ scale. No-op when <= 0. */
+extern void PsyX_SetOtViewZShift(int shiftEff);
 /* PGXP: force the next prim to render affine (no perspective correction).
  * For screen-space prims (billboards) whose corners are NOT GTE-projected, so
  * the shadow lookup has no real data for them. No-op when PGXP is off. */
