@@ -343,6 +343,12 @@ static unsigned s_dbgParseHit = 0, s_dbgParseMiss = 0;
 static unsigned s_dbgParseHitFlat = 0, s_dbgParseHitExact = 0, s_dbgParseHitNone = 0;
 static unsigned s_dbgSplitWorld = 0, s_dbgSzExhaust = 0;
 static int s_dbgSplitHighWater = 0;
+/* Step-4 anomaly hunt: split "parse not reached" from "entry rejected".
+ * armF   = PsyX_SetNextPrimSz calls (world polys armed at build)
+ * capF   = captures that actually stored kind FLAT
+ * apply  = ApplyGtePerVertexDepth entries (parse-side call volume)
+ * staleR = gen-stale rejects across both readers (lookup + split classify) */
+static unsigned s_dbgArmF = 0, s_dbgCapF = 0, s_dbgApplyCalls = 0, s_dbgStaleRej = 0;
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
@@ -356,16 +362,18 @@ extern "C" void PGXP_CoverageTick(void)
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
 				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
 				s_pgxpClip, s_pgxpClamp, s_pgxpOversize);
-		if (s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss)
-			eprintinfo("[PGXPDEPTH] wiped F=%u E=%u N=%u skips=%u | parse hit=%u(F=%u E=%u N=%u) miss=%u | splitWORLD=%u | splitHW=%d | szExhaust=%u\n",
+		if (s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss + s_dbgArmF + s_dbgApplyCalls)
+			eprintinfo("[PGXPDEPTH] wiped F=%u E=%u N=%u skips=%u | parse hit=%u(F=%u E=%u N=%u) miss=%u | splitWORLD=%u | splitHW=%d | szExhaust=%u | armF=%u capF=%u apply=%u staleR=%u\n",
 				s_dbgWipeFlat, s_dbgWipeExact, s_dbgWipeNone, s_dbgWipeSkips,
 				s_dbgParseHit, s_dbgParseHitFlat, s_dbgParseHitExact, s_dbgParseHitNone,
-				s_dbgParseMiss, s_dbgSplitWorld, s_dbgSplitHighWater, s_dbgSzExhaust);
+				s_dbgParseMiss, s_dbgSplitWorld, s_dbgSplitHighWater, s_dbgSzExhaust,
+				s_dbgArmF, s_dbgCapF, s_dbgApplyCalls, s_dbgStaleRej);
 		s_dbgWipeFlat = s_dbgWipeExact = s_dbgWipeNone = s_dbgWipeSkips = 0;
 		s_dbgParseHit = s_dbgParseMiss = 0;
 		s_dbgParseHitFlat = s_dbgParseHitExact = s_dbgParseHitNone = 0;
 		s_dbgSplitWorld = s_dbgSzExhaust = 0;
 		s_dbgSplitHighWater = 0;
+		s_dbgArmF = s_dbgCapF = s_dbgApplyCalls = s_dbgStaleRej = 0;
 		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0;
 	}
 }
@@ -780,6 +788,7 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 		if (s3 > mx) mx = s3;
 	}
 	if (mx > g_szMaxThisFrame) g_szMaxThisFrame = mx;
+	if (g_PsxUsePgxp) s_dbgArmF++;
 	g_primSzNext[0] = g_primSzNext[1] = g_primSzNext[2] = g_primSzNext[3] = avg_q;
 	g_primSzNextValid = 1;
 	g_primSzNextKind = SZ_KIND_FLAT; /* SOLE caller is Gfx_MeshDraw (static world) */
@@ -822,6 +831,7 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 		s0 = g_primSzNext[0]; s1 = g_primSzNext[1];
 		s2 = g_primSzNext[2]; s3 = g_primSzNext[3];
 		kind = g_primSzNextKind;
+		if (g_PsxUsePgxp && kind == SZ_KIND_FLAT) s_dbgCapF++;
 		g_primSzNextValid = 0;
 		g_primSzNextKind = SZ_KIND_NONE;
 	} else {
@@ -877,7 +887,10 @@ static int SplitDepthForPrim(const void* prim)
 			 * packet address must not inherit last frame's kind. (Function is
 			 * already PGXP-gated at entry.) */
 			if (g_szTable[s].gen != s_pgxpGen)
+			{
+				s_dbgStaleRej++;
 				return SPLIT_DEPTH_DISABLED;
+			}
 			if (g_szTable[s].kind == SZ_KIND_FLAT) { s_dbgSplitWorld++; return SPLIT_DEPTH_WORLD; }
 			return SPLIT_DEPTH_DISABLED;
 		}
@@ -939,7 +952,10 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 			 * off) keeps its exact historical behavior; when PGXP is on a
 			 * reused packet address from a prior frame reads as a miss. */
 			if (g_PsxUsePgxp && g_szTable[s].gen != s_pgxpGen)
+			{
+				s_dbgStaleRej++;
 				return false;
+			}
 			sz[0] = g_szTable[s].sz[0]; sz[1] = g_szTable[s].sz[1];
 			sz[2] = g_szTable[s].sz[2]; sz[3] = g_szTable[s].sz[3];
 			if (kindOut) *kindOut = g_szTable[s].kind;
@@ -962,6 +978,7 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	 * depth on the shared constant linear scale — no prev-frame normalizer
 	 * needed. Everything else keeps the legacy self-normalized behavior. */
 	const bool pgxpWorldPath = g_PsxUsePgxp && !g_PsyX_ForceItemDepth;
+	if (g_PsxUsePgxp) s_dbgApplyCalls++;
 	if (!pgxpWorldPath && g_szMaxPrevFrame < 1) return;
 
 	uint32_t sz[4];
