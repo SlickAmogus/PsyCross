@@ -1021,6 +1021,21 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	 * (ITEM_PRECISE_SZ -> SZ_KIND_EXACT); interpolated GL depth resolves
 	 * the overlap per-pixel. Non-EXACT prims keep the legacy flat average.
 	 * Flag is 0 outside the bracketed item-only OT0 draw. */
+	/* Discriminator for the item-pass see-through reports: any prim reaching
+	 * this pass WITHOUT the precise-SZ feed would stamp near-depth garbage and
+	 * bleed at every angle (feed-failure class). Zero lines during a repro
+	 * proves the remaining artifacts are authored crossing geometry resolved
+	 * z-nearest instead of PSX-painter (UNQC2 tray/bevel class). */
+	if (g_PsyX_ForceItemDepth && kind != SZ_KIND_EXACT)
+	{
+		static int s_itemDepthNonExact = 0;
+		if (s_itemDepthNonExact < 16)
+		{
+			eprintinfo("[ITEMDEPTH] non-EXACT kind=%d szMaxPrev=%u\n", (int)kind, (unsigned)g_szMaxPrevFrame);
+			s_itemDepthNonExact++;
+		}
+	}
+
 	if (g_PsyX_ForceItemDepth && kind == SZ_KIND_EXACT)
 	{
 		const float inv = 2.0f / (float)g_szMaxPrevFrame;
