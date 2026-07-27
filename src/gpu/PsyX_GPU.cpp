@@ -991,6 +991,28 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
 
+	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
+	 * per-poly average cannot order a large foreshortened face against
+	 * interior geometry a few SZ behind it — the ammo-box take-screen drew
+	 * its tray through the bottom face because the face's average sat
+	 * farther than the tray's. The per-vertex SZs are already captured
+	 * (ITEM_PRECISE_SZ -> SZ_KIND_EXACT); interpolated GL depth resolves
+	 * the overlap per-pixel. Non-EXACT prims keep the legacy flat average.
+	 * Flag is 0 outside the bracketed item-only OT0 draw. */
+	if (g_PsyX_ForceItemDepth && kind == SZ_KIND_EXACT)
+	{
+		const float inv = 2.0f / (float)g_szMaxPrevFrame;
+		float z;
+		z = 1.0f - sv0 * inv; if (z < -1.0f) z = -1.0f; if (z > 1.0f) z = 1.0f; vertex[0].z = z;
+		z = 1.0f - sv1 * inv; if (z < -1.0f) z = -1.0f; if (z > 1.0f) z = 1.0f; vertex[1].z = z;
+		z = 1.0f - sv2 * inv; if (z < -1.0f) z = -1.0f; if (z > 1.0f) z = 1.0f; vertex[2].z = z;
+		if (isQuad)
+		{
+			z = 1.0f - sv3 * inv; if (z < -1.0f) z = -1.0f; if (z > 1.0f) z = 1.0f; vertex[3].z = z;
+		}
+		return;
+	}
+
 	if (pgxpWorldPath)
 	{
 		/* kind NONE = auto-captured GTE FIFO values — documented lighting
@@ -1010,6 +1032,18 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 		float z_val = PgxpNdcFromViewZ(vz);
 		vertex[0].z = vertex[1].z = vertex[2].z = z_val;
 		if (isQuad) vertex[3].z = z_val;
+		/* Step 4: mark OPAQUE world verts for per-vertex depth in the vertex
+		 * shader (_p1 -> a_extra.w). Opaque world draws GL_ALWAYS — it never
+		 * depth-tests itself, so per-vertex depth there cannot flicker; it
+		 * only makes the depth field actors test against per-pixel accurate
+		 * (the distant-gap fix). SEMI-TRANS world prims draw LEQUAL against
+		 * their coplanar opaque host — per-vertex depth on a tester re-creates
+		 * the two-interpolants coin-flip, so they keep this flat depth. */
+		if (kind == SZ_KIND_FLAT && !(polyTag->code & 2))
+		{
+			vertex[0]._p1 = vertex[1]._p1 = vertex[2]._p1 = 1;
+			if (isQuad) vertex[3]._p1 = 1;
+		}
 		return;
 	}
 
@@ -1760,9 +1794,18 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 		return count;
 
 	/* Growth headroom: never write past the vertex buffer; keeping the
-	 * unclipped poly stays within the pre-existing envelope. */
+	 * unclipped poly stays within the pre-existing envelope. Force the whole
+	 * poly affine (same rule as the guard-band bail below): an eligible poly
+	 * straddles the near plane, and rasterizing behind-eye vertices with
+	 * ppw>0 produces garbage — worse now that a marked world vertex would
+	 * also derive per-vertex DEPTH from that ppw. Affine = flat z, one frame,
+	 * imperceptible. */
 	if (g_vertexIndex + 12 > MAX_VERTEX_BUFFER_SIZE)
+	{
+		for (int j = 0; j < count; j++)
+			v[j].ppw = 0.0f;
 		return count;
+	}
 
 	GrVertex out[12];
 	int outCount = 0;

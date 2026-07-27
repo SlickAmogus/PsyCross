@@ -786,6 +786,7 @@ typedef struct
 	GLint pgxpEnabledLoc;
 	GLint szMaxLoc;
 	GLint pgxpFarWLoc;
+	GLint worldFarBiasLoc;
 	GLint flashlightOnLoc;
 	GLint untexturedLoc;
 	GLint flStyleLoc;
@@ -826,6 +827,9 @@ GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
+GLint u_worldFarBiasLoc;
+/* Depth channel Step 4: writer-side world far-push margin M (PsyX_GPU.cpp). */
+extern "C" int g_PsxPgxpWorldFarBias;
 GLint u_pgxpFarWLoc;
 GLint u_flashlightOnLoc;
 GLint u_untexturedLoc;
@@ -1057,6 +1061,19 @@ int g_PsxFogToBlack = 0;
 		"		vec4 b = Projection * vec4(a_pgxp.xy, a_zw.x, 1.0);\n"\
 		"		float W = a_pgxp.z;\n"\
 		"		if (u_pgxpFarW > 0.0) W = min(W, u_pgxpFarW);\n"\
+		/* Depth channel Step 4: marked OPAQUE WORLD verts (a_extra.w, set by
+		 * ApplyGtePerVertexDepth for GL_ALWAYS-class prims only) take true
+		 * per-vertex depth from the unquantized view W (a_pgxp.z, pre-FarW-
+		 * clamp), on the SAME constant linear scale as every flat depth:
+		 * ndc = 2*vz/F - 1 — the ortho Projection negates a_zw.x, so this is
+		 * exactly what the flat path yields for the same vz. World never
+		 * depth-tests itself (ALWAYS painter), so this only makes the depth
+		 * field actors LEQUAL against per-pixel accurate — closing the
+		 * distant grazing gaps flat-average depth leaves. */\
+		"		if (a_extra.w > 0.5) {\n"\
+		"			float dvz = min(a_pgxp.z + u_worldFarBias, u_szMax);\n"\
+		"			b.z = (2.0 * dvz / u_szMax - 1.0) * b.w;\n"\
+		"		}\n"\
 		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
 		"	} else {\n"\
 		"		gl_Position = Projection * vec4(a_position.xy, a_zw.x, 1.0);\n"\
@@ -1075,6 +1092,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform int u_pgxpEnabled;\n"\
 	"	uniform float u_szMax;\n"\
 	"	uniform float u_pgxpFarW;\n"\
+	"	uniform float u_worldFarBias;\n"\
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
@@ -1591,6 +1609,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
+	sh->worldFarBiasLoc = glGetUniformLocation(sh->shader, "u_worldFarBias");
 	sh->pgxpFarWLoc = glGetUniformLocation(sh->shader, "u_pgxpFarW");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
 	sh->untexturedLoc = glGetUniformLocation(sh->shader, "u_untextured");
@@ -1927,6 +1946,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
+		u_worldFarBiasLoc = g_gte_shader_4.worldFarBiasLoc;
 		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
 		u_untexturedLoc = g_gte_shader_4.untexturedLoc;
@@ -1961,6 +1981,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
+		u_worldFarBiasLoc = g_gte_shader_8.worldFarBiasLoc;
 		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
 		u_untexturedLoc = g_gte_shader_8.untexturedLoc;
@@ -1995,6 +2016,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
+		u_worldFarBiasLoc = g_gte_shader_16.worldFarBiasLoc;
 		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
 		u_untexturedLoc = g_gte_shader_16.untexturedLoc;
@@ -2029,6 +2051,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
 		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
+		u_worldFarBiasLoc = g_gte_shader_32_rgba.worldFarBiasLoc;
 		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
 		u_untexturedLoc = g_gte_shader_32_rgba.untexturedLoc;
@@ -2063,6 +2086,8 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	 * vertex's unquantized SZ3 into continuous NDC depth (Z-fight fix). */
 	if (u_szMaxLoc != -1)
 		glUniform1f(u_szMaxLoc, PGXP_GetSzMax());
+	if (u_worldFarBiasLoc != -1)
+		glUniform1f(u_worldFarBiasLoc, (float)g_PsxPgxpWorldFarBias);
 	{
 		extern float g_PgxpFarWClamp;
 		if (u_pgxpFarWLoc != -1)
