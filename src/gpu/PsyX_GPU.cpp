@@ -349,6 +349,10 @@ static int s_dbgSplitHighWater = 0;
  * apply  = ApplyGtePerVertexDepth entries (parse-side call volume)
  * staleR = gen-stale rejects across both readers (lookup + split classify) */
 static unsigned s_dbgArmF = 0, s_dbgCapF = 0, s_dbgApplyCalls = 0, s_dbgStaleRej = 0;
+/* Console PGXPDEPTHSTATS: the depth channel is verified live (2026-07-27 run:
+ * armF~350k/s capF~100k/s hit F==splitWORLD, staleR<400/s, splitHW 794/4096,
+ * szExhaust 0, no shift disagreement) — the dump is now opt-in diagnostics. */
+extern "C" { int g_PsxPgxpDepthStats = 0; }
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
@@ -362,7 +366,8 @@ extern "C" void PGXP_CoverageTick(void)
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
 				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
 				s_pgxpClip, s_pgxpClamp, s_pgxpOversize);
-		if (s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss + s_dbgArmF + s_dbgApplyCalls)
+		if (g_PsxPgxpDepthStats &&
+		    s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss + s_dbgArmF + s_dbgApplyCalls)
 			eprintinfo("[PGXPDEPTH] wiped F=%u E=%u N=%u skips=%u | parse hit=%u(F=%u E=%u N=%u) miss=%u | splitWORLD=%u | splitHW=%d | szExhaust=%u | armF=%u capF=%u apply=%u staleR=%u\n",
 				s_dbgWipeFlat, s_dbgWipeExact, s_dbgWipeNone, s_dbgWipeSkips,
 				s_dbgParseHit, s_dbgParseHitFlat, s_dbgParseHitExact, s_dbgParseHitNone,
