@@ -161,6 +161,14 @@ void RotTransSV(SVECTOR* v0, SVECTOR* v1, long* flag)
 	gte_stflg(flag);
 }
 
+/* PC port: raw per-vertex view-space SZ from the LAST RotTransPers/3/4, captured
+ * here (before the GS TMD drawers' NormalClip/NormalColorCol clobber the SZ FIFO)
+ * so the inventory item pass can feed each face's true unquantized depth into the
+ * GL depth test — the OTZ return (gte_stszotz) is perspective-divided + clamped and
+ * too coarse to separate a radio's antenna face from its body face. Read by
+ * ITEM_PRECISE_SZ in libgs_stub.c, gated on g_PcItemPreciseDepth (inventory only). */
+unsigned short g_PsyX_RtpSz[4] = { 0, 0, 0, 0 };
+
 int RotTransPers(SVECTOR* v0, int* sxy, long* p, long* flag)
 {
 	int sz;
@@ -171,16 +179,19 @@ int RotTransPers(SVECTOR* v0, int* sxy, long* p, long* flag)
 	if (g_PsxUsePgxp)
 		PGXP_StoreAddr(sxy, 2);
 
+	/* Mirror the shifted SZ FIFO: after RTPT(v0..v2) + this RTPS(v3) the
+	 * slots hold v0..v3 in order, which is what the quad path of
+	 * ApplyGtePerVertexDepth expects. Without this the lit-quad drawers fed
+	 * [stale, v0, v1, v2] — v3's depth was never captured. The mirror is only
+	 * read under g_PcItemPreciseDepth at addPrim, so other callers see no
+	 * behavior change. */
+	g_PsyX_RtpSz[0] = (unsigned short)C2_SZ0;
+	g_PsyX_RtpSz[1] = (unsigned short)C2_SZ1;
+	g_PsyX_RtpSz[2] = (unsigned short)C2_SZ2;
+	g_PsyX_RtpSz[3] = (unsigned short)C2_SZ3;
+
 	return sz;
 }
-
-/* PC port: raw per-vertex view-space SZ from the LAST RotTransPers3/4, captured
- * here (before the GS TMD drawers' NormalClip/NormalColorCol clobber the SZ FIFO)
- * so the inventory item pass can feed each face's true unquantized depth into the
- * GL depth test — the OTZ return (gte_stszotz) is perspective-divided + clamped and
- * too coarse to separate a radio's antenna face from its body face. Read by
- * ITEM_PRECISE_SZ in libgs_stub.c, gated on g_PcItemPreciseDepth (inventory only). */
-unsigned short g_PsyX_RtpSz[4] = { 0, 0, 0, 0 };
 
 int RotTransPers3(SVECTOR* v0, SVECTOR* v1, SVECTOR* v2, long* sxy0, long* sxy1, long* sxy2, long* p, long* flag)
 {
