@@ -787,6 +787,7 @@ typedef struct
 	GLint szMaxLoc;
 	GLint pgxpFarWLoc;
 	GLint flashlightOnLoc;
+	GLint untexturedLoc;
 	GLint flStyleLoc;
 	GLint flLightPosLoc;
 	GLint flDirLoc;
@@ -827,6 +828,7 @@ GLint u_pgxpEnabledLoc;
 GLint u_szMaxLoc;
 GLint u_pgxpFarWLoc;
 GLint u_flashlightOnLoc;
+GLint u_untexturedLoc;
 GLint u_flStyleLoc;
 GLint u_flLightPosLoc;
 GLint u_flDirLoc;
@@ -1116,6 +1118,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform int u_fogToBlack;\n"\
 	"	uniform float u_fogStrength;\n"\
 	"	uniform int u_flashlightOn;\n"\
+	"	uniform int u_untextured;\n"\
 	"	uniform int u_flStyle;\n"\
 	"	uniform vec3 u_flLightPos;\n"\
 	"	uniform vec3 u_flDir;\n"\
@@ -1145,6 +1148,15 @@ int g_PsxFogToBlack = 0;
 #define GPU_LIT_TAIL\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
 	"		fragColor *= v_color;\n"\
+	/* Untextured prims sample the white placeholder, so their texture "albedo"
+	 * is 1.0 — the beam would add full-white light onto geometry whose real
+	 * color is the (often dark) vertex color, and stacked additive layers then
+	 * saturate to a white blob (sewer water octagon under PGXP, where the
+	 * perspective-correct v_viewpos also resolves grazing pixels much closer
+	 * to the light). Use the vertex-lit color as the albedo instead — bounded
+	 * by what the surface actually looks like. Textured splits (u_untextured=0)
+	 * are byte-identical. */\
+	"		if (u_untextured > 0) flAlbedo = fragColor.rgb;\n"\
 	/* Two flashlight styles, chosen by the UNIFORM u_flStyle (uniform control flow, so derivative use inside the branch is well-defined). 1 = CLASSIC: PSX-calibrated orientation-independent overlay -- no face normals, func_80057658-derived falloff, eased wide cone, 0.49 base dim. 0 = MODERN: stylized spotlight -- per-fragment Lambert from a dFdx/dFdy-reconstructed face normal, linear falloff, hard 0.15 dark surround. */\
 	"		if (u_flashlightOn > 0) {\n"\
 	"			vec3 flP = v_viewpos;\n"\
@@ -1581,6 +1593,7 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 	sh->szMaxLoc = glGetUniformLocation(sh->shader, "u_szMax");
 	sh->pgxpFarWLoc = glGetUniformLocation(sh->shader, "u_pgxpFarW");
 	sh->flashlightOnLoc = glGetUniformLocation(sh->shader, "u_flashlightOn");
+	sh->untexturedLoc = glGetUniformLocation(sh->shader, "u_untextured");
 	sh->flStyleLoc = glGetUniformLocation(sh->shader, "u_flStyle");
 	sh->flLightPosLoc = glGetUniformLocation(sh->shader, "u_flLightPos");
 	sh->flDirLoc = glGetUniformLocation(sh->shader, "u_flDir");
@@ -1916,6 +1929,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
 		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
+		u_untexturedLoc = g_gte_shader_4.untexturedLoc;
 		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_4.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_4.flDirLoc;
@@ -1949,6 +1963,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
 		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
+		u_untexturedLoc = g_gte_shader_8.untexturedLoc;
 		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_8.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_8.flDirLoc;
@@ -1982,6 +1997,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
 		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
+		u_untexturedLoc = g_gte_shader_16.untexturedLoc;
 		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_16.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_16.flDirLoc;
@@ -2015,6 +2031,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
 		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
 		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
+		u_untexturedLoc = g_gte_shader_32_rgba.untexturedLoc;
 		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
 		u_flLightPosLoc = g_gte_shader_32_rgba.flLightPosLoc;
 		u_flDirLoc = g_gte_shader_32_rgba.flDirLoc;
@@ -2067,6 +2084,12 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 	if (u_flashlightOnLoc != -1)
 		glUniform1i(u_flashlightOnLoc,
 		            (g_PsyX_UsePerPixelFlashlight && g_PsyX_FlashlightActive) ? 1 : 0);
+	/* Untextured splits bind g_whiteTexture; tell the lit tail so the beam's
+	 * albedo falls back to the vertex-lit color instead of full white. Keyed on
+	 * the caller's texture, not g_lastBoundTexture — this block runs before the
+	 * bind early-out, so it stays correct across program switches. */
+	if (u_untexturedLoc != -1)
+		glUniform1i(u_untexturedLoc, texture == g_whiteTexture ? 1 : 0);
 	if (u_flStyleLoc != -1)
 		glUniform1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
 	if (u_flLightPosLoc != -1)
