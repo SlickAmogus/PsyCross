@@ -231,6 +231,19 @@ extern "C" { float g_PgxpNearZ = 16.0f; }
  * pixels, H the projection distance. Per-frame constants in SH1. */
 extern "C" { float g_PgxpGteOfx = 0.0f, g_PgxpGteOfy = 0.0f, g_PgxpGteH = 1.0f; }
 
+/* PSX GPU polygon size rule (PSXSPX): the rasterizer silently rejects any
+ * triangle whose screen bounding box exceeds 1023 (w) x 511 (h). PsyX never had
+ * the rule, so GTE-saturated (+-0x400 box) or guard-band-dropped polys drew as
+ * screen-crossing wedges (elevator doors / spiral staircase) instead of
+ * vanishing for the frame like on hardware. Enforced per-triangle on the
+ * integer/affine path only (PgxpEmitPoly below); never in whole-map far mode,
+ * where distant town geometry saturates to the box by design. Console
+ * `polysizecull` / config `psx_poly_size_cull` is the escape hatch. */
+extern "C" { int g_PsxPolySizeCull = 1; }
+/* Triangles culled by the size rule, reported as oversize= on the [PGXP] cov
+ * line so future user logs self-diagnose the wedge class. */
+static unsigned int s_pgxpOversize = 0;
+
 /* GPU draw resolve (DuckStation GetPreciseVertex): shadow at the prim-field
  * address, validated by exact value. Miss / behind-near-plane (W=0) -> affine
  * (ppw=0). rawX/rawY = the integer in the field; ofsX/ofsY = draw-env offset
@@ -333,16 +346,16 @@ static int s_dbgSplitHighWater = 0;
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
-	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = 0; return; }
+	if (!g_PsxUsePgxp) { s_pgxpDet = s_pgxpMiss = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0; return; }
 	if (++s_pgxpFrames >= 60)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpMiss;
 		if (tot)
-			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u spikeclamp=%u\n",
+			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u spikeclamp=%u oversize=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
 				s_pgxpMiss, 100.0 * (double)s_pgxpMiss / (double)tot,
-				s_pgxpClip, s_pgxpClamp);
+				s_pgxpClip, s_pgxpClamp, s_pgxpOversize);
 		if (s_dbgWipeFlat + s_dbgWipeExact + s_dbgWipeNone + s_dbgParseHit + s_dbgParseMiss)
 			eprintinfo("[PGXPDEPTH] wiped F=%u E=%u N=%u skips=%u | parse hit=%u(F=%u E=%u N=%u) miss=%u | splitWORLD=%u | splitHW=%d | szExhaust=%u\n",
 				s_dbgWipeFlat, s_dbgWipeExact, s_dbgWipeNone, s_dbgWipeSkips,
@@ -353,7 +366,7 @@ extern "C" void PGXP_CoverageTick(void)
 		s_dbgParseHitFlat = s_dbgParseHitExact = s_dbgParseHitNone = 0;
 		s_dbgSplitWorld = s_dbgSzExhaust = 0;
 		s_dbgSplitHighWater = 0;
-		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = s_pgxpClamp = 0;
+		s_pgxpDet = s_pgxpMiss = s_pgxpFrames = s_pgxpClip = s_pgxpClamp = s_pgxpOversize = 0;
 	}
 }
 
@@ -1706,9 +1719,79 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 		}
 	}
 
+	/* Guard-band bound on the clip result, checked while out[] is still local
+	 * (v is unrecoverable after the memcpy). The ortho PGXP shader cancels W
+	 * (NDC pos IS ppx/ppy), so an out-of-band clip vertex would rasterize as a
+	 * screen-crossing wedge, not get clipped homogeneously. Abandon the clip:
+	 * force the whole original poly affine and let PgxpEmitPoly's PSX size rule
+	 * judge the GTE integer coords — net hardware behavior (poly not drawn). */
+	for (int i = 0; i < outCount; i++)
+	{
+		if (out[i].ppx < -g_PgxpEdgeMax || out[i].ppx > g_PgxpEdgeMax ||
+		    out[i].ppy < -g_PgxpEdgeMax || out[i].ppy > g_PgxpEdgeMax)
+		{
+			for (int j = 0; j < count; j++)
+				v[j].ppw = 0.0f;
+			return count;
+		}
+	}
+
 	memcpy(v, out, outCount * sizeof(GrVertex));
 	s_pgxpClip++;
 	return outCount;
+}
+
+/* FIX 1 (PSX polygon size rule — see g_PsxPolySizeCull). Bbox test per
+ * triangle, matching hardware, which processes a 4-point poly as two
+ * independent triangles. x/y are PSX units (ScreenCoordsToEmulator is a no-op);
+ * the shared draw-env offset cancels in the extent. */
+static inline bool PsxTriOversized(const GrVertex* v)
+{
+	int mnx = v[0].x, mxx = v[0].x, mny = v[0].y, mxy = v[0].y;
+	for (int i = 1; i < 3; i++)
+	{
+		if (v[i].x < mnx) mnx = v[i].x;
+		if (v[i].x > mxx) mxx = v[i].x;
+		if (v[i].y < mny) mny = v[i].y;
+		if (v[i].y > mxy) mxy = v[i].y;
+	}
+	return (mxx - mnx) > 1023 || (mxy - mny) > 511;
+}
+
+/* Emit one 3D poly's freshly built triangle list: near-clip when eligible,
+ * then the PSX size rule on whatever stayed affine. Returns the vertex count
+ * g_vertexIndex advances by. The size rule runs ONLY when the whole poly is on
+ * the integer path — every vertex ppw<=0 (PGXP off, or the whole-poly-affine
+ * drop in MakeVertexTriangle/Quad) — never on precise polys, whose integer
+ * coords may be saturated while ppx/ppy are valid, and never in whole-map far
+ * mode (box saturation is the design there, a cull would eat the vista). The
+ * rare mixed-ppw poly (near-clip headroom bail) is left as-is, pre-existing. */
+static int PgxpEmitPoly(GrVertex* v, int count)
+{
+	count = PgxpNearClipEmit(v, count);
+
+	if (!g_PsxPolySizeCull || g_PsxWholeMapFar)
+		return count;
+
+	for (int i = 0; i < count; i++)
+	{
+		if (v[i].ppw > 0.0f)
+			return count;
+	}
+
+	int kept = 0;
+	for (int tri = 0; tri + 2 < count; tri += 3)
+	{
+		if (PsxTriOversized(&v[tri]))
+		{
+			s_pgxpOversize++;
+			continue;
+		}
+		if (kept != tri)
+			memcpy(&v[kept], &v[tri], 3 * sizeof(GrVertex));
+		kept += 3;
+	}
+	return kept;
 }
 
 //------------------------------------------------------------------------------------------------------------------------
@@ -2370,7 +2453,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		MakeTexcoordTriangleZero(firstVertex, 0);
 		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2395,7 +2478,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
 
-			g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
+			g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -2417,7 +2500,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
@@ -2488,7 +2571,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2529,7 +2612,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[1]._p0 = poly->pad1;
 		firstVertex[2]._p0 = poly->pad2;
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2555,7 +2638,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 		firstVertex[1]._p0 = poly->p1;  // v1
 		firstVertex[2]._p0 = poly->p2;  // v2
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 3);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2582,7 +2665,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
@@ -2611,7 +2694,7 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 		TriangulateQuad();
 
-		g_vertexIndex += PgxpNearClipEmit(firstVertex, 6);
+		g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
