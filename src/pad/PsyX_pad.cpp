@@ -51,6 +51,10 @@ int PsyX_Pad_InitSystem()
 	// do not init second time!
 	if (g_sdlKeyboardState != NULL)
 		return 1;
+    
+	// Enable hidapi backend to allow for proper DualSense controller support on Linux
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI", "1");
+    SDL_SetHint("SDL_JOYSTICK_HIDAPI_PS5", "1");
 
 	memset(g_controllers, 0, sizeof(g_controllers));
 
