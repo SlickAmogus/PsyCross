@@ -2514,6 +2514,12 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
  * never disagree. */
 static int g_presentVp[4] = { 0, 0, 0, 0 };
 
+/* Window rect (GL coords, x0/y0/x1/y1, origin bottom-left) that the PSX display
+ * buffer occupies under the world ortho. Set alongside g_presentVp; this is what
+ * the framebuffer-feedback capture reads, so capture and redraw are 1:1. */
+static float g_psxAreaVp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static int   g_psxAreaVpValid = 0;
+
 void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 {
 	if (enable)
@@ -2524,6 +2530,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 	else
 	{
 		// setup default viewport
+
+		/* The ortho actually installed below, kept in this scope so the viewport
+		 * block can work out where the PSX display buffer lands in the window
+		 * (g_psxAreaVp — the framebuffer-feedback capture source). */
+		float fbOrthoL = 0.0f, fbOrthoR = 0.0f, fbOrthoT = 0.0f, fbOrthoB = 0.0f;
+		float fbPsxW = 0.0f, fbPsxH = 0.0f;
 
 		{
 			// Widescreen presentation. Three modes (g_PcWidescreenMode):
@@ -2567,6 +2579,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
 			const float horScale = winAspect / psxAspect;
+			fbPsxW   = psxW;
+			fbPsxH   = (float)activeDispEnv.disp.h;
+			fbOrthoT = orthoTop;
+			fbOrthoB = orthoBot;
+			fbOrthoL = 0.0f;
+			fbOrthoR = psxW;
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
 				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
@@ -2581,6 +2599,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				const float hscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldHScale;
 				const float cx     = psxW * 0.5f;
 				const float halfW  = (psxW * 0.5f + margin) / hscale;
+				fbOrthoL = cx - halfW;
+				fbOrthoR = cx + halfW;
 				GR_Ortho2D(cx - halfW, cx + halfW, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
@@ -2654,9 +2674,30 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			}
 			GR_SetViewPort(vpX, vpY, vpW, vpH);
 
-			/* Source rect for the framebuffer-feedback capture. */
+			/* Presented sub-rect of the window (pillarbox bars excluded). */
 			g_presentVp[0] = vpX; g_presentVp[1] = vpY;
 			g_presentVp[2] = vpW; g_presentVp[3] = vpH;
+
+			/* Where the PSX display buffer [0,dispW]x[0,dispH] actually lands in
+			 * the window under THIS ortho — the source rect the feedback capture
+			 * must read. It is NOT the viewport: Hor+ widens the ortho past the
+			 * buffer (the 4:3 core covers only 1/effectiveScale of the window) and
+			 * g_PsxWorldVScale crops it vertically, so capturing the viewport
+			 * rescales the picture every frame. The blur redraws the captured rect
+			 * over exactly these PSX coordinates, so any mismatch compounds — see
+			 * GR_StoreFrameBufferPsx. Recorded from the WORLD pass only, because
+			 * that is the ortho the blur's OT0 prims are drawn under.
+			 * GL window coords, origin bottom-left: ortho y=orthoTop is the TOP. */
+			if (!g_PsxUIOrthoPass && fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
+			{
+				const float sx = (float)vpW / (fbOrthoR - fbOrthoL);
+				const float sy = (float)vpH / (fbOrthoB - fbOrthoT);
+				g_psxAreaVp[0] = (float)vpX + (0.0f    - fbOrthoL) * sx;
+				g_psxAreaVp[2] = (float)vpX + (fbPsxW  - fbOrthoL) * sx;
+				g_psxAreaVp[3] = (float)(vpY + vpH) - (0.0f   - fbOrthoT) * sy;
+				g_psxAreaVp[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
+				g_psxAreaVpValid = 1;
+			}
 		}
 
 	}
@@ -3542,19 +3583,25 @@ static const char* s_fbPackShaderSrc =
 	"}\n"
 	"#else\n"
 	"uniform sampler2D s_texture;\n"
-	/* Feedback damping. The game redraws the sampled buffer at 128/128 (identity)
-	 * or 127/128, so with a buffer that is never cleared the store feeds on its
-	 * own output: stored = 0.992*stored + frame, which settles at ~122x one
-	 * frame — an overexposed pile of ghosts smearing sideways. On PSX the draw
-	 * buffer is CLEARED every frame (isbg=1, set by GsDefDispBuff2), so the blur
-	 * composites exactly ONE previous frame: the subtle ghost on fast-moving
-	 * extremities (head/hands/feet) and nothing more.
+	/* Feedback gain. The game's blur SPRT is OPAQUE (code 0x64, no semi-trans bit)
+	 * and modulates at 128/128 = identity, or 127/128 on the odd frame, so on PSX
+	 * the loop is stored' = ~0.992*stored with new geometry overwriting on top:
+	 * the last frame FREEZES on screen through a door load and Harry's running
+	 * pose leaves a slow-decaying trail. Identity here reproduces that exactly.
 	 *
-	 * We have no VRAM double-buffer to clear, so damp the loop to the same
-	 * steady state instead: stored = k*(0.992*stored + frame) settles at
-	 * k/(1 - 0.992k), and k = 0.5 gives ~1.0x — i.e. one frame's worth of ghost,
-	 * matching hardware. Lower this if the trail still reads too strong. */
-	"	const float c_FeedbackDamp = 0.5;\n"
+	 * This used to be 0.5 to kill "an overexposed pile of ghosts smearing
+	 * sideways". That pile was not a gain problem — it was the capture reading a
+	 * different rect than the game redraws (see GR_StoreFrameBufferPsx), so each
+	 * generation rescaled and piled onto itself. With the capture rect fixed the
+	 * loop is stable at identity, and 0.5 would be wrong twice over: it fades a
+	 * frame PSX holds, and each halving re-quantizes to 5 bits at an ever lower
+	 * level, which is what turned the ghost into saturated colour blotches.
+	 *
+	 * 255/256 rather than 1.0 because our texture modulation is (mod/255)*2 while
+	 * PSX is mod/128 — a constant 256/255 too much, at both 128/128 and 127/128.
+	 * Cancelling it here makes the loop gain exactly PSX's (1.0 and 0.9921875),
+	 * so a held frame neither fades nor slowly blooms over a long load. */
+	"	const float c_FeedbackDamp = 255.0 / 256.0;\n"
 	"void main() {\n"
 	"	vec3 c = texture2D(s_texture, v_uv).rgb * c_FeedbackDamp;\n"
 	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
@@ -3758,24 +3805,73 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	}
 #endif
 
-	/* Unflipped downscale of the PRESENTED VIEWPORT into the 320x224 capture;
-	 * the pack shader does the one flip needed to land screen-top on the rect's
-	 * first VRAM row. Reading the whole window instead would include the
-	 * pillarbox bars and rescale the picture every frame — and this effect feeds
-	 * on its own output, so that scale compounds into a collapsing image.
-	 * LINEAR because this is a large downsample feeding a blur. */
+	/* Unflipped downscale of the window rect the PSX DISPLAY BUFFER occupies into
+	 * the 320x224 capture; the pack shader does the one flip needed to land
+	 * screen-top on the rect's first VRAM row. LINEAR because this is a large
+	 * downsample feeding a blur.
+	 *
+	 * The source MUST be g_psxAreaVp, not the viewport. The game redraws this
+	 * capture over PSX coordinates (0,0)-(dispW,dispH), so whatever window rect
+	 * those coordinates cover is the only rect that reads back 1:1. The viewport
+	 * is a different rect in two ways: Hor+ widens the ortho so the 4:3 core is
+	 * 1/effectiveScale of the window (0.75 at 16:9), and g_PsxWorldVScale crops
+	 * the world ortho to 0.872 of the buffer. Capturing the viewport therefore
+	 * shrank the picture 0.75x horizontally and stretched it 1.147x vertically
+	 * EVERY frame, and because the effect feeds on its own output that compounds:
+	 * within a few frames the last gameplay frame collapsed into a narrow,
+	 * repeatedly 5-bit-requantized smear — saturated vertical streaks for a
+	 * fraction of a second at every room transition (the only time this store is
+	 * armed). Rows the ortho crops are left black: the frame simply has no pixels
+	 * there, and leaving them black keeps the redraw scale-exact. */
 	{
-		int sx = g_presentVp[0], sy = g_presentVp[1];
-		int sw = g_presentVp[2], sh = g_presentVp[3];
-		if (sw <= 0 || sh <= 0) { sx = 0; sy = 0; sw = g_windowWidth; sh = g_windowHeight; }
+		float ax0 = g_psxAreaVp[0], ay0 = g_psxAreaVp[1];
+		float ax1 = g_psxAreaVp[2], ay1 = g_psxAreaVp[3];
+		int vx = g_presentVp[0], vy = g_presentVp[1];
+		int vw = g_presentVp[2], vh = g_presentVp[3];
+		float sx0, sy0, sx1, sy1;
+		int dx0, dy0, dx1, dy1;
 
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbPackFBO);
-		glBlitFramebuffer(sx, sy, sx + sw, sy + sh, 0, 0, w, h,
-			GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		if (vw <= 0 || vh <= 0) { vx = 0; vy = 0; vw = g_windowWidth; vh = g_windowHeight; }
+		if (!g_psxAreaVpValid || ax1 <= ax0 || ay1 <= ay0)
+		{
+			ax0 = (float)vx; ay0 = (float)vy;
+			ax1 = (float)(vx + vw); ay1 = (float)(vy + vh);
+		}
+
+		/* Clip to what was actually rendered. */
+		sx0 = ax0 < (float)vx ? (float)vx : ax0;
+		sy0 = ay0 < (float)vy ? (float)vy : ay0;
+		sx1 = ax1 > (float)(vx + vw) ? (float)(vx + vw) : ax1;
+		sy1 = ay1 > (float)(vy + vh) ? (float)(vy + vh) : ay1;
+
+		/* The matching sub-rect of the capture, so the clip does not rescale. */
+		dx0 = (int)((sx0 - ax0) / (ax1 - ax0) * (float)w + 0.5f);
+		dx1 = (int)((sx1 - ax0) / (ax1 - ax0) * (float)w + 0.5f);
+		dy0 = (int)((sy0 - ay0) / (ay1 - ay0) * (float)h + 0.5f);
+		dy1 = (int)((sy1 - ay0) / (ay1 - ay0) * (float)h + 0.5f);
+
+		{
+			GLfloat cc[4];
+			glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_fbPackFBO);
+			glDisable(GL_SCISSOR_TEST);
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			glClearColor(cc[0], cc[1], cc[2], cc[3]);
+		}
+
+		if (sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0)
+		{
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
+			glBlitFramebuffer((int)(sx0 + 0.5f), (int)(sy0 + 0.5f),
+			                  (int)(sx1 + 0.5f), (int)(sy1 + 0.5f),
+			                  dx0, dy0, dx1, dy1,
+			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		}
 	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
 
