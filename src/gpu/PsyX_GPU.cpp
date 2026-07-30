@@ -977,7 +977,7 @@ static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* 
 // into the wrong OT depth relationship.  Uniform depth per polygon (all vertices
 // share one value) eliminates the per-vertex interpolation that caused diffuse
 // Z-fighting along polygon edges.
-static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
+static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
 {
 	/* Depth channel (PGXP on, outside the inventory item pass): flat per-prim
 	 * depth on the shared constant linear scale — no prev-frame normalizer
@@ -1089,6 +1089,371 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	if (z_val >  1.0f) z_val =  1.0f;
 	vertex[0].z = vertex[1].z = vertex[2].z = z_val;
 	if (isQuad) vertex[3].z = z_val;
+}
+
+/* =====================================================================
+ * [ITEMDEPTH] one-shot item-model depth probe   (config item_depth_probe)
+ * ---------------------------------------------------------------------
+ * DIAGNOSTIC ONLY — every function below READS state; none writes any
+ * rendering state, so with the flag off (default) the build is unchanged
+ * and with it on the rendered image is identical.
+ *
+ * It joins the two halves of the item pipeline by packet address:
+ *   SORT side  (libgs_stub.c GsTMDfast* drawers, via ITEM_PROBE_SORT):
+ *              per-vertex GTE SZ, the IR0 depth cue `p`, the chosen OT
+ *              bucket, the OT's length and the drawer's shift.
+ *   DRAW side  (this file's OT parse, via the ApplyGtePerVertexDepth
+ *              wrapper): the bucket seed the prim arrived with, the SZ
+ *              table `kind`, whether the EXACT per-vertex branch actually
+ *              rewrote z, the final NDC z per vertex, and the raster
+ *              sequence number.
+ * Plus the REAL glGet* depth state sampled inside DrawSplit immediately
+ * before the item's own glDrawArrays — not a tracker variable.
+ *
+ * Armed once per item-screen ENTRY (pickup take-screen / inventory /
+ * puzzle) so a live repro costs one dump, not one per frame.
+ * ===================================================================== */
+extern "C" { int g_PsyX_ItemDepthProbe = 0; }
+
+extern int g_vertexIndex; /* defined further down this file */
+
+#define ITEMPROBE_MAX_PRIMS  640
+#define ITEMPROBE_MAX_MODELS 16
+#define ITEMPROBE_MAX_GL     8
+
+struct ItemProbeRec
+{
+	const void*   prim;     /* packet address — the join key */
+	unsigned      sz[4];    /* per-vertex GTE SZ handed over by ITEM_PRECISE_SZ */
+	long          ir0;      /* gte_stdp `p`: the perspective CUE the bucket uses */
+	int           otz;      /* bucket the drawer picked */
+	int           seq;      /* raster order (OT parse order); -1 = never parsed */
+	short         otLen;    /* log2(bucket count) of the OT it went into */
+	short         shift;    /* drawer shift: otz = ir0 >> shift */
+	short         model;    /* model-draw ordinal inside this entry */
+	short         primIdx;  /* submission index inside that model */
+	unsigned char code;     /* P_TAG code seen at draw time */
+	signed char   nv;       /* 3 or 4; -1 = never reached the draw parse */
+	signed char   kind;     /* SZ_KIND_* at draw time; -1 = SZ-table lookup MISS */
+	signed char   fired;    /* 1 = the per-vertex branch actually rewrote z */
+	float         zSeed;    /* g_otBucketDepth the prim arrived with */
+	float         zOut[4];  /* NDC z the vertices ended up with */
+};
+
+struct ItemProbeGl
+{
+	int   split, blend, numVerts, dfe;
+	int   depthTest, depthFunc, depthMask, depthBits, fbo, cullFace;
+	int   trackerDepthMode, forceItemDepth;
+	float rangeNear, rangeFar;
+};
+
+static ItemProbeRec s_ipRec[ITEMPROBE_MAX_PRIMS];
+static ItemProbeGl  s_ipGl[ITEMPROBE_MAX_GL];
+static int s_ipModelSlot[ITEMPROBE_MAX_MODELS];
+static int s_ipModelArg2[ITEMPROBE_MAX_MODELS];
+static int s_ipModelPrims[ITEMPROBE_MAX_MODELS];
+static int s_ipCount    = 0;   /* records used */
+static int s_ipDropped  = 0;   /* sort-side prims that didn't fit */
+static int s_ipModels   = 0;   /* model draws seen this entry */
+static int s_ipScreen   = 0;   /* 1=TAKE 2=INV 3=PUZZLE */
+static int s_ipArmed    = 0;   /* collecting right now */
+static int s_ipCaptured = 0;   /* this entry already dumped */
+static int s_ipSawModel = 0;   /* a model was sorted this frame */
+static int s_ipSeq      = 0;   /* raster counter (counts foreign prims too) */
+static int s_ipForeign  = 0;   /* parsed prims with no sort record */
+static int s_ipVertLo   = 0x7FFFFFFF;
+static int s_ipVertHi   = -1;
+static int s_ipGlCount  = 0;
+
+/* Called from the game (item_screens_cam.c func_8004BD74) just before the
+ * GsSortObject4J that emits one item model. screen: 1=TAKE 2=INV 3=PUZZLE. */
+extern "C" void PsyX_ItemProbeModelBegin(int screen, int slot, int arg2)
+{
+	if (!g_PsyX_ItemDepthProbe || screen == 0)
+		return;
+
+	if (!s_ipSawModel)
+	{
+		/* First model of this frame. A new ENTRY is either "the screen was
+		 * absent last frame" (s_ipCaptured cleared by EndFrame) or "a
+		 * different item screen than the one already captured". */
+		if (!s_ipCaptured || screen != s_ipScreen)
+		{
+			s_ipCount = s_ipDropped = s_ipModels = 0;
+			s_ipSeq = s_ipForeign = s_ipGlCount = 0;
+			s_ipVertLo = 0x7FFFFFFF;
+			s_ipVertHi = -1;
+			s_ipScreen = screen;
+			s_ipArmed  = 1;
+		}
+		s_ipSawModel = 1;
+	}
+
+	if (!s_ipArmed)
+		return;
+
+	if (s_ipModels < ITEMPROBE_MAX_MODELS)
+	{
+		s_ipModelSlot[s_ipModels]  = slot;
+		s_ipModelArg2[s_ipModels]  = arg2;
+		s_ipModelPrims[s_ipModels] = 0;
+	}
+	s_ipModels++;
+}
+
+/* Called from every GsTMDfast* drawer at addPrim time (ITEM_PROBE_SORT). */
+extern "C" void PsyX_ItemProbeSortPrim(const void* prim, unsigned s0, unsigned s1,
+                                       unsigned s2, unsigned s3, long ir0,
+                                       int otz, int otLen, int shift)
+{
+	if (!s_ipArmed)
+		return;
+
+	int m = s_ipModels - 1;
+	if (m < 0) m = 0;
+	if (m >= ITEMPROBE_MAX_MODELS) m = ITEMPROBE_MAX_MODELS - 1;
+	s_ipModelPrims[m]++;
+
+	if (s_ipCount >= ITEMPROBE_MAX_PRIMS)
+	{
+		s_ipDropped++;
+		return;
+	}
+
+	ItemProbeRec& r = s_ipRec[s_ipCount++];
+	r.prim  = prim;
+	r.sz[0] = s0; r.sz[1] = s1; r.sz[2] = s2; r.sz[3] = s3;
+	r.ir0   = ir0;
+	r.otz   = otz;
+	r.otLen = (short)otLen;
+	r.shift = (short)shift;
+	r.model = (short)m;
+	r.primIdx = (short)(s_ipModelPrims[m] - 1);
+	r.seq   = -1;
+	r.code  = 0;
+	r.nv    = -1;
+	r.kind  = -1;
+	r.fired = 0;
+	r.zSeed = 0.0f;
+	r.zOut[0] = r.zOut[1] = r.zOut[2] = r.zOut[3] = 0.0f;
+}
+
+static void ItemProbe_RecordDraw(const GrVertex* vertex, const P_TAG* polyTag,
+                                 bool isQuad, float zBefore)
+{
+	const int seq = s_ipSeq++;
+	const int n   = isQuad ? 4 : 3;
+
+	ItemProbeRec* r = nullptr;
+	for (int i = 0; i < s_ipCount; i++)
+	{
+		if (s_ipRec[i].prim == (const void*)polyTag) { r = &s_ipRec[i]; break; }
+	}
+	if (!r)
+	{
+		s_ipForeign++;
+		return;
+	}
+
+	r->seq   = seq;
+	r->nv    = (signed char)n;
+	r->code  = polyTag->code;
+	r->zSeed = zBefore;
+	for (int i = 0; i < n; i++)
+		r->zOut[i] = vertex[i].z;
+
+	uint32_t sz[4];
+	unsigned char kind = SZ_KIND_NONE;
+	r->kind  = PsyX_LookupGteDepths(polyTag, sz, &kind) ? (signed char)kind : (signed char)-1;
+	r->fired = (r->zOut[0] != zBefore) ? 1 : 0;
+
+	/* Vertex window this prim occupies, so DrawSplit knows which splits
+	 * actually rasterize probed geometry. */
+	if (g_vertexIndex < s_ipVertLo) s_ipVertLo = g_vertexIndex;
+	if (g_vertexIndex + 6 > s_ipVertHi) s_ipVertHi = g_vertexIndex + 6;
+}
+
+/* GL state sampler lives in PsyX_render.cpp (this TU has no GL headers). */
+extern "C" void PsyX_ItemProbe_ReadGlDepthState(int* depthTest, int* depthFunc, int* depthMask,
+                                                int* depthBits, float* rangeNear, float* rangeFar,
+                                                int* fbo, int* cullFace, int* trackerDepthMode);
+
+static void ItemProbe_RecordSplitGl(int splitIdx, int blend, int numVerts, int dfe)
+{
+	if (s_ipGlCount >= ITEMPROBE_MAX_GL)
+		return;
+	ItemProbeGl& g = s_ipGl[s_ipGlCount++];
+	g.split = splitIdx; g.blend = blend; g.numVerts = numVerts; g.dfe = dfe;
+	g.forceItemDepth = g_PsyX_ForceItemDepth;
+	PsyX_ItemProbe_ReadGlDepthState(&g.depthTest, &g.depthFunc, &g.depthMask, &g.depthBits,
+	                                &g.rangeNear, &g.rangeFar, &g.fbo, &g.cullFace,
+	                                &g.trackerDepthMode);
+}
+
+static const char* ItemProbe_KindName(int k)
+{
+	switch (k)
+	{
+		case -1:             return "MISS";
+		case SZ_KIND_NONE:   return "NONE";
+		case SZ_KIND_FLAT:   return "FLAT";
+		case SZ_KIND_EXACT:  return "EXCT";
+		default:             return "????";
+	}
+}
+
+static const char* ItemProbe_FuncName(int f)
+{
+	switch (f)
+	{
+		case 0x0200: return "NEVER";
+		case 0x0201: return "LESS";
+		case 0x0202: return "EQUAL";
+		case 0x0203: return "LEQUAL";
+		case 0x0204: return "GREATER";
+		case 0x0205: return "NOTEQUAL";
+		case 0x0206: return "GEQUAL";
+		case 0x0207: return "ALWAYS";
+		default:     return "?";
+	}
+}
+
+static void ItemProbe_Dump(void)
+{
+	const char* scr = (s_ipScreen == 1) ? "TAKE"
+	                : (s_ipScreen == 2) ? "INV"
+	                : (s_ipScreen == 3) ? "PUZZLE" : "?";
+
+	/* Window depth uses the queried glDepthRange; the renderer's ortho has
+	 * znear=-1/zfar=+1, so clip.z = -vertex.z and win = n + (1-z)/2*(f-n).
+	 * Higher win = FARTHER. */
+	float rn = 0.0f, rf = 1.0f;
+	if (s_ipGlCount > 0) { rn = s_ipGl[0].rangeNear; rf = s_ipGl[0].rangeFar; }
+
+	int parsed = 0, fired = 0, miss = 0;
+	int kNone = 0, kFlat = 0, kExact = 0;
+	float zMinAll = 1e30f, zMaxAll = -1e30f;
+	float seedMin = 1e30f, seedMax = -1e30f;
+	for (int i = 0; i < s_ipCount; i++)
+	{
+		const ItemProbeRec& r = s_ipRec[i];
+		if (r.seq < 0) continue;
+		parsed++;
+		if (r.fired) fired++;
+		if (r.kind < 0) miss++;
+		else if (r.kind == SZ_KIND_NONE)  kNone++;
+		else if (r.kind == SZ_KIND_FLAT)  kFlat++;
+		else if (r.kind == SZ_KIND_EXACT) kExact++;
+		if (r.zSeed < seedMin) seedMin = r.zSeed;
+		if (r.zSeed > seedMax) seedMax = r.zSeed;
+		for (int v = 0; v < r.nv; v++)
+		{
+			if (r.zOut[v] < zMinAll) zMinAll = r.zOut[v];
+			if (r.zOut[v] > zMaxAll) zMaxAll = r.zOut[v];
+		}
+	}
+	if (parsed == 0) { zMinAll = zMaxAll = seedMin = seedMax = 0.0f; }
+
+	eprintinfo("[ITEMDEPTH] ================ ENTRY screen=%s models=%d prims=%d parsed=%d dropped=%d foreignPrims=%d\n",
+		scr, s_ipModels, s_ipCount, parsed, s_ipDropped, s_ipForeign);
+	eprintinfo("[ITEMDEPTH] env: pgxp=%d pgxpZBuffer=%d szMaxPrevFrame=%u otBucketsDrawn=%d otViewZShift=%d worldDepth=%d\n",
+		g_PsxUsePgxp, g_cfg_pgxpZBuffer, (unsigned)g_szMaxPrevFrame,
+		g_currentOTBucketCount, s_otViewZShift, g_PsxPgxpWorldDepth);
+
+	for (int g = 0; g < s_ipGlCount; g++)
+	{
+		const ItemProbeGl& q = s_ipGl[g];
+		eprintinfo("[ITEMDEPTH] GL@draw split=%d verts=%d blend=%d dfe=%d | depthTest=%d func=%s mask=%d bits=%d range=[%.4f,%.4f] fbo=%d cullFace=%d | tracker(g_PreviousDepthMode)=%d forceItemDepth=%d\n",
+			q.split, q.numVerts, q.blend, q.dfe,
+			q.depthTest, ItemProbe_FuncName(q.depthFunc), q.depthMask, q.depthBits,
+			q.rangeNear, q.rangeFar, q.fbo, q.cullFace,
+			q.trackerDepthMode, q.forceItemDepth);
+	}
+	if (s_ipGlCount == 0)
+		eprintinfo("[ITEMDEPTH] GL@draw NONE - no split rasterized a probed primitive\n");
+
+	const int nModels = (s_ipModels < ITEMPROBE_MAX_MODELS) ? s_ipModels : ITEMPROBE_MAX_MODELS;
+	for (int m = 0; m < nModels; m++)
+	{
+		eprintinfo("[ITEMDEPTH] MODEL m=%d slot=%d arg2=%d primsSorted=%d\n",
+			m, s_ipModelSlot[m], s_ipModelArg2[m], s_ipModelPrims[m]);
+	}
+
+	eprintinfo("[ITEMDEPTH] hdr  m  idx code nv    sz0    sz1    sz2    sz3      ir0    otz otL sh   seq kind fire     zSeed      zMin      zMax    winMin    winMax\n");
+	for (int i = 0; i < s_ipCount; i++)
+	{
+		const ItemProbeRec& r = s_ipRec[i];
+		float zmin = 0.0f, zmax = 0.0f, wmin = 0.0f, wmax = 0.0f;
+		if (r.seq >= 0)
+		{
+			zmin = zmax = r.zOut[0];
+			for (int v = 1; v < r.nv; v++)
+			{
+				if (r.zOut[v] < zmin) zmin = r.zOut[v];
+				if (r.zOut[v] > zmax) zmax = r.zOut[v];
+			}
+			/* win is monotone DECREASING in z, so max z -> min win. */
+			wmin = rn + (1.0f - zmax) * 0.5f * (rf - rn);
+			wmax = rn + (1.0f - zmin) * 0.5f * (rf - rn);
+		}
+		eprintinfo("[ITEMDEPTH] row %2d %4d 0x%02X %2d %6u %6u %6u %6u %8ld %6d %3d %2d %5d %4s   %c %9.5f %9.5f %9.5f %9.6f %9.6f\n",
+			(int)r.model, (int)r.primIdx, (unsigned)r.code, (int)r.nv,
+			r.sz[0], r.sz[1], r.sz[2], r.sz[3],
+			r.ir0, r.otz, (int)r.otLen, (int)r.shift,
+			r.seq, ItemProbe_KindName(r.kind), r.fired ? 'Y' : 'N',
+			r.zSeed, zmin, zmax, wmin, wmax);
+	}
+
+	eprintinfo("[ITEMDEPTH] SUM screen=%s parsed=%d fired=%d bucketFallback=%d lookupMiss=%d kindNONE=%d kindFLAT=%d kindEXACT=%d\n",
+		scr, parsed, fired, parsed - fired, miss, kNone, kFlat, kExact);
+	eprintinfo("[ITEMDEPTH] SUM zSeed=[%.5f..%.5f] zOut=[%.5f..%.5f] win=[%.6f..%.6f] (higher win = FARTHER)\n",
+		seedMin, seedMax, zMinAll, zMaxAll,
+		rn + (1.0f - zMaxAll) * 0.5f * (rf - rn),
+		rn + (1.0f - zMinAll) * 0.5f * (rf - rn));
+	eprintinfo("[ITEMDEPTH] ================ END screen=%s\n", scr);
+}
+
+/* Called unconditionally from game_main.c right after the OT0 GsDrawOt +
+ * force-item-depth bracket. Dumps an armed capture and re-arms when the
+ * item screen has been left. */
+extern "C" void PsyX_ItemProbeEndFrame(void)
+{
+	if (!g_PsyX_ItemDepthProbe)
+		return;
+
+	if (s_ipArmed)
+	{
+		/* An entry's first frame(s) can announce a model before its TMD is
+		 * linked, sorting nothing. Spending the one-shot on an empty dump would
+		 * lose the real capture, so only a frame that actually sorted primitives
+		 * consumes it; otherwise ModelBegin restarts the capture next frame. */
+		if (s_ipCount > 0)
+		{
+			ItemProbe_Dump();
+			s_ipArmed = 0;
+			s_ipCaptured = 1;
+		}
+	}
+	if (!s_ipSawModel)
+	{
+		s_ipCaptured = 0;   /* screen gone — the next entry re-arms */
+		s_ipArmed = 0;
+	}
+	s_ipSawModel = 0;
+}
+
+/* Probe wrapper. With the flag off this is a straight tail call. */
+static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool isQuad)
+{
+	if (!g_PsyX_ItemDepthProbe || !s_ipArmed)
+	{
+		ApplyGtePerVertexDepthImpl(vertex, polyTag, isQuad);
+		return;
+	}
+	const float zBefore = vertex[0].z; /* == g_otBucketDepth, just written by MakeVertex* */
+	ApplyGtePerVertexDepthImpl(vertex, polyTag, isQuad);
+	ItemProbe_RecordDraw(vertex, polyTag, isQuad, zBefore);
 }
 
 struct GPUDrawSplit
@@ -2095,6 +2460,17 @@ void DrawSplit(const GPUDrawSplit& split)
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
 		GR_EnableDepth(1);
+
+	/* [ITEMDEPTH] sample the REAL GL depth state for the splits that actually
+	 * rasterize probed item primitives — after all state setup, immediately
+	 * before the draw call, so a tracker-vs-driver desync shows up here. */
+	if (g_PsyX_ItemDepthProbe && s_ipArmed && split.numVerts > 0 &&
+	    (int)split.startVertex < s_ipVertHi &&
+	    (int)(split.startVertex + split.numVerts) > s_ipVertLo)
+	{
+		ItemProbe_RecordSplitGl((int)(&split - (const GPUDrawSplit*)g_splits), (int)split.blendMode,
+		                        (int)split.numVerts, (int)split.drawenv.dfe);
+	}
 
 	GR_DrawTriangles(split.startVertex, split.numVerts / 3);
 

@@ -3089,14 +3089,19 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 
 	glEnable(GL_STENCIL_TEST);
 
-	/* The actual GL state now matches: blend off, depth off, scissor off.
-	 * Sync the trackers to that so the next set-call doesn't skip a needed
-	 * change; force the shader/texture trackers to rebind. */
+	/* Sentinels, NOT the real state. Recording the truth (BM_NONE/0) is what
+	 * strands depth off: GR_EnableDepth is reachable only from inside
+	 * GR_SetBlendMode's body, and that early-returns on an unchanged mode, so a
+	 * following opaque draw matches BM_NONE, skips the body, and never re-applies
+	 * the depth test this function just disabled. Cost the take-screen item its
+	 * depth test entirely (antenna through the radio body), because the take
+	 * screen composites over the frozen scene through this path while the
+	 * inventory does not. Same reasoning as GR_ShadowPassEnd. */
 	g_PreviousShader      = (ShaderID)-1;
 	g_lastBoundTexture    = (TextureID)-1;
-	g_PreviousBlendMode   = BM_NONE;
-	g_PreviousDepthMode   = 0;
-	g_PreviousScissorState = 0;
+	g_PreviousBlendMode   = -999;
+	g_PreviousDepthMode   = -999;
+	g_PreviousScissorState = -999;
 }
 
 /* PC port: post-process the composed backbuffer in place. Resolves the (possibly
@@ -3597,11 +3602,19 @@ static const char* s_fbPackShaderSrc =
 	 * frame PSX holds, and each halving re-quantizes to 5 bits at an ever lower
 	 * level, which is what turned the ghost into saturated colour blotches.
 	 *
-	 * 255/256 rather than 1.0 because our texture modulation is (mod/255)*2 while
-	 * PSX is mod/128 — a constant 256/255 too much, at both 128/128 and 127/128.
-	 * Cancelling it here makes the loop gain exactly PSX's (1.0 and 0.9921875),
-	 * so a held frame neither fades nor slowly blooms over a long load. */
-	"	const float c_FeedbackDamp = 255.0 / 256.0;\n"
+	 * Identity gain was tried (255/256, cancelling our (mod/255)*2 modulation
+	 * against PSX's mod/128) and is WRONG here, because the two problems were
+	 * independent: PSX can run at identity only because GsDefDispBuff2 CLEARS its
+	 * draw buffer every frame (isbg=1), so "stored" is replaced. We have no VRAM
+	 * double-buffer to clear, so stored accumulates and a unity loop diverges —
+	 * it converged to a flat mid-grey field over the 4:3 core for a whole door
+	 * load. Fixing the capture rect removed the rescale, not the accumulation.
+	 *
+	 * So keep damping the loop to the same steady state hardware reaches:
+	 * stored = k*(0.992*stored + frame) settles at k/(1 - 0.992k), and k = 0.5
+	 * gives ~1.0x — one frame's worth of ghost. Lower this if the trail reads too
+	 * strong; do NOT raise it toward 1.0 without first clearing the destination. */
+	"	const float c_FeedbackDamp = 0.5;\n"
 	"void main() {\n"
 	"	vec3 c = texture2D(s_texture, v_uv).rgb * c_FeedbackDamp;\n"
 	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
@@ -3682,13 +3695,13 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
 
-	/* Actual GL state now: blend off, depth off, scissor off. Sync the trackers
-	 * and force shader/texture rebind, exactly as GR_DrawFullscreenTexture does. */
+	/* Sentinels, not the real state — see GR_DrawFullscreenTexture: recording the
+	 * truth lets GR_SetBlendMode early-return and strand depth off. */
 	g_PreviousShader       = (ShaderID)-1;
 	g_lastBoundTexture     = (TextureID)-1;
-	g_PreviousBlendMode    = BM_NONE;
-	g_PreviousDepthMode    = 0;
-	g_PreviousScissorState = 0;
+	g_PreviousBlendMode    = -999;
+	g_PreviousDepthMode    = -999;
+	g_PreviousScissorState = -999;
 #endif
 }
 
@@ -3738,9 +3751,10 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-	g_PreviousBlendMode    = BM_NONE;
-	g_PreviousDepthMode    = 0;
-	g_PreviousScissorState = 0;
+	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
+	g_PreviousBlendMode    = -999;
+	g_PreviousDepthMode    = -999;
+	g_PreviousScissorState = -999;
 #endif
 }
 
@@ -4211,8 +4225,8 @@ void GR_SwapWindow()
  * PsyX_ForceItemDepthBegin). When set, depth stays on even for the item's
  * semi-transparent faces (GR_SetBlendMode would otherwise GR_EnableDepth(0)),
  * so the model's own front faces occlude its back faces (radio antenna through
- * the body). Scoped by game code to GameState_InventoryScreen, where OT0 holds
- * the item alone — never the live world. */
+ * the body). Scoped by game code to the inventory screen and the pickup take
+ * screen, where OT0 holds the item alone — never the live world. */
 int g_PsyX_ForceItemDepth = 0;
 
 void GR_EnableDepth(int enable)
@@ -4248,6 +4262,58 @@ void GR_SetDepthFuncAlways(int enable)
 #if USE_OPENGL
 	glDepthFunc(enable ? GL_ALWAYS : GL_LEQUAL);
 #endif
+}
+
+/* [ITEMDEPTH] probe support: report the driver's ACTUAL depth state, not the
+ * renderer's cached trackers. g_PreviousDepthMode is handed back alongside so a
+ * tracker-vs-driver desync is visible in one line. Read-only — no glEnable /
+ * glDepthFunc / glDepthMask here, and the GL error queue is drained so a driver
+ * that rejects the attachment query cannot leak an error into the next draw. */
+extern "C" void PsyX_ItemProbe_ReadGlDepthState(int* depthTest, int* depthFunc, int* depthMask,
+                                                int* depthBits, float* rangeNear, float* rangeFar,
+                                                int* fbo, int* cullFace, int* trackerDepthMode)
+{
+#if USE_OPENGL
+	GLint    iv = 0;
+	GLboolean bv = GL_FALSE;
+	GLfloat  rv[2] = { 0.0f, 1.0f };
+
+	if (depthTest) *depthTest = glIsEnabled(GL_DEPTH_TEST) ? 1 : 0;
+	if (cullFace)  *cullFace  = glIsEnabled(GL_CULL_FACE) ? 1 : 0;
+
+	glGetIntegerv(GL_DEPTH_FUNC, &iv);
+	if (depthFunc) *depthFunc = (int)iv;
+
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &bv);
+	if (depthMask) *depthMask = bv ? 1 : 0;
+
+	glGetFloatv(GL_DEPTH_RANGE, rv);
+	if (rangeNear) *rangeNear = rv[0];
+	if (rangeFar)  *rangeFar  = rv[1];
+
+	iv = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &iv);
+	if (fbo) *fbo = (int)iv;
+
+	{
+		GLint bits = -1;
+		glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER,
+			iv ? GL_DEPTH_ATTACHMENT : GL_DEPTH,
+			GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &bits);
+		while (glGetError() != GL_NO_ERROR) { }
+		if (depthBits) *depthBits = (int)bits;
+	}
+#else
+	if (depthTest) *depthTest = -1;
+	if (depthFunc) *depthFunc = -1;
+	if (depthMask) *depthMask = -1;
+	if (depthBits) *depthBits = -1;
+	if (rangeNear) *rangeNear = 0.0f;
+	if (rangeFar)  *rangeFar  = 1.0f;
+	if (fbo)       *fbo       = -1;
+	if (cullFace)  *cullFace  = -1;
+#endif
+	if (trackerDepthMode) *trackerDepthMode = g_PreviousDepthMode;
 }
 
 /* Bracket the inventory item OT0 draw: clear depth so the item tests only
