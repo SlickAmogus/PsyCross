@@ -642,6 +642,58 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	}
 }
 
+/* A clut word with bit 15 set names no palette that VRAM sampling can reach,
+ * and drawing it produces PERMANENT wrong colours rather than a visible glitch:
+ * the word travels to the shader in GrVertex.clut, which is uploaded as part of
+ * a_position with glVertexAttribPointer(..., GL_SHORT, ...) — SIGNED — so
+ * `v_page_clut.w = floor(a_position.w / 64.0) / 512.0` evaluates NEGATIVE, and
+ * the VRAM texture declares no wrap mode, so GL_REPEAT folds that negative V
+ * back onto some arbitrary real VRAM row. The prim then samples a valid-looking
+ * but unrelated 16-colour palette every frame it is drawn: rainbow geometry.
+ *
+ * Bit-15 cluts are legitimate in exactly one case — the host's hires-override
+ * pool deliberately keys its GL-backed virtual texture slots on them. Those
+ * prims are textured from a GL texture and never sample VRAM at all, so the
+ * override lookup is the discriminator, not the bit pattern. */
+static inline bool ClutHasNoPalette(int tpage, int clut)
+{
+	/* 16bpp/direct tpages sample no palette at all — the 16-bit samplePSX
+	 * variant never touches v_page_clut.zw, and PSX hardware likewise ignores
+	 * clut in that mode, so framebuffer-sampling prims (cutscene ghosting
+	 * overlays) legitimately ship uninitialized clut bytes. The chain above
+	 * cannot reach them, so dropping them would be pure loss. */
+	if (GET_TPAGE_FORMAT(tpage) >= TF_16_BIT)
+		return false;
+
+	/* Read unsigned and do NOT mask to 0x1FF: masking caps clutY at 511 and
+	 * makes the test below dead code. */
+	int clutY = ((unsigned short)clut) >> 6;
+	if (clutY <= 511)
+		return false;
+
+	return HiresOverride_LookupByTpageClut(tpage, clut, nullptr, nullptr, nullptr,
+	                                       nullptr, nullptr, nullptr) == 0;
+}
+
+/* Test + rate-limited report, shared by every textured prim type. The counter
+ * is shared too, so a single bad frame across several prim types still cannot
+ * flood the log. */
+static inline bool ShouldDropForClut(const char* primType, int tpage, int clut)
+{
+	if (!ClutHasNoPalette(tpage, clut))
+		return false;
+
+	static int s_clutDropCount = 0;
+	if (s_clutDropCount < 32)
+	{
+		s_clutDropCount++;
+		eprintinfo("[CLUTDROP] type=%s tpage=0x%04X clut=0x%04X clutY=%d reason=clutY_oob\n",
+			primType, (unsigned)(unsigned short)tpage, (unsigned)(unsigned short)clut,
+			((unsigned short)clut) >> 6);
+	}
+	return true;
+}
+
 int g_GPUDisabledState = 0;
 int g_DrawPrimMode = 0;
 
@@ -3023,7 +3075,7 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 		activeDrawEnv.tpage = poly->tpage;
 
 		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
-		if (!IsNull(poly))
+		if (!IsNull(poly) && !ShouldDropForClut("FT3", poly->tpage, poly->clut))
 		{
 			ApplyHiresOverride(poly->tpage, poly->clut);
 
@@ -3066,55 +3118,14 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 	case 0xC:
 	{
 		POLY_FT4* poly = (POLY_FT4*)polyTag;
-		/* PC-port guard: skip POLY_FT4 with obviously bogus tpage/clut/UV.
-		 * Combat particle effects (muzzle flash, blood splat, sparks) build
-		 * prims with weapon-specific CLUT/TPAGE bits that reference VRAM
-		 * regions which may not be correctly populated in PsyCross's
-		 * software VRAM. Without this guard those prims trip a shader
-		 * read into uninitialized GPU memory and crash GsDrawOt.
-		 *
-		 * Validation:
-		 *   - tpage low 5 bits give (TX, TY) page index. TX is 0..15,
-		 *     TY is 0..1. Anything outside is a corrupt prim.
-		 *   - clut Y is bits 6..14, must fit VRAM height (512). Y > 511
-		 *     means the prim was built with a stale/uninitialized clut
-		 *     field.
-		 *   - All four UVs at (0,0) typically means an unrendered ghost
-		 *     prim — kept anyway since some valid prims pin to (0,0).
-		 *
-		 * Drops 0..1% of prims in the wild. If everything's getting
-		 * dropped, the guard's too tight or the upload path is broken
-		 * upstream — check [PFT4DROP] log entries. */
-		{
-			short tpage = poly->tpage;
-			short clut = poly->clut;
-			int tx = tpage & 0xF;          /* page X (0..15) */
-			int ty = (tpage >> 4) & 0x1;   /* page Y (0..1) */
-			/* Real clut Y is 9 bits (0..511); bit 15 is reserved/0 on valid
-			 * prims. Read unsigned and do NOT mask to 0x1FF so a set bit 15
-			 * (uninitialized/garbage clut) pushes clutY past 511 and trips the
-			 * guard. The old `& 0x1FF` capped clutY at 511, making `> 511` dead
-			 * code that never dropped or logged a single prim. */
-			int clutY = ((unsigned short)clut) >> 6;
-			(void)tx; (void)ty;
-			/* clutY past VRAM is normally garbage — but the host's virtual
-			 * pool slots deliberately key GL-backed textures on clut values
-			 * with bit 15 set (clutY 512+). If the override table claims this
-			 * (tpage, clut), the prim never samples VRAM; let it through. */
-			if (clutY > 511 &&
-			    HiresOverride_LookupByTpageClut(tpage, clut, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) == 0) {
-				static int s_pft4DropCount = 0;
-				if (s_pft4DropCount < 32) {
-					eprintinfo("[PFT4DROP] tpage=0x%04hX clut=0x%04hX uvs=(%d,%d)(%d,%d)(%d,%d)(%d,%d) reason=clutY_oob (%d)\n",
-						tpage, clut,
-						poly->u0, poly->v0, poly->u1, poly->v1,
-						poly->u2, poly->v2, poly->u3, poly->v3,
-						clutY);
-					s_pft4DropCount++;
-				}
-				return 9;  /* skip rendering, advance past prim */
-			}
-		}
+		/* Historical note: this guard predates the other prim types' copies and
+		 * was originally written as a broad "bogus tpage/clut/UV" filter for
+		 * combat particle prims; the tpage/UV halves never fired and are gone.
+		 * The surviving clut test is now ClutHasNoPalette (see there for why).
+		 * The early return is kept because its length is proven correct. */
+		if (ShouldDropForClut("FT4", poly->tpage, poly->clut))
+			return 9;  /* skip rendering, advance past prim */
+
 		activeDrawEnv.tpage = poly->tpage;
 		ApplyHiresOverride(poly->tpage, poly->clut);
 
@@ -3180,26 +3191,29 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT3* poly = (POLY_GT3*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		ApplyHiresOverride(poly->tpage, poly->clut);
+		if (!ShouldDropForClut("GT3", poly->tpage, poly->clut))
+		{
+			ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
-		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
-		ApplyGtePerVertexDepth(firstVertex, polyTag, false);
-		MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+			ApplyGtePerVertexDepth(firstVertex, polyTag, false);
+			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
 
-		// Copy per-vertex fog factor from pad bytes
-		firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
-		firstVertex[1]._p0 = poly->p1;  // v1
-		firstVertex[2]._p0 = poly->p2;  // v2
+			// Copy per-vertex fog factor from pad bytes
+			firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+			firstVertex[1]._p0 = poly->p1;  // v1
+			firstVertex[2]._p0 = poly->p2;  // v2
 
-		g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
+			g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
 
 #if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
+			polygon_count++;
 #endif
+		}
 		return 9;
 	}
 	case 0x8:
@@ -3233,29 +3247,32 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 	{
 		POLY_GT4* poly = (POLY_GT4*)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
-		ApplyHiresOverride(poly->tpage, poly->clut);
+		if (!ShouldDropForClut("GT4", poly->tpage, poly->clut))
+		{
+			ApplyHiresOverride(poly->tpage, poly->clut);
 
-		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
-		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
-		ApplyGtePerVertexDepth(firstVertex, polyTag, true);
-		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
+			ApplyGtePerVertexDepth(firstVertex, polyTag, true);
+			MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
 
-		// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
-		firstVertex[0]._p0 = (unsigned char)poly->pad2;  // v0: own fog (game carries it in pad2; v0 color word's pad is the code byte)
-		firstVertex[1]._p0 = poly->p1;  // v1
-		firstVertex[2]._p0 = poly->p3;  // v3 (buffer[2] = poly vertex 3 due to swap)
-		firstVertex[3]._p0 = poly->p2;  // v2 (buffer[3] = poly vertex 2 due to swap)
+			// Copy per-vertex fog factor from pad bytes (note: MakeColourQuad swaps v2/v3)
+			firstVertex[0]._p0 = (unsigned char)poly->pad2;  // v0: own fog (game carries it in pad2; v0 color word's pad is the code byte)
+			firstVertex[1]._p0 = poly->p1;  // v1
+			firstVertex[2]._p0 = poly->p3;  // v3 (buffer[2] = poly vertex 3 due to swap)
+			firstVertex[3]._p0 = poly->p2;  // v2 (buffer[3] = poly vertex 2 due to swap)
 
-		TriangulateQuad();
+			TriangulateQuad();
 
-		g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
+			g_vertexIndex += PgxpEmitPoly(firstVertex, 6);
 
 #if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
+			polygon_count++;
 #endif
+		}
 		return 12;
 	}
 	}
@@ -3295,22 +3312,25 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x64:
 	{
 		SPRT* poly = (SPRT*)polyTag;
-		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
+		if (!ShouldDropForClut("SPRT", activeDrawEnv.tpage, poly->clut))
+		{
+			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
-		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
-		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
-		TriangulateQuad();
+			TriangulateQuad();
 
-		g_vertexIndex += 6;
+			g_vertexIndex += 6;
 
 #if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
+			polygon_count++;
 #endif
+		}
 		return 4;
 	}
 	case 0x68:
@@ -3356,22 +3376,25 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x74:
 	{
 		SPRT_8* poly = (SPRT_8*)polyTag;
-		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
+		if (!ShouldDropForClut("SPRT_8", activeDrawEnv.tpage, poly->clut))
+		{
+			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
-		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-		MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
-		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 8, 8);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
+			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 8, 8);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
-		TriangulateQuad();
+			TriangulateQuad();
 
-		g_vertexIndex += 6;
+			g_vertexIndex += 6;
 
 #if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
+			polygon_count++;
 #endif
+		}
 		return 3;
 	}
 	case 0x78:
@@ -3397,22 +3420,25 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	case 0x7C:
 	{
 		SPRT_16* poly = (SPRT_16*)polyTag;
-		ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
+		if (!ShouldDropForClut("SPRT_16", activeDrawEnv.tpage, poly->clut))
+		{
+			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
-		AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
+			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
-		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
-		MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
-		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 16, 16);
-		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
+			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 16, 16);
+			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
-		TriangulateQuad();
+			TriangulateQuad();
 
-		g_vertexIndex += 6;
+			g_vertexIndex += 6;
 
 #if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
+			polygon_count++;
 #endif
+		}
 		return 3;
 	}
 	}
