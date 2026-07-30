@@ -1107,14 +1107,16 @@ int g_PsxFogToBlack = 0;
 	"		v_page_clut.zw += c_UVFudge;\n"\
 	GTE_PERSPECTIVE_CORRECTION\
 	/* v_is3d gates dither + bilinear so 2D logos/UI render sharp.
-	 * The `a_zw.y > 100` test only distinguishes 3D from 2D when the
-	 * runtime PGXP master gate is on (then a_zw.y is the screen
-	 * height ~240 for 3D content, 0 for 2D). With PGXP off at
-	 * runtime, ApplyVertexPGXP zeroes a_zw for everything → without
-	 * the u_pgxpEnabled override every prim would read v_is3d=0 and
-	 * we'd lose dither / bilinear on real 3D geometry too (visibly
-	 * blocky tree leaves, etc.). When pgxp off, fall back to legacy
-	 * "always treat as 3D" behavior — matches legacy behavior. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_pgxp.z > 0.0) ? 1.0 : 0.0) : 1.0;\n"\
+	 * a_pgxp.z is the PGXP view W: > 0 only on vertices the GTE
+	 * actually projected, which is exactly the 3D content. It only
+	 * separates 3D from 2D while the runtime PGXP master gate is on —
+	 * with PGXP off PgxpFillVertex never runs, so a_pgxp.z is 0 for
+	 * everything and without the u_pgxpEnabled override every prim
+	 * would read v_is3d=0 and lose dither / bilinear on real 3D
+	 * geometry too (visibly blocky tree leaves, etc.). PGXP off falls
+	 * back to "always treat as 3D" — the legacy behaviour. Anything
+	 * that must hold with PGXP off therefore cannot lean on v_is3d;
+	 * use the frame class (g_PsxDitherSuppressed) instead. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_pgxp.z > 0.0) ? 1.0 : 0.0) : 1.0;\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
@@ -1365,7 +1367,19 @@ const char* gte_shader_32_rgba =
 	"		vec2 uvn = v_texcoord.xy + u_texOffset;\n"\
 	"		vec2 cell = floor(uvn);\n"\
 	"		vec2 tc = (cell + clamp(uvn - cell, u_hiresHalf, vec2(1.0) - u_hiresHalf)) * texelSize;\n"\
-	"		fragColor = texture2D(s_texture, tc);\n"\
+	/* Filtering off for this prim class (0 = whole 2D/menu frame, 1 = 3D frame but
+	 * this prim is 2D): point-sample the replacement at its OWN resolution. The
+	 * texture object is LINEAR(+mips) for every upscaled replacement and that is
+	 * fixed at upload time, so the snap has to happen here; textureLod pins the base
+	 * level, or a minified HD atlas would still blur in through the mip chain. A
+	 * native-res replacement already lands on the texel centre (u_hiresHalf == 0.5),
+	 * so it comes out bit-identical either way. */
+	"		if (bilinearFilter == 0 || (bilinearFilter == 1 && v_is3d < 0.5)) {\n"\
+	"			vec2 hiresSize = vec2(textureSize(s_texture, 0));\n"\
+	"			fragColor = textureLod(s_texture, (floor(tc * hiresSize) + 0.5) / hiresSize, 0.0);\n"\
+	"		} else {\n"\
+	"			fragColor = texture2D(s_texture, tc);\n"\
+	"		}\n"\
 	/* PSX colour-0 transparency for hi-res overrides: alpha 0 texels are
 	 * holes on ANY prim (opaque prims ignore blending, so without the
 	 * discard they'd render solid). 0.5 cutoff keeps authored soft-alpha
@@ -2038,7 +2052,7 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		break;
 	case TF_32_BIT_RGBA:
 		GR_SetShader(g_gte_shader_32_rgba.shader);
-		u_bilinearFilterLoc = -1;
+		u_bilinearFilterLoc = g_gte_shader_32_rgba.bilinearFilterLoc;
 		u_ditherForceLoc = g_gte_shader_32_rgba.ditherForceLoc;
 		u_pixelScaleLoc = -1;
 		u_projectionLoc = g_gte_shader_32_rgba.projectionLoc;
@@ -2202,6 +2216,27 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 		glUniform1f(u_pixelScaleLoc, pixelScale);
 	}
 
+	/* Filtering is a per-FRAME decision (the frame class flips with
+	 * g_PsxDitherSuppressed), so push it on every bind like the two above —
+	 * NOT below the g_lastBoundTexture early-out, where it used to sit. A menu
+	 * entered from gameplay re-binds the same VRAM texture, so the early-out
+	 * skipped the push and the whole screen kept running on the 3D value.
+	 *
+	 * VRAM samplers: 1 = 3D bilinear (v_is3d-gated), 2 = menu/2D-frame filter
+	 * (ignores v_is3d, independent of psx_dither), 0 = point-sample.
+	 *
+	 * The hi-res override sampler decodes nothing: it reads s_texture through GL
+	 * sampler state, which upload_rgba fixes at LINEAR(+mips) for any replacement
+	 * larger than native and never revisits — so neither toggle could reach it and
+	 * HD menu/map art stayed bilinear with menu_filter off. It gets 1 on 3D frames
+	 * unconditionally so world texture packs keep sampling exactly as before,
+	 * while its 2D prims follow the same v_is3d gate the VRAM path uses. */
+	if (u_bilinearFilterLoc != -1)
+		glUniform1i(u_bilinearFilterLoc,
+		            g_PsxDitherSuppressed
+		                ? (g_cfg_menuFilter ? 2 : 0)
+		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_bilinearFiltering) ? 1 : 0));
+
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;
 	}
@@ -2212,11 +2247,6 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
-	if(u_bilinearFilterLoc != -1)
-		/* 1 = 3D bilinear (v_is3d-gated); 2 = menu/2D-frame filter (ignores v_is3d,
-		 * independent of psx_dither). Menu frames set g_PsxDitherSuppressed. */
-		glUniform1i(u_bilinearFilterLoc, g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0) : (g_cfg_bilinearFiltering ? 1 : 0));
-
 #endif
 
 	g_lastBoundTexture = texture;
