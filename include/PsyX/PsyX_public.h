@@ -76,6 +76,11 @@ extern int							g_cfg_pgxpTextureCorrection;
  * context-creation time. */
 extern int							g_cfg_msaaSamples;
 
+/* PC port: confine the mouse pointer to the game window while it holds focus
+ * (0 = never). Only ever applied in fullscreen/borderless — a windowed game
+ * that traps the pointer is hostile. Runtime-settable. */
+extern int							g_cfg_confineCursor;
+
 /* PC port: full-screen post-process look (0 = off, 1.. = a built-in filter).
  * Safe to change at runtime (launcher config + F2 in-game cycle). */
 extern int							g_cfg_postProcess;
@@ -220,6 +225,10 @@ extern void PsyX_SetSwapInterval(int interval);
 /* PC port: apply window mode + resolution at runtime.
  * fullscreen: 0 = windowed, 1 = exclusive fullscreen, 2 = borderless desktop. */
 extern void PsyX_ApplyWindowState(int width, int height, int fullscreen);
+
+/* PC port: re-evaluate mouse confinement (see g_cfg_confineCursor). Idempotent;
+ * call after anything that changes window mode or focus. */
+extern void PsyX_UpdateMouseConfinement(void);
 
 /* PC port: apply vsync at runtime (0 = off, nonzero = on). Routes through the
  * per-frame swap-interval path so the change persists. */

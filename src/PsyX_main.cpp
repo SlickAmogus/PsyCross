@@ -44,6 +44,46 @@ int strcasecmp(const char* _l, const char* _r)
 #endif
 
 SDL_Window* g_window = NULL;
+
+/* PC port: mouse confinement. Default on; the launcher/config can clear it. */
+int g_cfg_confineCursor = 1;
+
+/* Keep the pointer inside the window while the game holds focus, the way
+ * borderless games normally behave. Without this a multi-monitor borderless
+ * setup lets the cursor walk onto the next screen during any mouse-driven
+ * moment (item pickup, inventory, menus, puzzles) and a click there tabs the
+ * game out (GitHub #87).
+ *
+ * MOUSE grab only, never SDL_SetWindowKeyboardGrab: the keyboard grab is what
+ * would swallow Alt+Tab and the Windows key, and it is a separate SDL call, so
+ * both stay working. SDL's Windows backend only clips while the window is
+ * focused and drops the clip on deactivation, so alt-tabbing out releases the
+ * pointer on its own and coming back re-clips it.
+ *
+ * Windowed mode is deliberately never confined - trapping the pointer in a
+ * window the user can see past is hostile, and the reported problem is specific
+ * to fullscreen/borderless. SDL_WINDOW_FULLSCREEN is set for exclusive AND
+ * desktop-fullscreen, so this one test covers both. */
+void PsyX_UpdateMouseConfinement(void)
+{
+	if (g_window == NULL)
+		return;
+
+	{
+		const Uint32 flags = SDL_GetWindowFlags(g_window);
+		const int    want  = (g_cfg_confineCursor != 0) &&
+		                     (flags & SDL_WINDOW_FULLSCREEN) != 0;
+
+		/* Relative mode (TPS/OTS mouse-look) already confines the pointer and
+		 * owns the grab state; leave it alone so a mode change mid-look does
+		 * not drop its capture. */
+		if (SDL_GetRelativeMouseMode() == SDL_TRUE)
+			return;
+
+		if ((SDL_GetWindowMouseGrab(g_window) == SDL_TRUE) != (want != 0))
+			SDL_SetWindowMouseGrab(g_window, want ? SDL_TRUE : SDL_FALSE);
+	}
+}
 int g_swapInterval = 1;
 int g_enableSwapInterval = 1;
 int g_skipSwapInterval = 0;
@@ -744,6 +784,8 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 		return;
 	}
 
+	PsyX_UpdateMouseConfinement();
+
 	if (!PsyX_Sys_InitialiseCore())
 	{
 		eprinterr("Failed to Intialise Psy-X Core.\n");
@@ -817,6 +859,12 @@ void PsyX_Sys_DoPollEvent()
 				case SDL_WINDOWEVENT_CLOSE:
 					PsyX_Exit();
 					break;
+
+				/* Re-assert the clip when the window is focused again: SDL drops
+				 * it on deactivation, which is exactly what lets alt-tab out. */
+				case SDL_WINDOWEVENT_FOCUS_GAINED:
+					PsyX_UpdateMouseConfinement();
+					break;
 				}
 				break;
 			case SDL_MOUSEMOTION:
@@ -857,6 +905,7 @@ void PsyX_Sys_DoPollEvent()
 
 						SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
 						GR_ResetDevice();
+						PsyX_UpdateMouseConfinement();
 					}
 					break;
 				}
@@ -1210,6 +1259,7 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 
 	SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
 	GR_ResetDevice();
+	PsyX_UpdateMouseConfinement();
 }
 
 void PsyX_WaitForTimestep(int count)
