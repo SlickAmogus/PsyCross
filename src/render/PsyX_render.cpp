@@ -3497,6 +3497,7 @@ void GR_PresentLastFrame(void)
  * the scene runs, so the blit cannot clobber a live texture. */
 static RECT16 g_sceneFbRedirect = { 0, 0, 0, 0 };
 static int    g_sceneFbRedirectTtl = 0;
+static int    s_sceneFbRedirectArms = 0;
 
 extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 {
@@ -3506,13 +3507,19 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 	g_sceneFbRedirect.h = h;
 	/* Refreshed every frame the scene submits its DR_AREA; a small TTL lets
 	 * the blit die out a couple of presents after the scene stops. */
-	g_sceneFbRedirectTtl = 3;
-
-	static int s_latchLogged = 0;
-	if (!s_latchLogged) {
-		s_latchLogged = 1;
-		eprintinfo("[FBSCRATCH] scene draw-area redirect (%d,%d %dx%d) — feedback blit active\n", x, y, w, h);
+	/* Log every ARM-after-lapse, not just the first ever. The recurring cutscene
+	 * rainbow bar is the strips sampling this rect while the blit is NOT live,
+	 * and a once-per-session line cannot tell those runs apart: it proves the
+	 * mechanism exists, never that it was active during the scene that
+	 * corrupted. Paired with the lapse line below, a user log now says which.
+	 * Rate-capped so a scene re-arming every frame cannot flood. */
+	if (g_sceneFbRedirectTtl == 0 && s_sceneFbRedirectArms < 32)
+	{
+		s_sceneFbRedirectArms++;
+		eprintinfo("[FBSCRATCH] redirect ARMED (%d,%d %dx%d) - feedback blit live\n", x, y, w, h);
 	}
+
+	g_sceneFbRedirectTtl = 3;
 }
 
 /* ===================== framebuffer feedback (packed RGB555) =================
@@ -4044,7 +4051,18 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 	 * TTL decremented here — once per present. */
 	GR_BlitStoredFrameToSceneRedirect();
 	if (g_sceneFbRedirectTtl > 0)
+	{
 		g_sceneFbRedirectTtl--;
+		/* Lapse = the scene stopped re-submitting its DR_AREA, so from the next
+		 * present its strips sample whatever is really in VRAM at the rect. If
+		 * the scene is still on screen when this prints, that IS the bar. */
+		if (g_sceneFbRedirectTtl == 0 && s_sceneFbRedirectArms < 32)
+		{
+			eprintinfo("[FBSCRATCH] redirect LAPSED (%d,%d %dx%d) - strips now sample raw VRAM\n",
+			           g_sceneFbRedirect.x, g_sceneFbRedirect.y,
+			           g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+		}
+	}
 
 	// after drawing
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
