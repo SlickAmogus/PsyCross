@@ -851,6 +851,11 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	g_primSzNextKind = SZ_KIND_FLAT; /* SOLE caller is Gfx_MeshDraw (static world) */
 }
 
+extern "C" float PsyX_GetItemDepthSzMax(void)
+{
+	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
+}
+
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
 {
 	uint32_t mx = s0 > s1 ? s0 : s1;
@@ -1508,8 +1513,12 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	ItemProbe_RecordDraw(vertex, polyTag, isQuad, zBefore);
 }
 
+enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN };
+
 struct GPUDrawSplit
 {
+	GPUDrawSplitKind kind;
+	unsigned int	modernHandle;
 	DRAWENV			drawenv;
 	DISPENV			dispenv;
 
@@ -1546,6 +1555,7 @@ void ClearSplits()
 	currentSplitDebugText = nullptr;
 	g_vertexIndex = 0;
 	g_splitIndex = 0;
+	g_splits[0].kind = GPU_SPLIT_LEGACY;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
 	/* Don't let a hi-res override leak across frames. Restoring the
 	 * DR_PSYX_TEX packet state (instead of zeroing) keeps that path's
@@ -1589,6 +1599,12 @@ void DrawEnvOffset(float& ofsX, float& ofsY)
 		ofsX = 0.0f;
 		ofsY = 0.0f;
 	}
+}
+
+extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y)
+{
+	if (x != nullptr && y != nullptr)
+		DrawEnvOffset(*x, *y);
 }
 
 inline void ScreenCoordsToEmulator(GrVertex* vertex, int count)
@@ -2396,7 +2412,8 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	TextureID normalTextureId = (textured && overrideTexture != 0) ? overrideNormalTexture : 0;
 
 	// FIXME: compare drawing environment too?
-	if (curSplit.blendMode == blendMode &&
+	if (curSplit.kind == GPU_SPLIT_LEGACY &&
+		curSplit.blendMode == blendMode &&
 		curSplit.texFormat == texFormat &&
 		curSplit.textureId == textureId &&
 		/* a second bound texture needs its own key term: two surfaces sharing
@@ -2430,6 +2447,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	}
 
 	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_LEGACY;
 	split.blendMode = blendMode;
 	split.texFormat = texFormat;
 	split.textureId = textureId;
@@ -2447,6 +2465,22 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.overrideHiresW = overrideTextureHiresW;
 	split.overrideHiresH = overrideTextureHiresH;
 
+	split.startVertex = g_vertexIndex;
+	split.numVerts = 0;
+}
+
+static void AddModernSplit(unsigned int handle)
+{
+	GPUDrawSplit& current = g_splits[g_splitIndex];
+	current.numVerts = g_vertexIndex - current.startVertex;
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+	{
+		eprinterr("MAX_DRAW_SPLITS reached while appending modern mesh\n");
+		return;
+	}
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_MODERN;
+	split.modernHandle = handle;
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
 }
@@ -2628,7 +2662,7 @@ void DrawAllSplits()
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
-			if (s.numVerts < 3)
+			if (s.kind != GPU_SPLIT_LEGACY || s.numVerts < 3)
 				continue;
 			if (s.blendMode != BM_NONE)
 				continue;
@@ -2641,7 +2675,12 @@ void DrawAllSplits()
 		s_dbgSplitHighWater = g_splitIndex;
 
 	for (int i = 1; i <= g_splitIndex; i++)
-		DrawSplit(g_splits[i]);
+	{
+		if (g_splits[i].kind == GPU_SPLIT_MODERN)
+			GR_DrawModernMesh(g_splits[i].modernHandle);
+		else
+			DrawSplit(g_splits[i]);
+	}
 
 	ClearSplits();
 }
@@ -3582,6 +3621,12 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		// [A] Psy-X custom texture packet
 		DR_PSYX_DBGMARKER* psydbg = (DR_PSYX_DBGMARKER*)polyTag;
 		currentSplitDebugText = psydbg->text;
+		return 2;
+	}
+	case 0x03:
+	{
+		DR_PSYX_MODERN_MESH* modern = (DR_PSYX_MODERN_MESH*)polyTag;
+		AddModernSplit(modern->code[1]);
 		return 2;
 	}
 	}
