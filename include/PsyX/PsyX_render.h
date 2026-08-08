@@ -158,6 +158,14 @@ typedef struct
 	 * (zero) verts and 2D prims are never lit. */
 	float		vsx, vsy, vsz;
 } GrVertex;
+
+typedef struct GrModernVertex
+{
+	float x, y, page, clut, z, u, v;
+	u_char r, g, b, a;
+	char tcx, tcy, fog, reserved;
+	float ppx, ppy, ppw, nx, ny, nz, vsx, vsy, vsz;
+} GrModernVertex;
 #pragma pack(pop)
 
 typedef enum
@@ -266,6 +274,8 @@ extern void			GR_DestroyTexture(TextureID texture);
 extern void			GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_UpdateVertexBuffer(const GrVertex* vertices, int count);
+extern void			GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int count);
+extern int			GR_DrawModernMesh(unsigned int mesh_handle);
 extern void			GR_DrawTriangles(int start_vertex, int triangles);
 
 /* Flashlight shadow map depth pre-pass (see g_PsyX_UseFlashlightShadows). Call

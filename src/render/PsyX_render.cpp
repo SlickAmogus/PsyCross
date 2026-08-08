@@ -811,6 +811,7 @@ GTEShader g_gte_shader_4;
 GTEShader g_gte_shader_8;
 GTEShader g_gte_shader_16;
 GTEShader g_gte_shader_32_rgba;
+GTEShader g_modern_shader_4, g_modern_shader_8, g_modern_shader_16, g_modern_shader_32_rgba;
 
 #if USE_OPENGL
 
@@ -1605,9 +1606,9 @@ TextureID GR_CreateRGBATexture(int width, int height, u_char* data /*= nullptr*/
 	return newTexture;
 }
 
-void GR_CompilePSXShader(GTEShader* sh, const char* source)
+static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 {
-	sh->shader = GR_Shader_Compile(source);
+	sh->shader = shader;
 
 #if USE_OPENGL
 	
@@ -1659,12 +1660,25 @@ void GR_CompilePSXShader(GTEShader* sh, const char* source)
 #endif
 }
 
+void GR_CompilePSXShader(GTEShader* sh, const char* source)
+{
+	GR_InitialisePSXShader(sh, GR_Shader_Compile(source));
+}
+
+extern "C" void Pc_ModernShader_Initialise(const char*, const char*, const char*, const char*);
+extern "C" ShaderID Pc_ModernShader_Get(TexFormat);
+
 void GR_InitialisePSXShaders()
 {
 	GR_CompilePSXShader(&g_gte_shader_4, gte_shader_4);
 	GR_CompilePSXShader(&g_gte_shader_8, gte_shader_8);
 	GR_CompilePSXShader(&g_gte_shader_16, gte_shader_16);
 	GR_CompilePSXShader(&g_gte_shader_32_rgba, gte_shader_32_rgba);
+	Pc_ModernShader_Initialise(gte_shader_4, gte_shader_8, gte_shader_16, gte_shader_32_rgba);
+	GR_InitialisePSXShader(&g_modern_shader_4, Pc_ModernShader_Get(TF_4_BIT));
+	GR_InitialisePSXShader(&g_modern_shader_8, Pc_ModernShader_Get(TF_8_BIT));
+	GR_InitialisePSXShader(&g_modern_shader_16, Pc_ModernShader_Get(TF_16_BIT));
+	GR_InitialisePSXShader(&g_modern_shader_32_rgba, Pc_ModernShader_Get(TF_32_BIT_RGBA));
 }
 
 int GR_InitialisePSX()
@@ -1941,149 +1955,154 @@ void GR_SetShader(const ShaderID shader)
 }
 
 
-void GR_SetTexture(TextureID texture, TexFormat texFormat)
+static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShader* shader)
 {
 	switch (texFormat)
 	{
 	case TF_4_BIT:
-		GR_SetShader(g_gte_shader_4.shader);
-		u_bilinearFilterLoc = g_gte_shader_4.bilinearFilterLoc;
-		u_ditherForceLoc = g_gte_shader_4.ditherForceLoc;
-		u_pixelScaleLoc = g_gte_shader_4.pixelScaleLoc;
-		u_projectionLoc = g_gte_shader_4.projectionLoc;
-		u_projection3DLoc = g_gte_shader_4.projection3DLoc;
+		GR_SetShader(shader->shader);
+		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_ditherForceLoc = shader->ditherForceLoc;
+		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_projectionLoc = shader->projectionLoc;
+		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
-		u_fogColorLoc = g_gte_shader_4.fogColorLoc;
-		u_fogToBlackLoc = g_gte_shader_4.fogToBlackLoc;
-		u_fogStrengthLoc = g_gte_shader_4.fogStrengthLoc;
-		u_pgxpEnabledLoc = g_gte_shader_4.pgxpEnabledLoc;
-		u_szMaxLoc = g_gte_shader_4.szMaxLoc;
-		u_worldFarBiasLoc = g_gte_shader_4.worldFarBiasLoc;
-		u_pgxpFarWLoc = g_gte_shader_4.pgxpFarWLoc;
-		u_flashlightOnLoc = g_gte_shader_4.flashlightOnLoc;
-		u_untexturedLoc = g_gte_shader_4.untexturedLoc;
-		u_flStyleLoc = g_gte_shader_4.flStyleLoc;
-		u_flLightPosLoc = g_gte_shader_4.flLightPosLoc;
-		u_flDirLoc = g_gte_shader_4.flDirLoc;
-		u_flColorLoc = g_gte_shader_4.flColorLoc;
-		u_flInnerCosLoc = g_gte_shader_4.flInnerCosLoc;
-		u_flOuterCosLoc = g_gte_shader_4.flOuterCosLoc;
-		u_flRangeLoc = g_gte_shader_4.flRangeLoc;
-		u_shadowOnLoc = g_gte_shader_4.shadowOnLoc;
-		u_shadowMatrixLoc = g_gte_shader_4.shadowMatrixLoc;
-		u_shadowBiasLoc = g_gte_shader_4.shadowBiasLoc;
-		u_shadowTexelLoc = g_gte_shader_4.shadowTexelLoc;
-		u_shadowNormalOffsetLoc = g_gte_shader_4.shadowNormalOffsetLoc;
-		u_shadowStrengthLoc = g_gte_shader_4.shadowStrengthLoc;
-		u_shadowClipLoc = g_gte_shader_4.shadowClipLoc;
-		u_shadowFadeDistLoc = g_gte_shader_4.shadowFadeDistLoc;
+		u_fogColorLoc = shader->fogColorLoc;
+		u_fogToBlackLoc = shader->fogToBlackLoc;
+		u_fogStrengthLoc = shader->fogStrengthLoc;
+		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
+		u_szMaxLoc = shader->szMaxLoc;
+		u_worldFarBiasLoc = shader->worldFarBiasLoc;
+		u_pgxpFarWLoc = shader->pgxpFarWLoc;
+		u_flashlightOnLoc = shader->flashlightOnLoc;
+		u_untexturedLoc = shader->untexturedLoc;
+		u_flStyleLoc = shader->flStyleLoc;
+		u_flLightPosLoc = shader->flLightPosLoc;
+		u_flDirLoc = shader->flDirLoc;
+		u_flColorLoc = shader->flColorLoc;
+		u_flInnerCosLoc = shader->flInnerCosLoc;
+		u_flOuterCosLoc = shader->flOuterCosLoc;
+		u_flRangeLoc = shader->flRangeLoc;
+		u_shadowOnLoc = shader->shadowOnLoc;
+		u_shadowMatrixLoc = shader->shadowMatrixLoc;
+		u_shadowBiasLoc = shader->shadowBiasLoc;
+		u_shadowTexelLoc = shader->shadowTexelLoc;
+		u_shadowNormalOffsetLoc = shader->shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = shader->shadowStrengthLoc;
+		u_shadowClipLoc = shader->shadowClipLoc;
+		u_shadowFadeDistLoc = shader->shadowFadeDistLoc;
 		break;
 	case TF_8_BIT:
-		GR_SetShader(g_gte_shader_8.shader);
-		u_bilinearFilterLoc = g_gte_shader_8.bilinearFilterLoc;
-		u_ditherForceLoc = g_gte_shader_8.ditherForceLoc;
-		u_pixelScaleLoc = g_gte_shader_8.pixelScaleLoc;
-		u_projectionLoc = g_gte_shader_8.projectionLoc;
-		u_projection3DLoc = g_gte_shader_8.projection3DLoc;
+		GR_SetShader(shader->shader);
+		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_ditherForceLoc = shader->ditherForceLoc;
+		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_projectionLoc = shader->projectionLoc;
+		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
-		u_fogColorLoc = g_gte_shader_8.fogColorLoc;
-		u_fogToBlackLoc = g_gte_shader_8.fogToBlackLoc;
-		u_fogStrengthLoc = g_gte_shader_8.fogStrengthLoc;
-		u_pgxpEnabledLoc = g_gte_shader_8.pgxpEnabledLoc;
-		u_szMaxLoc = g_gte_shader_8.szMaxLoc;
-		u_worldFarBiasLoc = g_gte_shader_8.worldFarBiasLoc;
-		u_pgxpFarWLoc = g_gte_shader_8.pgxpFarWLoc;
-		u_flashlightOnLoc = g_gte_shader_8.flashlightOnLoc;
-		u_untexturedLoc = g_gte_shader_8.untexturedLoc;
-		u_flStyleLoc = g_gte_shader_8.flStyleLoc;
-		u_flLightPosLoc = g_gte_shader_8.flLightPosLoc;
-		u_flDirLoc = g_gte_shader_8.flDirLoc;
-		u_flColorLoc = g_gte_shader_8.flColorLoc;
-		u_flInnerCosLoc = g_gte_shader_8.flInnerCosLoc;
-		u_flOuterCosLoc = g_gte_shader_8.flOuterCosLoc;
-		u_flRangeLoc = g_gte_shader_8.flRangeLoc;
-		u_shadowOnLoc = g_gte_shader_8.shadowOnLoc;
-		u_shadowMatrixLoc = g_gte_shader_8.shadowMatrixLoc;
-		u_shadowBiasLoc = g_gte_shader_8.shadowBiasLoc;
-		u_shadowTexelLoc = g_gte_shader_8.shadowTexelLoc;
-		u_shadowNormalOffsetLoc = g_gte_shader_8.shadowNormalOffsetLoc;
-		u_shadowStrengthLoc = g_gte_shader_8.shadowStrengthLoc;
-		u_shadowClipLoc = g_gte_shader_8.shadowClipLoc;
-		u_shadowFadeDistLoc = g_gte_shader_8.shadowFadeDistLoc;
+		u_fogColorLoc = shader->fogColorLoc;
+		u_fogToBlackLoc = shader->fogToBlackLoc;
+		u_fogStrengthLoc = shader->fogStrengthLoc;
+		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
+		u_szMaxLoc = shader->szMaxLoc;
+		u_worldFarBiasLoc = shader->worldFarBiasLoc;
+		u_pgxpFarWLoc = shader->pgxpFarWLoc;
+		u_flashlightOnLoc = shader->flashlightOnLoc;
+		u_untexturedLoc = shader->untexturedLoc;
+		u_flStyleLoc = shader->flStyleLoc;
+		u_flLightPosLoc = shader->flLightPosLoc;
+		u_flDirLoc = shader->flDirLoc;
+		u_flColorLoc = shader->flColorLoc;
+		u_flInnerCosLoc = shader->flInnerCosLoc;
+		u_flOuterCosLoc = shader->flOuterCosLoc;
+		u_flRangeLoc = shader->flRangeLoc;
+		u_shadowOnLoc = shader->shadowOnLoc;
+		u_shadowMatrixLoc = shader->shadowMatrixLoc;
+		u_shadowBiasLoc = shader->shadowBiasLoc;
+		u_shadowTexelLoc = shader->shadowTexelLoc;
+		u_shadowNormalOffsetLoc = shader->shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = shader->shadowStrengthLoc;
+		u_shadowClipLoc = shader->shadowClipLoc;
+		u_shadowFadeDistLoc = shader->shadowFadeDistLoc;
 		break;
 	case TF_16_BIT:
-		GR_SetShader(g_gte_shader_16.shader);
-		u_bilinearFilterLoc = g_gte_shader_16.bilinearFilterLoc;
-		u_ditherForceLoc = g_gte_shader_16.ditherForceLoc;
-		u_pixelScaleLoc = g_gte_shader_16.pixelScaleLoc;
-		u_projectionLoc = g_gte_shader_16.projectionLoc;
-		u_projection3DLoc = g_gte_shader_16.projection3DLoc;
+		GR_SetShader(shader->shader);
+		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_ditherForceLoc = shader->ditherForceLoc;
+		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_projectionLoc = shader->projectionLoc;
+		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
-		u_fogColorLoc = g_gte_shader_16.fogColorLoc;
-		u_fogToBlackLoc = g_gte_shader_16.fogToBlackLoc;
-		u_fogStrengthLoc = g_gte_shader_16.fogStrengthLoc;
-		u_pgxpEnabledLoc = g_gte_shader_16.pgxpEnabledLoc;
-		u_szMaxLoc = g_gte_shader_16.szMaxLoc;
-		u_worldFarBiasLoc = g_gte_shader_16.worldFarBiasLoc;
-		u_pgxpFarWLoc = g_gte_shader_16.pgxpFarWLoc;
-		u_flashlightOnLoc = g_gte_shader_16.flashlightOnLoc;
-		u_untexturedLoc = g_gte_shader_16.untexturedLoc;
-		u_flStyleLoc = g_gte_shader_16.flStyleLoc;
-		u_flLightPosLoc = g_gte_shader_16.flLightPosLoc;
-		u_flDirLoc = g_gte_shader_16.flDirLoc;
-		u_flColorLoc = g_gte_shader_16.flColorLoc;
-		u_flInnerCosLoc = g_gte_shader_16.flInnerCosLoc;
-		u_flOuterCosLoc = g_gte_shader_16.flOuterCosLoc;
-		u_flRangeLoc = g_gte_shader_16.flRangeLoc;
-		u_shadowOnLoc = g_gte_shader_16.shadowOnLoc;
-		u_shadowMatrixLoc = g_gte_shader_16.shadowMatrixLoc;
-		u_shadowBiasLoc = g_gte_shader_16.shadowBiasLoc;
-		u_shadowTexelLoc = g_gte_shader_16.shadowTexelLoc;
-		u_shadowNormalOffsetLoc = g_gte_shader_16.shadowNormalOffsetLoc;
-		u_shadowStrengthLoc = g_gte_shader_16.shadowStrengthLoc;
-		u_shadowClipLoc = g_gte_shader_16.shadowClipLoc;
-		u_shadowFadeDistLoc = g_gte_shader_16.shadowFadeDistLoc;
+		u_fogColorLoc = shader->fogColorLoc;
+		u_fogToBlackLoc = shader->fogToBlackLoc;
+		u_fogStrengthLoc = shader->fogStrengthLoc;
+		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
+		u_szMaxLoc = shader->szMaxLoc;
+		u_worldFarBiasLoc = shader->worldFarBiasLoc;
+		u_pgxpFarWLoc = shader->pgxpFarWLoc;
+		u_flashlightOnLoc = shader->flashlightOnLoc;
+		u_untexturedLoc = shader->untexturedLoc;
+		u_flStyleLoc = shader->flStyleLoc;
+		u_flLightPosLoc = shader->flLightPosLoc;
+		u_flDirLoc = shader->flDirLoc;
+		u_flColorLoc = shader->flColorLoc;
+		u_flInnerCosLoc = shader->flInnerCosLoc;
+		u_flOuterCosLoc = shader->flOuterCosLoc;
+		u_flRangeLoc = shader->flRangeLoc;
+		u_shadowOnLoc = shader->shadowOnLoc;
+		u_shadowMatrixLoc = shader->shadowMatrixLoc;
+		u_shadowBiasLoc = shader->shadowBiasLoc;
+		u_shadowTexelLoc = shader->shadowTexelLoc;
+		u_shadowNormalOffsetLoc = shader->shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = shader->shadowStrengthLoc;
+		u_shadowClipLoc = shader->shadowClipLoc;
+		u_shadowFadeDistLoc = shader->shadowFadeDistLoc;
 		break;
 	case TF_32_BIT_RGBA:
-		GR_SetShader(g_gte_shader_32_rgba.shader);
-		u_bilinearFilterLoc = g_gte_shader_32_rgba.bilinearFilterLoc;
-		u_ditherForceLoc = g_gte_shader_32_rgba.ditherForceLoc;
+		GR_SetShader(shader->shader);
+		/* Upstream 5b70144: the 32-bit RGBA (hi-res override) path now honours
+		 * menu_filter, so this must be the shader's REAL bilinearFilter location
+		 * rather than -1. Read it off the parameterised shader so the modern-mesh
+		 * variants get their own location (or -1 if absent, which the guarded
+		 * glUniform1i below tolerates). */
+		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_ditherForceLoc = shader->ditherForceLoc;
 		u_pixelScaleLoc = -1;
-		u_projectionLoc = g_gte_shader_32_rgba.projectionLoc;
-		u_projection3DLoc = g_gte_shader_32_rgba.projection3DLoc;
-		u_texelSizeLoc = g_gte_shader_32_rgba.texelSizeLoc;
-		u_texOffsetLoc = g_gte_shader_32_rgba.texOffsetLoc;
-		u_hiresHalfLoc = g_gte_shader_32_rgba.hiresHalfLoc;
-		u_fogColorLoc = g_gte_shader_32_rgba.fogColorLoc;
-		u_fogToBlackLoc = g_gte_shader_32_rgba.fogToBlackLoc;
-		u_fogStrengthLoc = g_gte_shader_32_rgba.fogStrengthLoc;
-		u_pgxpEnabledLoc = g_gte_shader_32_rgba.pgxpEnabledLoc;
-		u_szMaxLoc = g_gte_shader_32_rgba.szMaxLoc;
-		u_worldFarBiasLoc = g_gte_shader_32_rgba.worldFarBiasLoc;
-		u_pgxpFarWLoc = g_gte_shader_32_rgba.pgxpFarWLoc;
-		u_flashlightOnLoc = g_gte_shader_32_rgba.flashlightOnLoc;
-		u_untexturedLoc = g_gte_shader_32_rgba.untexturedLoc;
-		u_flStyleLoc = g_gte_shader_32_rgba.flStyleLoc;
-		u_flLightPosLoc = g_gte_shader_32_rgba.flLightPosLoc;
-		u_flDirLoc = g_gte_shader_32_rgba.flDirLoc;
-		u_flColorLoc = g_gte_shader_32_rgba.flColorLoc;
-		u_flInnerCosLoc = g_gte_shader_32_rgba.flInnerCosLoc;
-		u_flOuterCosLoc = g_gte_shader_32_rgba.flOuterCosLoc;
-		u_flRangeLoc = g_gte_shader_32_rgba.flRangeLoc;
-		u_shadowOnLoc = g_gte_shader_32_rgba.shadowOnLoc;
-		u_shadowMatrixLoc = g_gte_shader_32_rgba.shadowMatrixLoc;
-		u_shadowBiasLoc = g_gte_shader_32_rgba.shadowBiasLoc;
-		u_shadowTexelLoc = g_gte_shader_32_rgba.shadowTexelLoc;
-		u_shadowNormalOffsetLoc = g_gte_shader_32_rgba.shadowNormalOffsetLoc;
-		u_shadowStrengthLoc = g_gte_shader_32_rgba.shadowStrengthLoc;
-		u_shadowClipLoc = g_gte_shader_32_rgba.shadowClipLoc;
-		u_shadowFadeDistLoc = g_gte_shader_32_rgba.shadowFadeDistLoc;
+		u_projectionLoc = shader->projectionLoc;
+		u_projection3DLoc = shader->projection3DLoc;
+		u_texelSizeLoc = shader->texelSizeLoc;
+		u_texOffsetLoc = shader->texOffsetLoc;
+		u_hiresHalfLoc = shader->hiresHalfLoc;
+		u_fogColorLoc = shader->fogColorLoc;
+		u_fogToBlackLoc = shader->fogToBlackLoc;
+		u_fogStrengthLoc = shader->fogStrengthLoc;
+		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
+		u_szMaxLoc = shader->szMaxLoc;
+		u_worldFarBiasLoc = shader->worldFarBiasLoc;
+		u_pgxpFarWLoc = shader->pgxpFarWLoc;
+		u_flashlightOnLoc = shader->flashlightOnLoc;
+		u_untexturedLoc = shader->untexturedLoc;
+		u_flStyleLoc = shader->flStyleLoc;
+		u_flLightPosLoc = shader->flLightPosLoc;
+		u_flDirLoc = shader->flDirLoc;
+		u_flColorLoc = shader->flColorLoc;
+		u_flInnerCosLoc = shader->flInnerCosLoc;
+		u_flOuterCosLoc = shader->flOuterCosLoc;
+		u_flRangeLoc = shader->flRangeLoc;
+		u_shadowOnLoc = shader->shadowOnLoc;
+		u_shadowMatrixLoc = shader->shadowMatrixLoc;
+		u_shadowBiasLoc = shader->shadowBiasLoc;
+		u_shadowTexelLoc = shader->shadowTexelLoc;
+		u_shadowNormalOffsetLoc = shader->shadowNormalOffsetLoc;
+		u_shadowStrengthLoc = shader->shadowStrengthLoc;
+		u_shadowClipLoc = shader->shadowClipLoc;
+		u_shadowFadeDistLoc = shader->shadowFadeDistLoc;
 		break;
 	}
 
@@ -2250,6 +2269,16 @@ void GR_SetTexture(TextureID texture, TexFormat texFormat)
 #endif
 
 	g_lastBoundTexture = texture;
+}
+
+void GR_SetTexture(TextureID texture, TexFormat texFormat)
+{
+	GTEShader* shader;
+	if (texFormat == TF_4_BIT) shader = &g_gte_shader_4;
+	else if (texFormat == TF_8_BIT) shader = &g_gte_shader_8;
+	else if (texFormat == TF_16_BIT) shader = &g_gte_shader_16;
+	else shader = &g_gte_shader_32_rgba;
+	GR_SetTextureShader(texture, texFormat, shader);
 }
 
 void GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY,
@@ -4508,6 +4537,51 @@ void GR_BindVertexBuffer()
 #else
 #error
 #endif
+}
+
+extern "C" void Pc_ModernVertex_Upload(const GrModernVertex* vertices, int count);
+static_assert(a_viewpos + 1 <= 8, "all vertex layouts must fit the GLES2 8-attribute limit");
+
+void GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int num_vertices)
+{
+	Pc_ModernVertex_Upload(vertices, num_vertices);
+}
+
+struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; };
+extern "C" int Pc_ModernMesh_PrepareDraw(unsigned int, PcModernDrawBinding*);
+
+int GR_DrawModernMesh(unsigned int mesh_handle)
+{
+	PcModernDrawBinding binding; GTEShader* modern;
+	if (!Pc_ModernMesh_PrepareDraw(mesh_handle, &binding) || binding.vertexCount < 3)
+		return 0;
+	TextureID texture = binding.textureId; int format = binding.texFormat, count = binding.vertexCount;
+	if (format == TF_4_BIT) modern=&g_modern_shader_4;
+	else if (format == TF_8_BIT) modern=&g_modern_shader_8;
+	else if (format == TF_16_BIT) modern=&g_modern_shader_16;
+	else modern=&g_modern_shader_32_rgba;
+	/* Modern item meshes are opaque replacement geometry. Do not inherit the
+	 * previous legacy split's blend equation (notably reverse-subtract). */
+	GR_SetBlendMode(BM_NONE);
+	GR_SetTextureShader(texture, (TexFormat)format, modern);
+	GR_SetOverrideTextureSize(binding.nativeWidth, binding.nativeHeight, binding.offsetX, binding.offsetY, binding.hiresWidth, binding.hiresHeight);
+	/* Item OTs are drawn in the ACTIVE display coordinate space, which is not a
+	 * constant: the inventory carousel runs a 320x448 double-buffer (vertices for
+	 * the lower buffer carry y=224..448) while the world item pickup runs 320x224.
+	 * Hardcoding 448 here made the pickup project into an ortho twice as tall as
+	 * its real display, halving every y and parking the model near the top of the
+	 * frame; the carousel only looked correct because 448 happened to match it.
+	 * Derive it the same way the legacy path does (GR_SetOffscreenState reads
+	 * activeDispEnv.disp.w/h) so both cases are right for the same reason. */
+	GR_Ortho2D(0.0f, (float)activeDispEnv.disp.w, (float)activeDispEnv.disp.h, 0.0f, -1.0f, 1.0f);
+	GR_DrawTriangles(0, count / 3);
+	glBindVertexArray(g_glVertexArray[g_curVertexBuffer ^ 1]);
+	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer ^ 1]);
+	glUseProgram(0);
+	g_PreviousShader = (ShaderID)-1; g_lastBoundTexture = (TextureID)-1;
+	g_PreviousBlendMode = g_PreviousDepthMode = g_PreviousStencilMode = -999;
+	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = g_PreviousOffscreenState = -999;
+	return 1;
 }
 
 void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)

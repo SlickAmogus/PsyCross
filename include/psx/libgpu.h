@@ -225,6 +225,8 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
  * unit, which the 64-unit quantization in PsyX_SetNextPrimSz collapses into one
  * depth (the see-through bug). */
 extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3);
+extern float PsyX_GetItemDepthSzMax(void);
+extern void PsyX_GetDrawEnvOffset(float* x, float* y);
 /* Drop an armed-but-unconsumed one-shot SZ payload. Gfx_MeshDraw arms per poly
  * BEFORE its cull checks; a poly culled after arming would otherwise leak its
  * payload (world FLAT kind + wrong SZ) to the next unrelated addPrim. Called at
@@ -749,6 +751,13 @@ typedef struct {
 } DR_PSYX_TEX;
 
 static_assert(sizeof(DR_PSYX_TEX) / 4 - P_LEN == 2, "DR_PSYX_TEX size must be 2 longs");
+
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2]; /* subtype, registry handle; T7 depth remains address-keyed */
+} DR_PSYX_MODERN_MESH;
+
+static_assert(sizeof(DR_PSYX_MODERN_MESH) / 4 - P_LEN == 2, "DR_PSYX_MODERN_MESH size must be 2 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
