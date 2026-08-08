@@ -4639,6 +4639,18 @@ int GR_DrawModernMesh(unsigned int mesh_handle)
 	/* Modern item meshes are opaque replacement geometry. Do not inherit the
 	 * previous legacy split's blend equation (notably reverse-subtract). */
 	GR_SetBlendMode(BM_NONE);
+	/* ...nor its depth COMPARISON. The PGXP static-world pass leaves
+	 * glDepthFunc(GL_ALWAYS) so coplanar world faces resolve by OT order; every
+	 * fragment then wins, and this mesh is a single glDrawArrays with no software
+	 * culling, so its back faces paint straight over its front ones — the model
+	 * reads as see-through. Per-vertex depth is already correct here
+	 * (Pc_ModernDepth_Apply), only the comparison was wrong.
+	 *
+	 * This has to be issued BEFORE the draw. The state reset at the end of this
+	 * function assigns g_PreviousDepthFuncAlways = 0 without ever calling
+	 * glDepthFunc, so GL could sit at GL_ALWAYS while the tracker claimed LEQUAL —
+	 * a desync that also made the next GR_SetDepthFuncAlways(0) early-out. */
+	GR_SetDepthFuncAlways(0);
 	GR_SetTextureShader(texture, (TexFormat)format, modern);
 	GR_SetOverrideTextureSize(binding.nativeWidth, binding.nativeHeight, binding.offsetX, binding.offsetY, binding.hiresWidth, binding.hiresHeight);
 	/* Item OTs are drawn in the ACTIVE display coordinate space, which is not a
