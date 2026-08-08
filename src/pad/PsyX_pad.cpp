@@ -52,6 +52,15 @@ int PsyX_Pad_InitSystem()
 	if (g_sdlKeyboardState != NULL)
 		return 1;
 
+	// DualSense needs the hidapi backend. Both hints already default to "1" on
+	// every SDL2 that ships a PS5 driver (>= 2.0.14), so this is an explicit pin
+	// rather than a fix — but it MUST stay above the SDL_InitSubSystem below,
+	// because SDL latches joystick hints when the subsystem starts. An
+	// SDL_JOYSTICK_HIDAPI=0 environment variable still wins (NORMAL priority),
+	// which is what leaves Steam Input's overrides working.
+	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+
 	memset(g_controllers, 0, sizeof(g_controllers));
 
 	// init keyboard state
