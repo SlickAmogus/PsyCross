@@ -3752,9 +3752,15 @@ static const char* s_fbPackShaderSrc =
 	"	uniform float u_feedbackDamp;\n"
 	"void main() {\n"
 	"	vec3 c = texture2D(s_texture, v_uv).rgb * u_feedbackDamp;\n"
-	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
-	"	float g5 = floor(c.g * 31.0 + 0.5);\n"
-	"	float b5 = floor(c.b * 31.0 + 0.5);\n"
+	/* TRUNCATE, do not round. Retail's decay does not come from the gain -- at
+	 * 127/128 over ~60 frames the frame would only reach ~0.61 -- it comes from
+	 * this requantize dropping exactly one 5-bit level per pass, 31 passes to
+	 * black. Rounding maps a damped level back onto itself, so the loop stalls
+	 * and the frame freezes and smears instead of fading (what the Xbox port
+	 * does). Inert at the shipped damp of 0.5, where the value halves regardless. */
+	"	float r5 = floor(c.r * 31.0 + 0.002);\n"
+	"	float g5 = floor(c.g * 31.0 + 0.002);\n"
+	"	float b5 = floor(c.b * 31.0 + 0.002);\n"
 	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"  /* mask bit left 0 */
 	"	float hi  = floor(w16 / 256.0);\n"
 	"	float lo  = w16 - hi * 256.0;\n"
