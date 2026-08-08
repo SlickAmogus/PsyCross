@@ -27,7 +27,12 @@ endif()
 
 add_library(psycross_static STATIC ${PSYCROSS_SRCS_C} ${PSYCROSS_SRCS_CPP})
 set_target_properties(psycross_static PROPERTIES OUTPUT_NAME "psycross")
-target_include_directories(psycross_static PUBLIC "include" "include/psx")
+# "include/psx" is deliberately NOT public: it holds a PSX-SDK <strings.h> that
+# is a guard-only stub declaring nothing, so putting it on the include path
+# shadows the POSIX header for every TU built against this archive (that is why
+# strcasecmp used to come up undeclared on glibc). Consumers that need bare
+# <libgpu.h>-style PSX includes add the directory themselves.
+target_include_directories(psycross_static PUBLIC "include")
 
 # On ELF the host executable that links this archive is built with
 # -rdynamic (so map overlay .so's can resolve game symbols at dlopen). That
