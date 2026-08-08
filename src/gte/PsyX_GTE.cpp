@@ -292,9 +292,16 @@ static float s_pgxpFifoX[3], s_pgxpFifoY[3], s_pgxpFifoW[3];
  * position the GTE just produced. Updated only when g_PsyX_UsePerPixelFlashlight. */
 static float s_vsFifoX[3], s_vsFifoY[3], s_vsFifoZ[3];
 
+/* Projection registers per FIFO slot. SH1 reprograms OFX/OFY/H mid-frame (a
+ * lighting helper runs SetGeomOffset(-1024,-1024)/SetGeomScreen(16) and restores
+ * only the GTE side), and the near clipper consumes these at DrawOTag time, so
+ * each vertex has to carry its own instead of reading a frame-global. */
+static float s_vsFifoOfx[3], s_vsFifoOfy[3], s_vsFifoH[3];
+
 extern "C" int g_PgxpUseUnquantizedDepth; /* defined in PsyX_GPU.cpp */
 extern "C" float g_PgxpGteOfx, g_PgxpGteOfy, g_PgxpGteH; /* PsyX_GPU.cpp */
-extern "C" void VShadow_Store(void* addr, float x, float y, float z); /* PsyX_GPU.cpp */
+extern "C" void VShadow_Store(void* addr, float x, float y, float z,
+                              float ofx, float ofy, float h); /* PsyX_GPU.cpp */
 
 /* Whole-town render mode (set per world-chunk-draw by the game from
  * Pc_WholeMapDrawActive). When set, vertices whose true view depth exceeds what
@@ -323,7 +330,8 @@ extern "C" void PGXP_StoreAddr(void* addr, int slot)
 	 * recorded whenever PGXP is on, not just for the per-pixel flashlight. Gate
 	 * matches the vs FIFO fill in GTE_RotTransPers below. */
 	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
-		VShadow_Store(addr, s_vsFifoX[slot], s_vsFifoY[slot], s_vsFifoZ[slot]);
+		VShadow_Store(addr, s_vsFifoX[slot], s_vsFifoY[slot], s_vsFifoZ[slot],
+		              s_vsFifoOfx[slot], s_vsFifoOfy[slot], s_vsFifoH[slot]);
 }
 
 /* ===================== Exact-transform PGXP twins ==========================
@@ -833,7 +841,9 @@ int GTE_RotTransPers(int idx, int lm)
 		/* Near-clip reprojection constants: the projection registers active when
 		 * this vertex was transformed. The GL near-plane clipper re-projects the
 		 * clip vertices it creates with the exact same formula (sx = OFX + x*H/z).
-		 * Per-frame constants in SH1, so plain globals suffice. */
+		 * These globals are only the fallback for an untracked poly — the values
+		 * that actually get used ride the per-vertex VsEntry shadow, because the
+		 * clipper runs at DrawOTag time and SH1 reprograms OFX/OFY/H mid-frame. */
 		g_PgxpGteOfx = (float)((double)C2_OFX / 65536.0);
 		g_PgxpGteOfy = (float)((double)C2_OFY / 65536.0);
 		g_PgxpGteH   = (float)C2_H;
@@ -848,6 +858,13 @@ int GTE_RotTransPers(int idx, int lm)
 		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)C2_MAC1;
 		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)C2_MAC2;
 		s_vsFifoZ[0] = s_vsFifoZ[1]; s_vsFifoZ[1] = s_vsFifoZ[2]; s_vsFifoZ[2] = (float)C2_MAC3;
+
+		s_vsFifoOfx[0] = s_vsFifoOfx[1]; s_vsFifoOfx[1] = s_vsFifoOfx[2];
+		s_vsFifoOfx[2] = (float)((double)C2_OFX / 65536.0);
+		s_vsFifoOfy[0] = s_vsFifoOfy[1]; s_vsFifoOfy[1] = s_vsFifoOfy[2];
+		s_vsFifoOfy[2] = (float)((double)C2_OFY / 65536.0);
+		s_vsFifoH[0] = s_vsFifoH[1]; s_vsFifoH[1] = s_vsFifoH[2];
+		s_vsFifoH[2] = (float)C2_H;
 	}
 
 	return h_over_sz3;

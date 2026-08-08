@@ -123,20 +123,31 @@ extern "C" int g_PsyX_NoShadowCast = 0;
  * into a packet-buffer slot that a GTE-projected vertex used earlier in the same
  * frame inherited THAT vertex's view-space position — the shadow depth pass then
  * drew the quad at the stale position (the glitchy arm/gun shadow while firing). */
-struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; };
+/* ofx/ofy/h are the GTE projection registers ACTIVE WHEN THIS VERTEX WAS
+ * TRANSFORMED. They must ride the shadow rather than sit in a frame-global: the
+ * near clipper consumes them at DrawOTag time, long after every RTPS of the
+ * frame has run, and SH1 does not hold them constant across a frame — e.g.
+ * bodyprog_80055028.c:1039 sets SetGeomOffset(-1024,-1024)/SetGeomScreen(16) for
+ * a lighting helper and restores only the GTE registers, and the various drawers
+ * each push their own SetGeomScreen. A frame-global therefore reprojects clip
+ * vertices with whichever values the LAST RTPS of the frame happened to leave. */
+struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float ofx, ofy, h; };
 static VsEntry s_vshadow[SHADOW_SIZE];
 
-static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value) {
+static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value,
+                   float ofx, float ofy, float h) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = ShadowHash(k);
 	for (int i = 0; i < 16; i++) {
 		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast; return;
+			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
+			e->ofx = ofx; e->ofy = ofy; e->h = h; return;
 		}
 	}
 	VsEntry* e = &s_vshadow[s];
 	e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
+	e->ofx = ofx; e->ofy = ofy; e->h = h;
 }
 
 static const VsEntry* Vs_Get(const void* addr, unsigned value) {
@@ -153,8 +164,8 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
 /* GTE store hook for the flashlight view-space FIFO (PsyX_GTE.cpp PGXP_StoreAddr,
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
-extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr);
+extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz, float ofx, float ofy, float h) {
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -172,7 +183,8 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
 	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
-		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst);
+		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst,
+		               ve->ofx, ve->ofy, ve->h);
 	}
 }
 
@@ -227,9 +239,18 @@ extern "C" { int g_PsxPgxpNearClip = 1; }
 /* Clip plane view-space depth, GTE SZ units. Small enough to be an invisible cut
  * right at the eye, large enough that H/z and 1/W stay numerically tame. */
 extern "C" { float g_PgxpNearZ = 16.0f; }
-/* GTE projection registers captured at RTPS time (PsyX_GTE.cpp): OFX/OFY as float
- * pixels, H the projection distance. Per-frame constants in SH1. */
+/* GTE projection registers of the most recent RTPS (PsyX_GTE.cpp): OFX/OFY as
+ * float pixels, H the projection distance. Fallback only — the near clipper
+ * prefers the per-vertex copies carried in the VsEntry shadow, because these
+ * are consumed at DrawOTag time and SH1 changes the registers mid-frame. */
 extern "C" { float g_PgxpGteOfx = 0.0f, g_PgxpGteOfy = 0.0f, g_PgxpGteH = 1.0f; }
+
+/* Projection registers belonging to the poly currently being built, latched by
+ * VsFillVertex from the shadow entry of each vertex it resolves. Valid flag
+ * distinguishes "no vertex of this poly was tracked" (fall back to the globals)
+ * from a genuine zero offset. */
+static float s_curPolyOfx = 0.0f, s_curPolyOfy = 0.0f, s_curPolyH = 1.0f;
+static int   s_curPolyProjValid = 0;
 
 /* PSX GPU polygon size rule (PSXSPX): the rasterizer silently rejects any
  * triangle whose screen bounding box exceeds 1023 (w) x 511 (h). PsyX never had
@@ -536,7 +557,14 @@ static inline void VsFillVertex(GrVertex* v, const void* addr)
 	 * memset-0 default = casts normally. ny doubles as the "view-space entry valid"
 	 * marker for the near clipper: a behind-the-eye vertex legitimately has vsz<=0,
 	 * so presence can't be inferred from the position itself. No shader reads ny. */
-	if (e) { v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f; }
+	if (e) {
+		v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f;
+		/* Latch this vertex's projection registers for the near clipper: every
+		 * vertex of a poly was transformed under the same GTE state, and the
+		 * clip runs a few calls later in the same ParsePrimitive. */
+		s_curPolyOfx = e->ofx; s_curPolyOfy = e->ofy; s_curPolyH = e->h;
+		s_curPolyProjValid = 1;
+	}
 	/* Opt this prim out of the per-pixel flashlight: a non-positive view-Z is the
 	 * shader's "untracked, not lit" sentinel (flP.z>0 gate). Position/depth are
 	 * unaffected — these prims are also forced affine, so ppw comes from the screen
@@ -2232,9 +2260,13 @@ static void PgxpNearClipLerp(const GrVertex* a, const GrVertex* b, GrVertex* out
 	 * the kept vertices. No g_PgxpEdgeMax clamp: with a true W the GPU clips
 	 * far-off-screen positions exactly in homogeneous space; clamping would drag
 	 * the vertex and distort the visible part. */
-	const float hz = g_PgxpGteH / g_PgxpNearZ;
-	out->ppx = g_PgxpGteOfx + out->vsx * hz + ofsX;
-	out->ppy = g_PgxpGteOfy + out->vsy * hz + ofsY;
+	const float pOfx = s_curPolyProjValid ? s_curPolyOfx : g_PgxpGteOfx;
+	const float pOfy = s_curPolyProjValid ? s_curPolyOfy : g_PgxpGteOfy;
+	const float pH   = s_curPolyProjValid ? s_curPolyH   : g_PgxpGteH;
+
+	const float hz = pH / g_PgxpNearZ;
+	out->ppx = pOfx + out->vsx * hz + ofsX;
+	out->ppy = pOfy + out->vsy * hz + ofsY;
 	out->ppw = g_PgxpNearZ;
 
 	/* Integer x/y are unread on the PGXP shader path (ppw>0) — keep them sane
@@ -2260,9 +2292,13 @@ static void PgxpNearClipReproject(GrVertex* v, float ofsX, float ofsY)
 {
 	if (v->ppw > 0.0f)
 		return;
-	const float hz = g_PgxpGteH / v->vsz;
-	v->ppx = g_PgxpGteOfx + v->vsx * hz + ofsX;
-	v->ppy = g_PgxpGteOfy + v->vsy * hz + ofsY;
+	const float pOfx = s_curPolyProjValid ? s_curPolyOfx : g_PgxpGteOfx;
+	const float pOfy = s_curPolyProjValid ? s_curPolyOfy : g_PgxpGteOfy;
+	const float pH   = s_curPolyProjValid ? s_curPolyH   : g_PgxpGteH;
+
+	const float hz = pH / v->vsz;
+	v->ppx = pOfx + v->vsx * hz + ofsX;
+	v->ppy = pOfy + v->vsy * hz + ofsY;
 	v->ppw = v->vsz;
 }
 
