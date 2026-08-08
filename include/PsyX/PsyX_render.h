@@ -117,6 +117,10 @@
 #define VRAM_WIDTH		(1024)
 #define VRAM_HEIGHT		(512)
 
+/* One entry per 16-bit VRAM value, indexed by (high byte, low byte). */
+#define LUT_WIDTH		(256)
+#define LUT_HEIGHT		(256)
+
 #define TPAGE_WIDTH		(256)
 #define TPAGE_HEIGHT	(256)
 
