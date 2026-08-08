@@ -856,6 +856,17 @@ extern "C" float PsyX_GetItemDepthSzMax(void)
 	return (g_szMaxPrevFrame < 1) ? 1.0f : (float)g_szMaxPrevFrame;
 }
 
+/* A replacement drawer that emits its own packet instead of running the stock
+ * prim builder never reaches PsyX_SetNextPrimSz*, so it contributes nothing to
+ * the frame maximum — yet it still normalizes against that maximum one GsDrawOt
+ * later. Feed it here, at sort time, exactly where the builder it replaced fed
+ * it. This bumps the maximum ONLY: arming g_primSzNext would hand the payload to
+ * whatever legacy prim happens to be captured next. */
+extern "C" void PsyX_NoteItemDepthSz(unsigned int sz)
+{
+	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
+}
+
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
 {
 	uint32_t mx = s0 > s1 ? s0 : s1;

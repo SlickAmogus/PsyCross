@@ -226,6 +226,11 @@ extern void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigned sh
  * depth (the see-through bug). */
 extern void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3);
 extern float PsyX_GetItemDepthSzMax(void);
+/* Contribute an SZ to the frame maximum WITHOUT arming a one-shot payload for
+ * the next addPrim. For a drawer that replaces a sort-time prim builder
+ * outright (the glTF modern mesh replaces GsSortObject4J) and so would
+ * otherwise leave the frame maximum it later divides by unfed. */
+extern void PsyX_NoteItemDepthSz(unsigned int sz);
 extern void PsyX_GetDrawEnvOffset(float* x, float* y);
 /* Drop an armed-but-unconsumed one-shot SZ payload. Gfx_MeshDraw arms per poly
  * BEFORE its cull checks; a poly culled after arming would otherwise leak its
