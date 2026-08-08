@@ -3631,6 +3631,10 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
  * packs to word 0 and the sampler's zero-texel discard treats it as
  * transparent — exactly PSX texel-0 behaviour, which is what makes the loading
  * screen show a trail of Harry rather than an opaque black rectangle. */
+/* Feedback-loop gain, pushed to the pack shader every store. 0.5 is the shipped
+ * steady-state value; the door out-fade wants it near identity. Console: FBDAMP. */
+extern "C" { float g_PsxFeedbackDamp = 0.5f; }
+
 static ShaderID g_fbPackShader = (ShaderID)-1;
 static GLuint   g_fbPackVAO = 0;
 static GLuint   g_fbPackTex = 0;   /* captured frame, RGBA8 */
@@ -3738,9 +3742,16 @@ static const char* s_fbPackShaderSrc =
 	 * stored = k*(0.992*stored + frame) settles at k/(1 - 0.992k), and k = 0.5
 	 * gives ~1.0x — one frame's worth of ghost. Lower this if the trail reads too
 	 * strong; do NOT raise it toward 1.0 without first clearing the destination. */
-	"	const float c_FeedbackDamp = 0.5;\n"
+	/* Runtime-tunable (g_PsxFeedbackDamp, console FBDAMP) so the value can be
+	 * found in-game rather than by rebuilds. The door out-fade wants a gain near
+	 * identity so the held frame decays over ~1s like retail, while the
+	 * Harry-running loading screen composites new geometry every frame and needs
+	 * damping to reach a steady state -- one constant cannot serve both. Raising
+	 * it toward 1.0 without first neutralising the blur SPRT's 2x modulation is
+	 * what produced the flat mid-grey field recorded above. */
+	"	uniform float u_feedbackDamp;\n"
 	"void main() {\n"
-	"	vec3 c = texture2D(s_texture, v_uv).rgb * c_FeedbackDamp;\n"
+	"	vec3 c = texture2D(s_texture, v_uv).rgb * u_feedbackDamp;\n"
 	"	float r5 = floor(c.r * 31.0 + 0.5);\n"
 	"	float g5 = floor(c.g * 31.0 + 0.5);\n"
 	"	float b5 = floor(c.b * 31.0 + 0.5);\n"
@@ -3809,6 +3820,11 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	glDisable(GL_STENCIL_TEST);
 
 	glUseProgram(g_fbPackShader);
+	{
+		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
+		if (dampLoc != -1)
+			glUniform1f(dampLoc, g_PsxFeedbackDamp);
+	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
 	glBindVertexArray(g_fbPackVAO);
