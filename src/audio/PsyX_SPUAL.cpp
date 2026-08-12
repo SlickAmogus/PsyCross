@@ -4,6 +4,7 @@
 #include "psx/libetc.h"
 #include "psx/libmath.h"
 #include "PsyX_SPUAL.h"
+#include "PsyX/PsyX_public.h" /* g_PsyX_SfxOverride */
 
 #include <string.h>
 #include <assert.h>
@@ -781,6 +782,11 @@ static int decodeSound(u_char* iData, int soundSize, short* oData, int* loopStar
 	return k;
 }
 
+/* Optional per-sound sample replacement, installed by the host port. Left NULL
+ * here so PsyCross still links and behaves identically on its own — the host
+ * assigns it when loose-file sound mods are in play. */
+extern "C" PsyX_SfxOverrideFn g_PsyX_SfxOverride = NULL;
+
 static void UpdateVoiceSample(SPUALVoice* voice)
 {
 	static short waveBuffer[SPU_REALMEMSIZE];
@@ -800,6 +806,28 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 
 	loopStart = 0;
 	loopLen = 0;
+
+	{
+		// Loose per-sound replacement (pc_sfx_override.c). The registry is keyed
+		// on the SPU address a voice plays from, so only replaced samples divert
+		// here — everything else in the same bank decodes from the original data
+		// below, unchanged. PC-owned PCM has no ADPCM size ceiling, which is what
+		// lifts the limit on how big a replacement sound can be.
+		const short* modPcm = NULL;
+		int modCount = 0;
+
+		if (g_PsyX_SfxOverride != NULL &&
+			g_PsyX_SfxOverride((int)voice->attr.addr, &modPcm, &modCount) && modCount > 0)
+		{
+			alSourcei(alSource, AL_BUFFER, 0);
+			// Uploaded at the same 44100 the native path uses so the voice's pitch
+			// scales it exactly as it would have scaled the original: a file at the
+			// rate the Audio tool exported plays at the intended speed.
+			alBufferData(alBuffer, AL_FORMAT_MONO16, modPcm, modCount * sizeof(short), 44100);
+			alSourcei(alSource, AL_BUFFER, alBuffer);
+			return;
+		}
+	}
 
 	count = decodeSound(s_SpuMemory.samplemem + voice->attr.addr, SPU_MEMSIZE - voice->attr.addr, waveBuffer, &loopStart, &loopLen, 1);
 

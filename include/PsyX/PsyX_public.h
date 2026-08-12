@@ -116,6 +116,14 @@ extern float						g_PsyX_FlashlightShadowFpsDrop;
  * shadow (Harry's own body); reset to 0 after. Per-vertex, rides the view-space FIFO. */
 extern int							g_PsyX_NoShadowCast;
 
+/* Optional per-sound sample replacement. A voice plays from an SPU address; the
+ * host may answer that address with its own PCM (any length or rate) instead of
+ * the ADPCM resident there, which is how loose-file sound mods bypass both the
+ * bank container and its size ceiling. Returns non-zero on a hit. NULL by
+ * default, so PsyCross on its own behaves exactly as before. */
+typedef int (*PsyX_SfxOverrideFn)(int spuAddr, const short** outPcm, int* outSampleCount);
+extern PsyX_SfxOverrideFn			g_PsyX_SfxOverride;
+
 /* PC port: per-pixel flashlight cone parameters, pushed once per frame by game
  * code (bodyprog world-lighting setup). Position and direction are in VIEW
  * (camera) space — the same space as the per-vertex GrVertex.vsx/vsy/vsz the GTE
