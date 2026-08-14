@@ -1904,6 +1904,21 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
+			/* Every render-to-VRAM pass goes through this FBO. If the driver
+			 * rejects the attachment format the writes are silently dropped and
+			 * everything sampling VRAM reads a constant, which on screen is a
+			 * world in one flat colour and nothing in the log. Say so instead. */
+			{
+				const GLenum fbStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+				const GLenum glErr    = glGetError();
+				eprintinfo("[VRAM-FBO] status=0x%04X (%s) glError=0x%04X internalFormat=0x%04X format=0x%04X %dx%d\n",
+				           (unsigned)fbStatus,
+				           fbStatus == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE",
+				           (unsigned)glErr,
+				           (unsigned)VRAM_INTERNAL_FORMAT, (unsigned)VRAM_FORMAT,
+				           VRAM_WIDTH, VRAM_HEIGHT);
+			}
+
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		}
 	}
@@ -4448,6 +4463,32 @@ void GR_DumpVRAM(const char* path)
 void GR_SwapWindow()
 {
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	/* Nothing in this renderer checks glGetError, so a state or format the
+	 * driver rejects just produces a wrong image and no message. Drain a BOUNDED
+	 * number per frame: glGetError can keep reporting without ever returning
+	 * GL_NO_ERROR when there is no current context, and an unbounded drain here
+	 * hangs the frame instead of diagnosing it. */
+	{
+		static unsigned s_seenErrBits = 0;
+		static int      s_errLogged   = 0;
+		int             drain;
+		for (drain = 0; drain < 8; drain++)
+		{
+			const GLenum err = glGetError();
+			if (err == GL_NO_ERROR)
+				break;
+			{
+				const unsigned bit = 1u << (err & 0x7);
+				if (!(s_seenErrBits & bit) && s_errLogged < 16)
+				{
+					s_seenErrBits |= bit;
+					s_errLogged++;
+					eprinterr("[GL] glGetError=0x%04X during frame\n", (unsigned)err);
+				}
+			}
+		}
+	}
+
 	SDL_GL_SwapWindow(g_window);
 #endif
 
