@@ -1459,9 +1459,19 @@ ShaderID GR_Shader_Compile(const char* source)
 		"precision highp float;\n"
 		"#define fragColor gl_FragColor\n";
 #elif defined(ES3_SHADERS)
+	/* highp int, NOT lowp. GLSL ES only guarantees 9 bits for a lowp int
+	 * (-256..255), and this shader does integer work on PSX quantities that are
+	 * nowhere near that small: 16-bit Z depths, VRAM texel coordinates across a
+	 * 1024x512 page, CLUT and tpage indices. With lowp every one of them
+	 * truncated and the world came out as a single flat colour on device.
+	 *
+	 * It read as harmless because desktop GLSL PARSES precision qualifiers and
+	 * then ignores them -- they exist only so ES source compiles -- so the same
+	 * line is a no-op at 140 and fatal at 300 es. ES3 guarantees highp int in
+	 * both stages, so asking for it is free here. */
 	const char* GLSL_HEADER_VERT =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -1470,7 +1480,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	const char* GLSL_HEADER_FRAG =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
