@@ -15,6 +15,10 @@
 #include "platform.h"
 #include "util/crash_handler.h"
 
+#if defined(__ANDROID__)
+#include <android/log.h>   /* PrintMessageToOutput routes the spew to logcat */
+#endif
+
 #include "psx/libetc.h"
 #include "psx/libgte.h"
 #include "psx/libgpu.h"
@@ -661,6 +665,23 @@ void PrintMessageToOutput(SpewType_t spewtype, char const* pMsgFormat, va_list a
 		EM_ASM({
 			console.log(UTF8ToString($0));
 		}, pTempBuffer);
+	}
+#elif defined(__ANDROID__)
+	/* An Android app's stdout goes to /dev/null unless something redirects it,
+	 * and SDL does not, so printf here threw away every diagnostic this engine
+	 * produces -- including shader compile and link failures, which is exactly
+	 * what you need when the screen is black. Route to logcat by severity so
+	 * `adb logcat -s PsyX` is the equivalent of reading SilentHill.log. */
+	{
+		int prio;
+		switch (spewtype)
+		{
+			case SPEW_INFO:    prio = ANDROID_LOG_INFO;  break;
+			case SPEW_WARNING: prio = ANDROID_LOG_WARN;  break;
+			case SPEW_ERROR:   prio = ANDROID_LOG_ERROR; break;
+			default:           prio = ANDROID_LOG_DEBUG; break;
+		}
+		__android_log_write(prio, "PsyX", pTempBuffer);
 	}
 #else
 	printf(pTempBuffer);
