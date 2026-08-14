@@ -40,7 +40,13 @@ int prefix##_SetReverbMode(int); \
 void prefix##_SetReverbDepthScale(float); \
 float prefix##_GetReverbDepthScale()
 
+/* PSYX_NO_OPENAL drops PsyX_SPULegacy.cpp (and the PsyX_SPUAL.cpp it includes)
+ * from the build on platforms with no OpenAL — Android, where SDL2's own
+ * AAudio/OpenSL sink is what PsyX_SPUSoftware writes to. Declaring the legacy
+ * entry points here would leave every one of them undefined at link. */
+#if !defined(PSYX_NO_OPENAL)
 DECLARE_BACKEND(PsyX_SPULegacy);
+#endif
 DECLARE_BACKEND(PsyX_SPUSoftware);
 
 int PsyX_SPUSoftware_AllocAt(u_int, int);
@@ -69,17 +75,28 @@ bool g_initialized = false;
 
 bool UseSoftware()
 {
+#if defined(PSYX_NO_OPENAL)
+	return true;
+#else
 	return g_renderer != 0;
+#endif
 }
 }
 
 extern "C"
 {
 
+#if defined(PSYX_NO_OPENAL)
+#define DISPATCH_VOID(name, args) \
+	do { PsyX_SPUSoftware_##name args; } while (0)
+#define DISPATCH_RETURN(name, args) \
+	return PsyX_SPUSoftware_##name args
+#else
 #define DISPATCH_VOID(name, args) \
 	do { if (UseSoftware()) PsyX_SPUSoftware_##name args; else PsyX_SPULegacy_##name args; } while (0)
 #define DISPATCH_RETURN(name, args) \
 	return UseSoftware() ? PsyX_SPUSoftware_##name args : PsyX_SPULegacy_##name args
+#endif
 
 void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, int bitPerfect)
 {
@@ -95,6 +112,15 @@ int PsyX_SPUAL_ConfigureRenderer(
 		referenceDither < 0 || referenceDither > 1)
 		return 0;
 
+#if defined(PSYX_NO_OPENAL)
+	/* renderer 0 selects the legacy AL backend, which this build does not
+	 * contain. Leaving it at 0 would skip ConfigureRenderer below and hand
+	 * UseSoftware() an unconfigured software renderer, so promote it to the
+	 * PSX-accurate one instead of failing the call. */
+	if (renderer == 0)
+		renderer = 1;
+#endif
+
 	if (renderer != 0 &&
 		!PsyX_SPUSoftware_ConfigureRenderer(
 			renderer - 1, idealClip, referenceClip, referenceDither))
@@ -106,19 +132,27 @@ int PsyX_SPUAL_ConfigureRenderer(
 
 int PsyX_SPUAL_InitSound()
 {
+#if defined(PSYX_NO_OPENAL)
+	const int result = PsyX_SPUSoftware_InitSound();
+#else
 	const int result = UseSoftware()
 		? PsyX_SPUSoftware_InitSound()
 		: PsyX_SPULegacy_InitSound();
+#endif
 	g_initialized = result != 0;
 	return result;
 }
 
 void PsyX_SPUAL_ShutdownSound()
 {
+#if defined(PSYX_NO_OPENAL)
+	PsyX_SPUSoftware_ShutdownSound();
+#else
 	if (UseSoftware())
 		PsyX_SPUSoftware_ShutdownSound();
 	else
 		PsyX_SPULegacy_ShutdownSound();
+#endif
 	g_initialized = false;
 }
 

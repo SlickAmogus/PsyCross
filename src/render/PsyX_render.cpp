@@ -573,18 +573,6 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 
 #if defined(RENDERER_OGLES)
 
-#if defined(__ANDROID__)
-	//Override to full screen.
-	SDL_DisplayMode displayMode;
-	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0)
-	{
-		screenWidth = displayMode.w;
-		windowWidth = displayMode.w;
-		screenHeight = displayMode.h;
-		windowHeight = displayMode.h;
-	}
-#endif
-
 	//SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, OGLES_VERSION);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -595,6 +583,25 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		eprinterr("Failed to initialise - OpenGL ES %d.x is not supported.\n", OGLES_VERSION);
 		return 0;
 	}
+
+#if defined(__ANDROID__)
+	/* Android always hands back a fullscreen surface whose size is the display's,
+	 * not the one requested of SDL_CreateWindow. g_windowWidth/Height feed the
+	 * viewport and the aspect-corrected cull bounds, so they have to be the real
+	 * drawable size or every clip rect is computed against the wrong extents.
+	 * (The upstream block that used to sit here assigned to screenWidth/
+	 * windowWidth — names this fork does not have — and ran before the window
+	 * existed, so it could never have taken effect anyway.) */
+	{
+		int drawableW = 0, drawableH = 0;
+		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
+		if (drawableW > 0 && drawableH > 0)
+		{
+			g_windowWidth = drawableW;
+			g_windowHeight = drawableH;
+		}
+	}
+#endif
 
 #elif defined(RENDERER_OGL)
 
@@ -1748,7 +1755,12 @@ int GR_InitialisePSX()
 	 * the sample count the driver actually granted (may differ from requested). */
 	if (g_cfg_msaaSamples > 0)
 	{
+#if !defined(RENDERER_OGLES)
+		/* GLES has no GL_MULTISAMPLE toggle — rasterisation is multisampled
+		 * whenever the framebuffer is, so there is nothing to enable there.
+		 * The granted-sample-count check below still applies. */
 		glEnable(GL_MULTISAMPLE);
+#endif
 		int actualSamples = 0;
 		SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES, &actualSamples);
 		eprintf("*MSAA: requested %dx, got %dx\n", g_cfg_msaaSamples, actualSamples);
@@ -3346,18 +3358,40 @@ static void GR_EnsureShadowTarget(void)
 	             0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+#if defined(RENDERER_OGLES)
+	/* Core GLES 3.0 has neither GL_CLAMP_TO_BORDER nor GL_TEXTURE_BORDER_COLOR
+	 * (they arrive in ES 3.2, or via EXT_texture_border_clamp). CLAMP_TO_EDGE is
+	 * the only portable wrap mode here, but it smears the edge texel outward
+	 * instead of returning the "fully lit" border, so geometry sampled outside
+	 * the light frustum picks up the frustum-edge depth and can streak. The
+	 * portable fix is a bounds check in the shadow shader (treat projected
+	 * coords outside [0,1] as unshadowed) rather than relying on the border
+	 * colour — see android_port/README.md. Shadow mapping is an opt-in graphics
+	 * option, so this does not affect a default boot. */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+#else
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 	{
 		float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  /* outside the light frustum = fully lit */
 		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
 	}
+#endif
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenFramebuffers(1, &g_shadowFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
+#if defined(RENDERER_OGLES)
+	/* GLES only has the plural form; glReadBuffer(GL_NONE) does exist in ES 3.0. */
+	{
+		const GLenum noBuffers = GL_NONE;
+		glDrawBuffers(1, &noBuffers);
+	}
+#else
 	glDrawBuffer(GL_NONE);
+#endif
 	glReadBuffer(GL_NONE);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 

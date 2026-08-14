@@ -23,6 +23,22 @@
 #ifndef __glad_h_
 #define __glad_h_
 
+/* Android links the platform's real GLES3 library directly — PsyX_render.h
+ * leaves USE_GLAD undefined there and includes <GLES3/gl3.h> itself, so glad's
+ * loader is never initialised on this platform and its glad_glXxx function
+ * pointers would all be NULL at call time.
+ *
+ * Several translation units include this header directly rather than going
+ * through PsyX_render.h. Whichever include landed first used to win: the ones
+ * that reached glad.h first compiled against desktop-GL declarations that would
+ * have crashed at runtime, and the ones that reached the GLES header first
+ * tripped the #error guards below. Forwarding to the platform headers here
+ * makes every consumer correct regardless of include order. */
+#if defined(__ANDROID__)
+#   include <GLES3/gl3.h>
+#   include <GLES2/gl2ext.h>
+#else
+
 #ifdef __gl_h_
 #error OpenGL header already included, remove this include, glad already provides it
 #endif
@@ -3534,5 +3550,7 @@ GLAPI int GLAD_GL_KHR_debug;
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* !__ANDROID__ — see the platform-header forward at the top */
 
 #endif

@@ -9,6 +9,20 @@ list(FILTER PSYCROSS_SRCS_CPP EXCLUDE REGEX "/tests/")
 list(REMOVE_ITEM PSYCROSS_SRCS_CPP
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUAL.cpp")
 
+# Android has no OpenAL. PsyX_SPUSoftware renders the SPU itself and pushes
+# through SDL2's audio sink, so the legacy AL backend leaves the build here
+# (before add_library, or the removal would come too late to matter) and
+# PsyX_SPUDispatch.cpp collapses onto the software one via PSYX_NO_OPENAL.
+if(ANDROID)
+	list(REMOVE_ITEM PSYCROSS_SRCS_CPP
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPULegacy.cpp")
+	# glad.c is the desktop-GL entry-point loader. Android links libGLESv3
+	# directly (PsyX_render.h leaves USE_GLAD undefined), so the loader is never
+	# called and its desktop-only PFNGL*PROC types do not exist here.
+	list(REMOVE_ITEM PSYCROSS_SRCS_C
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/render/glad.c")
+endif()
+
 set_source_files_properties( ${PSYCROSS_SRCS_C} PROPERTIES LANGUAGE C)
 set_source_files_properties( ${PSYCROSS_SRCS_CPP} PROPERTIES LANGUAGE CXX)
 
@@ -56,24 +70,39 @@ if(NOT WIN32)
         PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden")
 endif()
 
+if(ANDROID)
+    # SDL2 is built from source alongside this (android_port/app/jni adds the
+    # submodule before us), so the target already exists — find_package would
+    # look for a system SDL2 that an NDK sysroot does not have.
+    target_link_libraries(psycross_static SDL2)
+else()
 find_package(SDL2 REQUIRED)
 target_link_libraries(psycross_static ${SDL2_LIBRARIES})
 target_include_directories(psycross_static PRIVATE ${SDL2_INCLUDE_DIRS})
+endif()
 
-find_package(OpenAL REQUIRED)
-if(TARGET OpenAL::OpenAL)
-    target_link_libraries(psycross_static OpenAL::OpenAL)
-elseif(TARGET OpenAL)
-    target_link_libraries(psycross_static OpenAL)
+# The legacy AL backend is already out of the source list on Android (see the
+# REMOVE_ITEM above); PSYX_NO_OPENAL is what makes the dispatch stop referring
+# to it. PUBLIC so pc_port's TUs see the same collapsed contract.
+if(ANDROID)
+    target_compile_definitions(psycross_static PUBLIC PSYX_NO_OPENAL)
+    target_link_libraries(psycross_static GLESv3 EGL android log)
 else()
-    target_link_libraries(psycross_static ${OPENAL_LIBRARY})
-    target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
-endif()
-if(OpenAL_SOURCE_DIR)
-    target_include_directories(psycross_static PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
-endif()
-if(OPENAL_INCLUDE_DIR)
-    target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
+    find_package(OpenAL REQUIRED)
+    if(TARGET OpenAL::OpenAL)
+        target_link_libraries(psycross_static OpenAL::OpenAL)
+    elseif(TARGET OpenAL)
+        target_link_libraries(psycross_static OpenAL)
+    else()
+        target_link_libraries(psycross_static ${OPENAL_LIBRARY})
+        target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
+    endif()
+    if(OpenAL_SOURCE_DIR)
+        target_include_directories(psycross_static PRIVATE ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/include)
+    endif()
+    if(OPENAL_INCLUDE_DIR)
+        target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
+    endif()
 endif()
 
 if(WIN32)
