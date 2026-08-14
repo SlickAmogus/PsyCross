@@ -2737,7 +2737,16 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				orthoTop = 0.0f;
 				orthoBot = psxH * vscale;
 			}
-			const float psxAspect = psxW / psxH;
+			/* A PSX display is 4:3 whatever the buffer says, so the aspect cannot
+			 * be read off the raw dimensions: an INTERLACED mode stores twice the
+			 * lines in the same physical height, giving 2:1-tall pixels. 320x448
+			 * (which is what this game uses in-game) came out as 320/448 = 0.71 —
+			 * a portrait ratio — and squeezed the viewport to a narrow strip.
+			 * Halving the height for aspect purposes restores 1.43. Only the
+			 * aspect is corrected; psxH stays the full buffer height because the
+			 * ortho extent below is in PSX buffer coordinates, not display ones. */
+			const float psxAspectH = activeDispEnv.isinter ? (psxH * 0.5f) : psxH;
+			const float psxAspect = psxW / psxAspectH;
 			const float winAspect = (g_windowHeight > 0)
 				? ((float)g_windowWidth / (float)g_windowHeight)
 				: psxAspect;
