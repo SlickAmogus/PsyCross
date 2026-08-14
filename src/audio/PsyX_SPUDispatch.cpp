@@ -68,6 +68,16 @@ u_int PsyX_SPUSoftware_GetQueuedXaFrames();
 #undef DECLARE_BACKEND
 }
 
+#if defined(PSYX_NO_OPENAL)
+#include "PsyX/PsyX_public.h" /* PsyX_SfxOverrideFn */
+/* Normally defined by PsyX_SPUAL.cpp, which PSYX_NO_OPENAL leaves out of the
+ * build. The game assigns it unconditionally (pc_sfx_override.c), so it has to
+ * exist here. NOTE: only the legacy AL mixer ever consumed this hook -- the
+ * software SPU does not check it -- so SFX overrides are inert on
+ * OpenAL-less platforms until PsyX_SPUSoftware learns to honour it. */
+extern "C" PsyX_SfxOverrideFn g_PsyX_SfxOverride = NULL;
+#endif
+
 namespace
 {
 int g_renderer = 0;
