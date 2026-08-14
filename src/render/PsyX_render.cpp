@@ -1508,10 +1508,18 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 	#define SH_TC_CENTROID "centroid "
 #endif
+/* `noperspective` is desktop GLSL only. GLES has no such interpolation
+ * qualifier at any version, so emitting it fails shader compilation outright on
+ * Android and iOS rather than merely losing the affine look. */
+#if defined(RENDERER_OGLES)
+	#define SH_TC_NOPERSPECTIVE ""
+#else
+	#define SH_TC_NOPERSPECTIVE "noperspective "
+#endif
 	if (g_cfg_affineTextures)
 	{
-		strcat(extra_vs_defines, "#define AFFINE_VARYING noperspective " SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING noperspective " SH_TC_CENTROID "varying\n");
+		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
+		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
 	}
 	else
 	{
