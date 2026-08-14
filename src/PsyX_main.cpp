@@ -992,13 +992,7 @@ char PsyX_BeginScene()
 	 * never auto-cleared the framebuffer. */
 	{
 		extern int g_PsxPresentLastFrame;
-		extern int g_PsxFreezeActiveThisFrame;
 		extern void GR_PresentLastFrame(void);
-		/* Latch here, before the game's update can arm the flag mid-frame:
-		 * features gated on "this is a frozen frame" must see the state as of
-		 * the frame's START, or the pause-entry tick -- which still renders the
-		 * world -- drops them for one visible frame. */
-		g_PsxFreezeActiveThisFrame = g_PsxPresentLastFrame;
 		if (g_PsxPresentLastFrame)
 			GR_PresentLastFrame();
 	}
