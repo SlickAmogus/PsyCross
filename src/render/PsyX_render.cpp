@@ -1515,10 +1515,42 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 	#define SH_TC_CENTROID "centroid "
 #endif
+
+/* `noperspective` is desktop GLSL only. GLSL ES has just smooth/flat/centroid
+ * in every version through 3.2, so emitting it on an ES target fails shader
+ * COMPILATION at runtime -- the build stays green and the game comes up black.
+ * NV_shader_noperspective_interpolation restores it, but no Mali-T720-class
+ * part (the Arcade1Up MT8163 target) exposes it, so this is the common path on
+ * Android, not an edge case.
+ *
+ * Dropping the qualifier costs the PSX's affine texture warping: UVs become
+ * perspective-correct, so textures look "too clean" on steeply angled surfaces
+ * instead of swimming the way the hardware did. Everything still renders. The
+ * real fix is to premultiply the varying by w in the vertex shader and undo it
+ * in the fragment shader, which reproduces affine interpolation on any GLES
+ * device -- deliberately not attempted blind here, since it is shader maths
+ * that has to be verified by looking at a rendered frame. */
+#if defined(ES2_SHADERS) || defined(ES3_SHADERS)
+	#define SH_TC_NOPERSPECTIVE ""
+#else
+	#define SH_TC_NOPERSPECTIVE "noperspective "
+#endif
 	if (g_cfg_affineTextures)
 	{
-		strcat(extra_vs_defines, "#define AFFINE_VARYING noperspective " SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING noperspective " SH_TC_CENTROID "varying\n");
+#if defined(ES2_SHADERS) || defined(ES3_SHADERS)
+		/* Say so once rather than let `affine_textures = 1` look like it took
+		 * effect. Shaders compile here per program, so gate the notice. */
+		static bool s_affineUnavailableLogged = false;
+		if (!s_affineUnavailableLogged)
+		{
+			s_affineUnavailableLogged = true;
+			eprintwarn("affine_textures is on, but GLSL ES has no `noperspective` "
+			           "qualifier - texture mapping stays perspective-correct "
+			           "(no PSX UV warping) on this renderer.\n");
+		}
+#endif
+		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
+		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
 	}
 	else
 	{
