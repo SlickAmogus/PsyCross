@@ -333,6 +333,15 @@ static int    g_freezeFrameW = 0;
 static int    g_freezeFrameH = 0;
 static int    g_freezeFrameValid = 0;
 static int    g_freezePresentedThisFrame = 0;
+
+/* g_PsxPresentLastFrame latched at BeginScene, i.e. "this frame is a frozen
+ * re-present". The raw flag cannot be used to gate rendering: the game arms it
+ * during the update, AFTER BeginScene but BEFORE the world is drawn, so on the
+ * pause-entry tick -- which still renders the world -- the raw flag is already 1
+ * and any feature gated on it drops out for that one rendered frame. That is the
+ * one-frame grey wash when pausing outdoors at night: the flashlight shadow map
+ * switched off, so the cone lit the scene unoccluded. */
+extern "C" { int g_PsxFreezeActiveThisFrame = 0; }
 int framebuffer_need_update = 0;
 
 #if defined(__EMSCRIPTEN__) || defined(__RPI__) || defined(__ANDROID__)
@@ -2240,7 +2249,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	{
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
-		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
+		                g_PsyX_ShadowsAllowed && !g_PsxFreezeActiveThisFrame) ? 1 : 0;
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
@@ -3424,7 +3433,7 @@ int GR_FlashlightShadowActive(void)
 	 * live-gameplay-only effect. */
 	return (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 	        g_PsyX_FlashlightActive && g_PsyX_ShadowsAllowed &&
-	        !g_PsxPresentLastFrame) ? 1 : 0;
+	        !g_PsxFreezeActiveThisFrame) ? 1 : 0;
 }
 
 static GLint s_shadowPrevFBO = 0;
