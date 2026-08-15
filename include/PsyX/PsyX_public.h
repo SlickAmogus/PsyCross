@@ -129,7 +129,11 @@ extern float						g_PsyX_CharaFade;
  * the ADPCM resident there, which is how loose-file sound mods bypass both the
  * bank container and its size ceiling. Returns non-zero on a hit. NULL by
  * default, so PsyCross on its own behaves exactly as before. */
-typedef int (*PsyX_SfxOverrideFn)(int spuAddr, const short** outPcm, int* outSampleCount);
+/* outRate is the WAV's own sample rate, so the mixer can play a replacement at
+ * the rate it was authored at instead of assuming the original's. 0 = unknown,
+ * which keeps the old behaviour for that sample. */
+typedef int (*PsyX_SfxOverrideFn)(int spuAddr, const short** outPcm, int* outSampleCount,
+                                  int* outRate);
 extern PsyX_SfxOverrideFn			g_PsyX_SfxOverride;
 
 /* PC port: per-pixel flashlight cone parameters, pushed once per frame by game
