@@ -1302,7 +1302,7 @@ int g_PsxFogToBlack = 0;
 const char* gte_shader_4 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -1317,7 +1317,7 @@ const char* gte_shader_4 =
 const char* gte_shader_8 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -1332,7 +1332,7 @@ const char* gte_shader_8 =
 const char* gte_shader_16 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -1347,7 +1347,7 @@ const char* gte_shader_16 =
 const char* gte_shader_32_rgba =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -1545,6 +1545,28 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 	#define SH_TC_NOPERSPECTIVE "noperspective "
 #endif
+	/* v_page_clut is NOT a colour or a coordinate: .xy is the VRAM texture-page
+	 * origin and .zw is the CLUT (palette) address, both exact texel addresses
+	 * and both constant across a primitive. Desktop declares them
+	 * `noperspective`, which for a constant is exact. GLES has no
+	 * `noperspective`, and dropping the qualifier leaves the default `smooth` —
+	 * perspective-correct, i.e. divided through an interpolated 1/w. A 2D prim
+	 * has constant w so the value survives, which is why the menus, logos and
+	 * FMVs were fine; a 3D world triangle has varying w, so the palette address
+	 * drifts across the face and every texel resolves against the wrong CLUT
+	 * row. That is the flat-coloured world.
+	 *
+	 * `flat` is the correct qualifier for a per-primitive constant and ES3 has
+	 * it. v_texcoord genuinely does need interpolating, so only the page/CLUT
+	 * pair changes. */
+#if defined(ES3_SHADERS)
+	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING flat out\n");
+	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING flat in\n");
+#else
+	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
+	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
+#endif
+
 	if (g_cfg_affineTextures)
 	{
 #if defined(ES2_SHADERS) || defined(ES3_SHADERS)
@@ -2488,6 +2510,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	framebuffer_need_update = 1;
 
 #if USE_OPENGL
+
 	/* PC port: when pillarboxing (4:3 content centered in a wider window), keep
 	 * the side bars black even when the game clears the framebuffer to a
 	 * non-black color. The item-examine ("story item") screen clears to the gray
@@ -4393,6 +4416,7 @@ void GR_UpdateVRAM()
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
 #endif
 
+
 	GR_RestoreStoredFramebufferRegion();
 
 	/* PC port: the full vram[] re-upload just stamped CPU bytes over the
@@ -4488,6 +4512,7 @@ void GR_SwapWindow()
 			}
 		}
 	}
+
 
 	SDL_GL_SwapWindow(g_window);
 #endif

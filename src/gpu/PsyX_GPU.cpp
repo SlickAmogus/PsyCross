@@ -2559,6 +2559,7 @@ void DrawSplit(const GPUDrawSplit& split)
 				split.drawenv.clip.w, split.drawenv.clip.h);
 			bigSplitLog++;
 		}
+
 	}
 	if(split.debugText)
 		GR_PushDebugLabel(split.debugText);
