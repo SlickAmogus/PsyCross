@@ -34,9 +34,20 @@
  * have crashed at runtime, and the ones that reached the GLES header first
  * tripped the #error guards below. Forwarding to the platform headers here
  * makes every consumer correct regardless of include order. */
+#if defined(__APPLE__)
+#   include <TargetConditionals.h>
+#endif
+
 #if defined(__ANDROID__)
 #   include <GLES3/gl3.h>
 #   include <GLES2/gl2ext.h>
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+/* Same forward as Android, to Apple's framework layout. Without it glad's
+ * `#define glActiveTexture glad_glActiveTexture` function-pointer shims collide
+ * with the real declarations in OpenGLES/ES3/gl.h ("redefinition as a different
+ * kind of symbol") in every TU that reaches this header before that one. */
+#   include <OpenGLES/ES3/gl.h>
+#   include <OpenGLES/ES3/glext.h>
 #else
 
 #ifdef __gl_h_
@@ -3551,6 +3562,6 @@ GLAPI int GLAD_GL_KHR_debug;
 }
 #endif
 
-#endif /* !__ANDROID__ — see the platform-header forward at the top */
+#endif /* !mobile GLES — see the platform-header forward at the top */
 
 #endif
