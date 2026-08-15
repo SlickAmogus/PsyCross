@@ -1093,6 +1093,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec4 a_zw;\n"\
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
+	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1126,6 +1127,7 @@ int g_PsxFogToBlack = 0;
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
+	"		v_fade = a_normal.z;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -1261,7 +1263,7 @@ int g_PsxFogToBlack = 0;
 	"					}\n"\
 	"				}\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
-	"				fragColor.rgb += flAlbedo * fl;\n"\
+	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
@@ -1300,6 +1302,7 @@ const char* gte_shader_4 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1315,6 +1318,7 @@ const char* gte_shader_8 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1330,6 +1334,7 @@ const char* gte_shader_16 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1345,6 +1350,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER

@@ -116,6 +116,7 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * off the object up close in first person — acceptable; shadows have their own
  * on/off, and it isn't noticeable at third-person camera distances.) */
 extern "C" int g_PsyX_NoShadowCast = 0;
+extern "C" float g_PsyX_CharaFade = 0.0f;
 
 /* Like the PGXP ShadowEntry, each entry records the packed integer `value` of the
  * vertex word it shadows. A lookup whose current word differs falls to "untracked":
@@ -131,23 +132,23 @@ extern "C" int g_PsyX_NoShadowCast = 0;
  * a lighting helper and restores only the GTE registers, and the various drawers
  * each push their own SetGeomScreen. A frame-global therefore reprojects clip
  * vertices with whichever values the LAST RTPS of the frame happened to leave. */
-struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float ofx, ofy, h; };
+struct VsEntry { uintptr_t key; unsigned gen; unsigned value; float vx, vy, vz; float nocast; float fade; float ofx, ofy, h; };
 static VsEntry s_vshadow[SHADOW_SIZE];
 
 static void Vs_Put(void* addr, float vx, float vy, float vz, float nocast, unsigned value,
-                   float ofx, float ofy, float h) {
+                   float ofx, float ofy, float h, float fade = 0.0f) {
 	uintptr_t k = (uintptr_t)addr;
 	unsigned s = ShadowHash(k);
 	for (int i = 0; i < 16; i++) {
 		VsEntry* e = &s_vshadow[(s + i) & SHADOW_MASK];
 		if (e->key == k || e->key == 0 || e->gen != s_pgxpGen) {
 			e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
-			e->ofx = ofx; e->ofy = ofy; e->h = h; return;
+			e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h; return;
 		}
 	}
 	VsEntry* e = &s_vshadow[s];
 	e->key = k; e->gen = s_pgxpGen; e->value = value; e->vx = vx; e->vy = vy; e->vz = vz; e->nocast = nocast;
-	e->ofx = ofx; e->ofy = ofy; e->h = h;
+	e->fade = fade; e->ofx = ofx; e->ofy = ofy; e->h = h;
 }
 
 static const VsEntry* Vs_Get(const void* addr, unsigned value) {
@@ -165,7 +166,8 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz, float ofx, float ofy, float h) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h);
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h,
+	       g_PsyX_CharaFade);
 }
 
 /* Drawer copy hook (DuckStation CPU MOVE/SW): the game just did *dst = *src (a
@@ -184,7 +186,7 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
 		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst,
-		               ve->ofx, ve->ofy, ve->h);
+		               ve->ofx, ve->ofy, ve->h, ve->fade);
 	}
 }
 
@@ -559,6 +561,7 @@ static inline void VsFillVertex(GrVertex* v, const void* addr)
 	 * so presence can't be inferred from the position itself. No shader reads ny. */
 	if (e) {
 		v->vsx = e->vx; v->vsy = e->vy; v->vsz = e->vz; v->nx = e->nocast; v->ny = 1.0f;
+		v->nz = e->fade;
 		/* Latch this vertex's projection registers for the near clipper: every
 		 * vertex of a poly was transformed under the same GTE state, and the
 		 * clip runs a few calls later in the same ParsePrimitive. */

@@ -116,6 +116,14 @@ extern float						g_PsyX_FlashlightShadowFpsDrop;
  * shadow (Harry's own body); reset to 0 after. Per-vertex, rides the view-space FIFO. */
 extern int							g_PsyX_NoShadowCast;
 
+/* 0 = lit normally, 1 = fully faded. Set by game code around a character draw
+ * whose LIGHTING the game is scaling down (func_8003DA9C's `timer`, which is how
+ * a Larval Stalker vanishes). The per-pixel flashlight adds its light on top of
+ * the TEXTURE, not the vertex colour, so without this it happily relights a
+ * character the game has already faded to nothing. Per-vertex, rides the same
+ * view-space FIFO as g_PsyX_NoShadowCast. */
+extern float						g_PsyX_CharaFade;
+
 /* Optional per-sound sample replacement. A voice plays from an SPU address; the
  * host may answer that address with its own PCM (any length or rate) instead of
  * the ADPCM resident there, which is how loose-file sound mods bypass both the
