@@ -6,20 +6,69 @@
 #undef Status
 #endif
 
+/* A GTE register, aliased as a whole word (.d) and as its component bytes and
+ * halfwords. The member NAMES encode position -- l = low, h = high, h2/h3 the
+ * upper bytes -- and that is only true on a little-endian host: there byte 0 of
+ * the struct is the least significant byte of .d.
+ *
+ * On big-endian byte 0 is the MOST significant, so .b.l aliases the top byte
+ * and every one of these names means its opposite. The remedy is the standard
+ * one for word/byte unions (BSD's ip.h does the same for its bitfields):
+ * declare the members in reverse order under big-endian, so each name keeps its
+ * meaning and .d keeps the same value.
+ *
+ * PS3, first frame of world geometry: the GTE writes a lit colour through
+ * C2_R2/G2/B2/CD2 (bytes 0..3) and the game reads it back as the packed word
+ * C2_RGB2 (.d). With the little-endian declaration on the PPU that word came
+ * back byte-reversed, so every gouraud world polygon took the primitive's CODE
+ * byte as its red channel and the real green/blue as blue/green -- the whole
+ * scene rendered dark red. */
 typedef union
 {
+/* ONLY the byte views are flipped, and the halfword views are deliberately
+ * left alone. That asymmetry is not an oversight -- it is what the consumers
+ * require, and flipping both breaks the transform:
+ *
+ * The word is stored to a primitive with one wide store, so what matters is the
+ * MEMORY IMAGE it produces, not the register's numeric value. The screen-coord
+ * pair {s16 x, s16 y} is declared in that order on every platform, so memory
+ * must read [x_hi, x_lo, y_hi, y_lo] -- which on big-endian means x has to sit
+ * in the HIGH half of the word, which is exactly what the unflipped `.w.l`
+ * already does. Flipping it made the GTE self-test report sx=447 sy=240 where
+ * 352/256 was expected.
+ *
+ * The colour quartet is the opposite case, because PSX_PRIM_CMD already
+ * declares it MSB-first on big-endian: memory must read [code, b, g, r], so the
+ * word needs code in the top byte and r in the LOW byte -- which needs `.b.l`
+ * to genuinely be the low byte. */
+#if defined(__BIG_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+	struct { unsigned char h3, h2, h, l; } b;
+	struct { unsigned short l, h; } w;
+	struct { char h3, h2, h, l; } sb;
+	struct { short l, h; } sw;
+#else
 	struct { unsigned char l, h, h2, h3; } b;
 	struct { unsigned short l, h; } w;
 	struct { char l, h, h2, h3; } sb;
 	struct { short l, h; } sw;
+#endif
 
 	unsigned int d;
 	int sd;
 } PAIR;
 
+/* Same hazard: this aliases the same registers as PAIR, so on big-endian its
+ * members must run the other way for .d to keep meaning (code<<24)|(b<<16)|
+ * (g<<8)|r, which is what the PSX word is. */
+#if defined(__BIG_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+typedef struct {
+	unsigned char c, b, g, r;
+} CBGR;
+#else
 typedef struct {
 	unsigned char r, g, b, c;
 } CBGR;
+#endif
 
 typedef struct {
 	short x, y, z, pad;
