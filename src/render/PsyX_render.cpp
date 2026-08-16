@@ -12,10 +12,17 @@
 
 #include "PsyX/PsyX_render.h"
 #include "PsyX/PsyX_globals.h"
+#include "PsyX/PsyX_backend.h"
 #include "PsyX/util/timer.h"
+
+#if defined(_WIN32) && defined(RENDERER_OGL)
+/* For the HWND that the ANGLE/EGL surface is created against. */
+#   include <SDL_syswm.h>
+#endif
 
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 
@@ -462,7 +469,15 @@ void PBO_Download(GrPBO* pbo)
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
 
 #if defined(RENDERER_OGL)
-		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		/* glGetTexImage pulls the whole bound texture; ES 3.0 has no such call,
+		 * so there we read the equivalent region out of the bound framebuffer
+		 * instead. Callers always have both bound to the same image, which is
+		 * what makes the two interchangeable (and is the path Android already
+		 * ships). The trailing 0 is an offset into the bound pack buffer. */
+		if (g_grCaps.getTexImage)
+			glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		else
+			glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);
 #else
 		glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);   /* When a GL_PIXEL_PACK_BUFFER is bound, the last 0 is used as offset into the buffer to read into. */
 #endif
@@ -473,7 +488,14 @@ void PBO_Download(GrPBO* pbo)
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
 
 #if defined(RENDERER_OGL)
-		ptr = (unsigned char*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		/* ES 3.0 kept only the ranged map. Same semantics for a full-buffer
+		 * read, so the asynchronous double-buffered readback is preserved
+		 * rather than degraded to a synchronous glReadPixels-to-CPU. */
+		if (g_grCaps.mapBuffer)
+			ptr = (unsigned char*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		else
+			ptr = (unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, pbo->nbytes, GL_MAP_READ_BIT);
+
 		if (NULL != ptr)
 		{
 			memcpy(pbo->pixels, ptr, pbo->nbytes);
@@ -483,7 +505,10 @@ void PBO_Download(GrPBO* pbo)
 			eprintwarn("Failed to map the buffer\n");
 
 		/* Trigger the next read. */
-		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		if (g_grCaps.getTexImage)
+			glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		else
+			glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);
 #else
 		glReadPixels(0, 0, pbo->width, pbo->height, GL_RGBA, GL_UNSIGNED_BYTE, pbo->pixels);
 #endif
@@ -521,10 +546,73 @@ GrPBO		g_glOffscreenPBO;
 
 #endif
 
+/* Resolve g_cfg_renderBackend into something this machine can actually provide,
+ * and prepare the environment for it. Runs BEFORE the window exists, because
+ * ANGLE reads ANGLE_DEFAULT_PLATFORM when libEGL creates its display and SDL
+ * decides GL-vs-ES from the attributes set before SDL_CreateWindow.
+ *
+ * Anything unavailable degrades to native GL rather than failing: a config
+ * asking for Vulkan on a box with no ANGLE must still boot the game. */
+static void GR_ResolveBackend(void)
+{
+#if defined(RENDERER_OGL)
+	int requested = g_cfg_renderBackend;
+
+	if (requested == PSYX_BACKEND_AUTO)
+	{
+		/* Deliberately conservative: native GL is the path with years of
+		 * testing behind it, so "auto" does NOT quietly move players onto a
+		 * translator. It only exists so a future build can flip the default. */
+		requested = PSYX_BACKEND_GL;
+	}
+
+	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
+	{
+		eprintwarn("Render backend '%s' needs ANGLE (libEGL.dll + libGLESv2.dll) next to the game; falling back to native OpenGL\n",
+			PsyX_Backend_GetName(requested));
+		requested = PSYX_BACKEND_GL;
+	}
+
+	g_grActiveBackend = requested;
+	g_grIsGLES = (requested == PSYX_BACKEND_GLES || PsyX_Backend_IsTranslated(requested)) ? 1 : 0;
+
+	/* Translated backends do NOT ask SDL for a GL context at all — PsyCross
+	 * builds the EGL display itself in GR_InitialiseGLContext so it can pass
+	 * ANGLE the platform attributes that pick D3D11 vs Vulkan. Only a plain
+	 * 'gles' request goes through SDL, where the native driver's ES context is
+	 * a perfectly good answer. */
+	if (!PsyX_Backend_IsTranslated(requested) && g_grIsGLES)
+	{
+		/* Must be set before SDL_CreateWindow: SDL picks WGL vs EGL from the
+		 * profile mask while choosing the window's pixel format, not later when
+		 * the context is created. */
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	}
+
+	if (g_grActiveBackend != PSYX_BACKEND_GL)
+		eprintf("*Render backend: %s\n", PsyX_Backend_GetDescription(g_grActiveBackend));
+#else
+	/* Fixed-target builds (Android/iOS/RPi/web) have exactly one context type. */
+	g_grActiveBackend = PSYX_BACKEND_GLES;
+	g_grIsGLES = 1;
+#endif
+}
+
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+
+#if defined(RENDERER_OGL)
+	/* A window created with SDL_WINDOW_OPENGL gets an SDL-chosen pixel format
+	 * for an SDL-owned GL context. On the translated backends the context comes
+	 * from our own EGL display instead, and ANGLE wants a plain window to make
+	 * its swapchain against, so the flag is dropped there. */
+	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
+		windowFlags &= ~SDL_WINDOW_OPENGL;
+#endif
 
 #if defined(__ANDROID__)
 	windowFlags |= SDL_WINDOW_FULLSCREEN;
@@ -598,28 +686,113 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 
 #elif defined(RENDERER_OGL)
 
-	int major_version = 3;
-	int minor_version = 3;
-	int profile = SDL_GL_CONTEXT_PROFILE_CORE;
-
-	// find best OpenGL version
-	do
+	/* Translated backends: build the EGL display ourselves against SDL's window
+	 * so ANGLE can be told which device to use. Everything after this point —
+	 * the whole GR_* renderer — is unaware of the difference. */
+	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
 	{
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major_version);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor_version);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+		void* nativeWindow = NULL;
+#if defined(_WIN32)
+		SDL_SysWMinfo wmInfo;
+		SDL_VERSION(&wmInfo.version);
+		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
+			nativeWindow = (void*)wmInfo.info.win.window;
+#endif
 
-		if (SDL_GL_CreateContext(g_window))
-			break;
-	
-		minor_version--;
-		
-	} while (minor_version >= 0);
+		if (!PsyX_Angle_Create(nativeWindow, g_grActiveBackend, g_cfg_msaaSamples))
+		{
+			eprintwarn("Backend '%s' could not be initialised through ANGLE; falling back to native OpenGL\n",
+				PsyX_Backend_GetName(g_grActiveBackend));
 
-	if (minor_version == -1)
+			SDL_DestroyWindow(g_window);
+			g_window = NULL;
+
+			g_grIsGLES = 0;
+			g_grActiveBackend = PSYX_BACKEND_GL;
+			SDL_GL_ResetAttributes();
+			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
+			if (g_cfg_msaaSamples > 0)
+			{
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
+			}
+
+			windowFlags |= SDL_WINDOW_OPENGL;
+			g_window = SDL_CreateWindow(windowName, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, g_windowWidth, g_windowHeight, windowFlags);
+			if (g_window == NULL)
+			{
+				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
+				return 0;
+			}
+			SDL_ShowWindow(g_window);
+			SDL_RaiseWindow(g_window);
+		}
+	}
+
+	/* An explicit 'gles' request still goes through SDL: the profile attributes
+	 * were set in GR_ResolveBackend, before SDL_CreateWindow, because that is
+	 * where SDL decides between WGL and EGL. */
+	if (g_grIsGLES && !PsyX_Angle_Active())
 	{
-		eprinterr("Failed to initialise - OpenGL 3.x is not supported. Please update video drivers.\n");
-		return 0;
+		if (!SDL_GL_CreateContext(g_window))
+		{
+			eprintwarn("Backend '%s' could not create an OpenGL ES 3.0 context (%s); falling back to native OpenGL\n",
+				PsyX_Backend_GetName(g_grActiveBackend), SDL_GetError());
+
+			/* The window was created with an ES pixel format, so it cannot be
+			 * reused for a desktop GL context — tear it down and start over. */
+			SDL_DestroyWindow(g_window);
+			g_window = NULL;
+
+			g_grIsGLES = 0;
+			g_grActiveBackend = PSYX_BACKEND_GL;
+			SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "0");
+			SDL_GL_ResetAttributes();
+			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
+			if (g_cfg_msaaSamples > 0)
+			{
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
+			}
+
+			g_window = SDL_CreateWindow(windowName, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, g_windowWidth, g_windowHeight, windowFlags);
+			if (g_window == NULL)
+			{
+				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
+				return 0;
+			}
+			SDL_ShowWindow(g_window);
+			SDL_RaiseWindow(g_window);
+		}
+	}
+
+	if (!g_grIsGLES)
+	{
+		int major_version = 3;
+		int minor_version = 3;
+		int profile = SDL_GL_CONTEXT_PROFILE_CORE;
+
+		// find best OpenGL version
+		do
+		{
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major_version);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor_version);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+
+			if (SDL_GL_CreateContext(g_window))
+				break;
+
+			minor_version--;
+
+		} while (minor_version >= 0);
+
+		if (minor_version == -1)
+		{
+			eprinterr("Failed to initialise - OpenGL 3.x is not supported. Please update video drivers.\n");
+			return 0;
+		}
 	}
 #endif
 
@@ -627,15 +800,119 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 }
 #endif
 
+/* Desktop GL and ES 3.0 share most entry points but not all, and under ANGLE
+ * the desktop-only ones simply fail to resolve. glad leaves those pointers NULL,
+ * so probing them is both the cheapest and the most honest capability test —
+ * it asks the loader what it actually got rather than trusting a version string. */
+static void GR_ProbeCapabilities(void)
+{
+#ifdef USE_GLAD
+	g_grCaps.polygonMode      = (glad_glPolygonMode != NULL);
+	g_grCaps.getTexImage      = (glad_glGetTexImage != NULL);
+	g_grCaps.mapBuffer        = (glad_glMapBuffer != NULL);
+	g_grCaps.drawBuffer       = (glad_glDrawBuffer != NULL);
+	g_grCaps.clearDepthDouble = (glad_glClearDepth != NULL);
+	g_grCaps.debugGroups      = (glad_glPushDebugGroup != NULL && glad_glPopDebugGroup != NULL);
+#else
+	g_grCaps.polygonMode      = !g_grIsGLES;
+	g_grCaps.getTexImage      = !g_grIsGLES;
+	g_grCaps.mapBuffer        = !g_grIsGLES;
+	g_grCaps.drawBuffer       = !g_grIsGLES;
+	g_grCaps.clearDepthDouble = !g_grIsGLES;
+	g_grCaps.debugGroups      = 0;
+#endif
+
+	/* ES 3.1 promoted glGetTexLevelParameteriv; ES 3.0 does not have it. */
+	g_grCaps.texLevelParam = !g_grIsGLES;
+
+#ifdef USE_GLAD
+	/* Every branch keyed off these flags picks a fallback that must itself be
+	 * resolved. Depth clear is the one with no third option, so verify rather
+	 * than trust: a NULL on both sides means the loader pass above did not do
+	 * what it claims, and a silent jump to 0 in the first frame is a miserable
+	 * way to find that out. */
+	if (!g_grCaps.clearDepthDouble && glad_glClearDepthf == NULL)
+		eprinterr("Neither glClearDepth nor glClearDepthf resolved - the GL loader is incomplete\n");
+#endif
+
+	if (g_grIsGLES)
+	{
+		eprintf("*GL caps: polygonMode=%d getTexImage=%d mapBuffer=%d drawBuffer=%d clearDepthD=%d texLevelParam=%d noperspective=%d\n",
+			g_grCaps.polygonMode, g_grCaps.getTexImage, g_grCaps.mapBuffer,
+			g_grCaps.drawBuffer, g_grCaps.clearDepthDouble, g_grCaps.texLevelParam,
+			g_grCaps.noperspective);
+	}
+
+	/* 'noperspective' is core in desktop GLSL 1.30+. GLES has it only through
+	 * NV_shader_noperspective_interpolation, which ANGLE does expose on D3D11
+	 * (HLSL has the qualifier natively). Without it, affine texture mapping
+	 * silently becomes perspective-correct on PGXP-projected geometry. */
+	if (!g_grIsGLES)
+	{
+		g_grCaps.noperspective = 1;
+	}
+	else
+	{
+		g_grCaps.noperspective = 0;
+		const char* exts = (const char*)glGetString(GL_EXTENSIONS);
+		if (exts && strstr(exts, "GL_NV_shader_noperspective_interpolation"))
+			g_grCaps.noperspective = 1;
+#ifdef USE_GLAD
+		else if (glad_glGetStringi)
+		{
+			/* Core-profile / ES3 drivers return NULL for the monolithic string. */
+			GLint n = 0;
+			glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+			for (GLint i = 0; i < n; i++)
+			{
+				const char* e = (const char*)glGetStringi(GL_EXTENSIONS, i);
+				if (e && strcmp(e, "GL_NV_shader_noperspective_interpolation") == 0)
+				{
+					g_grCaps.noperspective = 1;
+					break;
+				}
+			}
+		}
+#endif
+	}
+}
+
 int GR_InitialiseGLExt()
 {
 #ifdef USE_GLAD
-	GLenum err = gladLoadGL();
+	/* SDL_GL_GetProcAddress, not gladLoadGL(): glad's built-in loader goes
+	 * straight to opengl32.dll, which resolves nothing when the live context
+	 * came from ANGLE's libGLESv2. SDL's loader routes to whichever library
+	 * actually backs the context, so this is correct for both and strictly more
+	 * correct than the old path even for plain desktop GL. */
+	/* When PsyCross owns the EGL context, SDL knows nothing about it and its
+	 * loader returns NULL for everything — the entry points have to come from
+	 * ANGLE's own modules. */
+	GLADloadproc loader = PsyX_Angle_Active()
+		? (GLADloadproc)PsyX_Angle_GetProcAddress
+		: (GLADloadproc)SDL_GL_GetProcAddress;
+
+	GLenum err = gladLoadGLLoader(loader);
 
 	if (err == 0)
 		return 0;
+
+	/* This glad is generated as gl=3.1 + gles2=2.0, and the two loaders fill
+	 * disjoint-but-overlapping halves of the same pointer table. The desktop
+	 * loader above already resolved everything ES 3.0 shares with GL 3.1 (VAOs,
+	 * glMapBufferRange, glDrawBuffers, glBlitFramebuffer...), because those are
+	 * spelled identically in both APIs. What it cannot resolve are the entry
+	 * points that exist ONLY in ES — glClearDepthf and glDepthRangef, the float
+	 * spellings that desktop GL did not get until 4.1 — so they stay NULL and
+	 * calling one is an immediate jump to address 0.
+	 *
+	 * Running the ES2 loader afterwards fills exactly those. It is not a
+	 * replacement for the desktop pass: the ES2 set has none of the ES 3.0
+	 * functions this renderer needs. Both, in this order. */
+	if (g_grIsGLES)
+		gladLoadGLES2Loader(loader);
 #endif
-	
+
 	const char* rend = (const char*)glGetString(GL_RENDERER);
 	const char* vendor = (const char*)glGetString(GL_VENDOR);
 	eprintf("*Video adapter: %s by %s\n", rend, vendor);
@@ -645,6 +922,15 @@ int GR_InitialiseGLExt()
 
 	const char* glslVersionStr = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
 	eprintf("*GLSL version: %s\n", glslVersionStr);
+
+	/* ANGLE reports the device it settled on inside GL_RENDERER, e.g.
+	 * "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0)". Worth
+	 * logging plainly, because it is the only way to confirm from a user's log
+	 * that the requested backend is the one really in use. */
+	if (g_grIsGLES && rend && strstr(rend, "ANGLE") == NULL)
+		eprintwarn("Backend '%s' expected ANGLE but got '%s'\n", PsyX_Backend_GetName(g_grActiveBackend), rend);
+
+	GR_ProbeCapabilities();
 
 	return 1;
 }
@@ -657,6 +943,10 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	// Due to debugging in fullscreen
 	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+	/* Before any GL attribute that depends on the context type, and before the
+	 * window: picks GL vs ES and points ANGLE at D3D11/Vulkan if asked. */
+	GR_ResolveBackend();
 
 #if USE_OPENGL
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
@@ -710,12 +1000,19 @@ void GR_Shutdown()
 	GR_DestroyTexture(g_fbTexture);
 	GR_DestroyTexture(g_offscreenRTTexture);
 #endif
+
+	/* After the GL objects above: destroying the EGL context first would make
+	 * every one of those deletes a call with nothing current. */
+	PsyX_Angle_Destroy();
 }
 
 void GR_UpdateSwapIntervalState(int swapInterval)
 {
 #if defined(RENDERER_OGL)
-	SDL_GL_SetSwapInterval(swapInterval);
+	if (PsyX_Angle_Active())
+		PsyX_Angle_SetSwapInterval(swapInterval);
+	else
+		SDL_GL_SetSwapInterval(swapInterval);
 #endif
 }
 
@@ -727,7 +1024,11 @@ void GR_BeginScene()
 #ifdef RENDERER_OGLES
 	glClearDepthf(1.0f);
 #else
-	glClearDepth(1.0f);
+	/* glClearDepth (double) is desktop-only; ES 3.0 has the float form. */
+	if (g_grCaps.clearDepthDouble)
+		glClearDepth(1.0f);
+	else
+		glClearDepthf(1.0f);
 #endif
 	glClear(GL_DEPTH_BUFFER_BIT);
 	glClear(GL_STENCIL_BUFFER_BIT);
@@ -1475,7 +1776,11 @@ ShaderID GR_Shader_Compile(const char* source)
 		"#define texture2D   texture\n"
 		"out vec4 fragColor;\n";
 #else
-	const char* GLSL_HEADER_VERT =
+	/* The desktop build can be running either a desktop GL context or an ES 3.0
+	 * one (ANGLE), so the #version line is a runtime choice. Everything below it
+	 * is identical — the shader body is already written in the shared dialect
+	 * that these defines paper over. */
+	static const char* const GLSL_HEADER_VERT_GL =
 		"#version 140\n"
 		"precision lowp  int;\n"
 		"precision highp float;\n"
@@ -1484,13 +1789,67 @@ ShaderID GR_Shader_Compile(const char* source)
 		"#define attribute in\n"
 		"#define texture2D texture\n";
 
-	const char* GLSL_HEADER_FRAG =
+	static const char* const GLSL_HEADER_FRAG_GL =
 		"#version 140\n"
 		"precision lowp  int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
 		"out vec4 fragColor;\n";
+
+	/* GLSL ES 3.00 requires the #extension line to precede any other statement,
+	 * so noperspective support is baked into the header rather than the trailing
+	 * defines block. Requested only when the probe found the extension. */
+	static const char* const GLSL_HEADER_VERT_ES3 =
+		"#version 300 es\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define VERTEX\n"
+		"#define varying   out\n"
+		"#define attribute in\n"
+		"#define texture2D texture\n";
+
+	static const char* const GLSL_HEADER_VERT_ES3_NP =
+		"#version 300 es\n"
+		"#extension GL_NV_shader_noperspective_interpolation : require\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define VERTEX\n"
+		"#define varying   out\n"
+		"#define attribute in\n"
+		"#define texture2D texture\n";
+
+	static const char* const GLSL_HEADER_FRAG_ES3 =
+		"#version 300 es\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define varying     in\n"
+		"#define texture2D   texture\n"
+		"out vec4 fragColor;\n";
+
+	static const char* const GLSL_HEADER_FRAG_ES3_NP =
+		"#version 300 es\n"
+		"#extension GL_NV_shader_noperspective_interpolation : require\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define varying     in\n"
+		"#define texture2D   texture\n"
+		"out vec4 fragColor;\n";
+
+	const char* GLSL_HEADER_VERT;
+	const char* GLSL_HEADER_FRAG;
+
+	if (g_grIsGLES)
+	{
+		const int np = (g_grCaps.noperspective && g_cfg_affineTextures);
+		GLSL_HEADER_VERT = np ? GLSL_HEADER_VERT_ES3_NP : GLSL_HEADER_VERT_ES3;
+		GLSL_HEADER_FRAG = np ? GLSL_HEADER_FRAG_ES3_NP : GLSL_HEADER_FRAG_ES3;
+	}
+	else
+	{
+		GLSL_HEADER_VERT = GLSL_HEADER_VERT_GL;
+		GLSL_HEADER_FRAG = GLSL_HEADER_FRAG_GL;
+	}
 #endif
 
 	char extra_vs_defines[1024];
@@ -1514,23 +1873,32 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 	#define SH_TC_CENTROID "centroid "
 #endif
-/* `noperspective` is desktop GLSL only. GLES has no such interpolation
- * qualifier at any version, so emitting it fails shader compilation outright on
- * Android and iOS rather than merely losing the affine look. */
-#if defined(RENDERER_OGLES)
-	#define SH_TC_NOPERSPECTIVE ""
-#else
-	#define SH_TC_NOPERSPECTIVE "noperspective "
-#endif
+	/* `noperspective` is core in desktop GLSL but reaches GLES only through
+	 * NV_shader_noperspective_interpolation, so whether it can be emitted is a
+	 * property of the live context, not of the build. Emitting it unguarded on
+	 * an ES context fails shader compilation outright rather than merely losing
+	 * the affine look — which is why this is probed, not assumed.
+	 *
+	 * Losing it costs less than it appears: the legacy path leaves
+	 * gl_Position.w == 1, where perspective-correct interpolation IS screen-
+	 * linear. It only changes anything on PGXP-projected geometry, whose whole
+	 * purpose is to be perspective-correct in the first place. */
+	const char* tcNoPerspective = "";
 	if (g_cfg_affineTextures)
 	{
-		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
+#if defined(RENDERER_OGLES)
+		tcNoPerspective = "";
+#else
+		tcNoPerspective = g_grCaps.noperspective ? "noperspective " : "";
+#endif
 	}
-	else
+
 	{
-		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
+		char affineDef[128];
+		snprintf(affineDef, sizeof(affineDef), "#define AFFINE_VARYING %s%svarying\n",
+			tcNoPerspective, SH_TC_CENTROID);
+		strcat(extra_vs_defines, affineDef);
+		strcat(extra_fs_defines, affineDef);
 	}
 
 	const char* vs_list[] = { GLSL_HEADER_VERT, extra_vs_defines, source };
@@ -3369,18 +3737,36 @@ static void GR_EnsureShadowTarget(void)
 	             0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
+	 * neither. CLAMP_TO_EDGE is a safe stand-in here because the fragment shader
+	 * already rejects receivers outside 0..1 in the light frustum before it ever
+	 * samples, so the border texels are never observed. */
+	if (!g_grIsGLES)
 	{
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 		float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  /* outside the light frustum = fully lit */
 		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+	}
+	else
+	{
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	}
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenFramebuffers(1, &g_shadowFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
-	glDrawBuffer(GL_NONE);
+	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
+	 * the array form, which takes the same GL_NONE. */
+	if (g_grCaps.drawBuffer)
+		glDrawBuffer(GL_NONE);
+	else
+	{
+		const GLenum none = GL_NONE;
+		glDrawBuffers(1, &none);
+	}
 	glReadBuffer(GL_NONE);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -4395,7 +4781,10 @@ void GR_DumpVRAM(const char* path)
 void GR_SwapWindow()
 {
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
-	SDL_GL_SwapWindow(g_window);
+	if (PsyX_Angle_Active())
+		PsyX_Angle_Swap();
+	else
+		SDL_GL_SwapWindow(g_window);
 #endif
 
 	//glFinish();
@@ -4626,7 +5015,11 @@ void GR_SetViewPort(int x, int y, int width, int height)
 void GR_SetWireframe(int enable)
 {
 #if defined(RENDERER_OGL)
-	glPolygonMode(GL_FRONT_AND_BACK, enable ? GL_LINE : GL_FILL);
+	/* ES has no glPolygonMode at all, so the debug wireframe view is simply
+	 * unavailable on a translated backend. Emulating it would mean re-issuing
+	 * every draw as GL_LINES, which is not worth it for a debug toggle. */
+	if (g_grCaps.polygonMode)
+		glPolygonMode(GL_FRONT_AND_BACK, enable ? GL_LINE : GL_FILL);
 #endif
 }
 
