@@ -411,6 +411,38 @@ typedef RECT16 RECT32;
 #endif
 
 /*
+ * The four bytes of a primitive's FIRST DATA WORD, which is where the PSX GPU
+ * command byte lives.
+ *
+ * On the PSX that word is (cmd << 24) | (b << 16) | (g << 8) | r, so in
+ * little-endian memory the bytes run r, g, b, cmd -- which is exactly how these
+ * structs are declared, putting `code` at the word's last byte.
+ *
+ * That only aliases correctly on a little-endian host. The packets built as
+ * whole u_int words instead of byte fields -- DR_TPAGE, DR_MODE and the rest of
+ * the DR_* family, whose code[] is a u_int array -- put the command in the
+ * word's MOST significant byte, which is the LAST byte on little-endian and the
+ * FIRST byte on big-endian. So on big-endian the two families disagree about
+ * where the command byte is, and DrawOTag's dispatch (which reads P_TAG.code)
+ * sees a tpage low byte instead of a command.
+ *
+ * PS3, first boot that reached the title screen: a stream of
+ *   [PRIM?] code=0x1c / 0x1d / 0x80 / 0xff
+ * where 0x1c and 0x1d are Silent Hill's font tpages, not commands.
+ *
+ * Declaring the bytes MSB-first on big-endian makes the struct's WORD VALUE
+ * equal the PSX's, so both families agree and `code` is the command byte again.
+ * Only this quartet needs it: the colour and UV byte groups are written and
+ * read through named fields on both sides, so they are already self-consistent
+ * and reversing them would buy nothing.
+ */
+#if defined(__BIG_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define PSX_PRIM_CMD(b0_, b1_, b2_, cmd_)	u_char cmd_, b2_, b1_, b0_
+#else
+#define PSX_PRIM_CMD(b0_, b1_, b2_, cmd_)	u_char b0_, b1_, b2_, cmd_
+#endif
+
+/*
  * Polygon Primitive Definitions
  */
 
@@ -420,12 +452,12 @@ typedef struct {
 
 typedef struct {
 	DECLARE_P_ADDR_PTAG
-	u_char	pad0, pad1, pad2, code;
+	PSX_PRIM_CMD(pad0, pad1, pad2, code);
 } P_TAG;
 		
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, y0;
 	VERTTYPE	x1,	y1;
 	VERTTYPE	x2,	y2;
@@ -435,7 +467,7 @@ static_assert(sizeof(POLY_F3) / 4 - P_LEN == 4, "POLY_F3 size must be 4 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, y0;
 	VERTTYPE	x1,	y1;
 	VERTTYPE	x2,	y2;
@@ -446,7 +478,7 @@ static_assert(sizeof(POLY_F4) / 4 - P_LEN == 5, "POLY_F4 size must be 5 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 	VERTTYPE	x1,	y1;
@@ -459,7 +491,7 @@ static_assert(sizeof(POLY_FT3) / 4 - P_LEN == 7, "POLY_FT3 size must be 7 longs"
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 	VERTTYPE	x1,	y1;
@@ -474,7 +506,7 @@ static_assert(sizeof(POLY_FT4) / 4 - P_LEN == 9, "POLY_FT4 size must be 9 longs"
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	r1, g1, b1, pad1;
 	VERTTYPE	x1,	y1;
@@ -486,7 +518,7 @@ static_assert(sizeof(POLY_G3) / 4 - P_LEN == 6, "POLY_G3 size must be 6 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	r1, g1, b1, pad1;
 	VERTTYPE	x1,	y1;
@@ -500,7 +532,7 @@ static_assert(sizeof(POLY_G4) / 4 - P_LEN == 8, "POLY_G4 size must be 8 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 	u_char	r1, g1, b1, p1;
@@ -515,7 +547,7 @@ static_assert(sizeof(POLY_GT3) / 4 - P_LEN == 9, "POLY_GT3 size must be 9 longs"
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 	u_char	r1, g1, b1, p1;
@@ -536,7 +568,7 @@ static_assert(sizeof(POLY_GT4) / 4 - P_LEN == 12, "POLY_GT4 size must be 12 long
  */
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	VERTTYPE	x1,	y1;
 } LINE_F2;				/* Unconnected Flat Line */
@@ -545,7 +577,7 @@ static_assert(sizeof(LINE_F2) / 4 - P_LEN == 3, "LINE_F2 size must be 3 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	r1, g1, b1, p1;
 	VERTTYPE	x1,	y1;
@@ -555,7 +587,7 @@ static_assert(sizeof(LINE_G2) / 4 - P_LEN == 4, "LINE_G2 size must be 4 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	VERTTYPE	x1,	y1;
 	VERTTYPE	x2,	y2;
@@ -566,7 +598,7 @@ static_assert(sizeof(LINE_F3) / 4 - P_LEN == 5, "LINE_F3 size must be 5 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	r1, g1, b1, p1;
 	VERTTYPE	x1,	y1;
@@ -579,7 +611,7 @@ static_assert(sizeof(LINE_G3) / 4 - P_LEN == 7, "LINE_G3 size must be 7 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	VERTTYPE	x1,	y1;
 	VERTTYPE	x2,	y2;
@@ -591,7 +623,7 @@ static_assert(sizeof(LINE_F4) / 4 - P_LEN == 6, "LINE_F4 size must be 6 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	r1, g1, b1, p1;
 	VERTTYPE	x1,	y1;
@@ -609,7 +641,7 @@ static_assert(sizeof(LINE_G4) / 4 - P_LEN == 9, "LINE_G4 size must be 9 longs");
  */
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 	VERTTYPE	w,	h;
@@ -619,7 +651,7 @@ static_assert(sizeof(SPRT) / 4 - P_LEN == 4, "SPRT size must be 4 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 } SPRT_16;				/* 16x16 Sprite */
@@ -628,7 +660,7 @@ static_assert(sizeof(SPRT_16) / 4 - P_LEN == 3, "SPRT_16 size must be 3 longs");
 		   
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 	u_char	u0, v0;	u_short	clut;
 } SPRT_8;				/* 8x8 Sprite */
@@ -640,7 +672,7 @@ static_assert(sizeof(SPRT_8) / 4 - P_LEN == 3, "SPRT_8 size must be 3 longs");
  */
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, y0;
 	VERTTYPE	w,	h;
 } TILE;					/* free size Tile */
@@ -649,7 +681,7 @@ static_assert(sizeof(TILE) / 4 - P_LEN == 3, "TILE size must be 3 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 } TILE_16;				/* 16x16 Tile */
 
@@ -657,7 +689,7 @@ static_assert(sizeof(TILE_16) / 4 - P_LEN == 2, "TILE_16 size must be 2 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 } TILE_8;				/* 8x8 Tile */
 
@@ -665,7 +697,7 @@ static_assert(sizeof(TILE_8) / 4 - P_LEN == 2, "TILE_8 size must be 2 longs");
 
 typedef struct {
 	DECLARE_P_ADDR
-	u_char	r0, g0, b0, code;
+	PSX_PRIM_CMD(r0, g0, b0, code);
 	VERTTYPE	x0, 	y0;
 } TILE_1;				/* 1x1 Tile */
 
