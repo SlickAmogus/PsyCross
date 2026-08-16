@@ -368,7 +368,14 @@ typedef RECT16 RECT32;
 
 #if USE_EXTENDED_PRIM_POINTERS
 
-#if defined(_M_X64) || defined(__amd64__) || defined(__aarch64__) || defined(_M_ARM64)
+/* Both arms declare the SAME members; only P_LEN differs, because P_LEN is just
+ * "how many 4-byte words this header occupies" -- uintptr_t(8)+16b+16b = 12 = 3
+ * on LP64, 4+4 = 8 = 2 on ILP32. So it has to follow the POINTER SIZE, and the
+ * old architecture list was a proxy for that which omitted PowerPC: on the PS3's
+ * ppc64 PPU it selected P_LEN 2 while uintptr_t stayed 8 bytes, and every
+ * primitive size assertion below failed (4837 of them). MSVC does not define
+ * __SIZEOF_POINTER__, hence the _M_ prefixed fallbacks. */
+#if __SIZEOF_POINTER__ == 8 || defined(_M_X64) || defined(_M_ARM64)
 
 #define DECLARE_P_ADDR \
 		uintptr_t addr; \

@@ -18,6 +18,12 @@
 #elif defined(__ANDROID__)
 #   define RENDERER_OGLES
 #   define OGLES_VERSION (3)
+#elif defined(__PS3__)
+/* The PS3 draws through RSX (ps3_port/src/gpu_rsx.c) driving the same
+ * hardware-agnostic OT walker the Xbox ports use, so PsyX's GL renderer is
+ * never compiled. This branch exists only because game TUs pull this header in
+ * transitively and need the handle typedefs; USE_OPENGL stays 0. */
+#   define RENDERER_NONE
 #endif
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
@@ -191,7 +197,7 @@ typedef enum
 } TexFormat;
 
 
-#if defined(RENDERER_OGLES) || defined(RENDERER_OGL)
+#if defined(RENDERER_OGLES) || defined(RENDERER_OGL) || defined(RENDERER_NONE)
 typedef uint TextureID;
 typedef uint ShaderID;
 #else
