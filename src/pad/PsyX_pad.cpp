@@ -45,6 +45,14 @@ const u_char*			g_sdlKeyboardState = NULL;
 u_short PsyX_Pad_UpdateKeyboardInput();
 void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
 
+/* Touch controls live in the port (pc_touch.c), which knows about game state;
+ * declared rather than included so PsyCross keeps no pc_port include path. */
+extern "C" void Pc_Touch_Update(void);
+extern "C" int  Pc_Touch_Active(void);
+extern "C" void Pc_Touch_GetPad(unsigned short* word,
+                                unsigned char* rightX, unsigned char* rightY,
+                                unsigned char* leftX,  unsigned char* leftY);
+
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
 {
@@ -74,6 +82,25 @@ int PsyX_Pad_InitSystem()
 
 	// Add more controllers from custom file
 	SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+
+	/* A pad that never raises SDL_CONTROLLERDEVICEADDED leaves controller->gc
+	 * NULL, so UpdateGameControllerInput writes "all released" every poll and
+	 * the pad is silently driven by the key path instead — which is where the
+	 * Android shared-scancode collision bites. Record what SDL actually sees so
+	 * that state is visible in the log rather than inferred from its absence. */
+	{
+		int n = SDL_NumJoysticks();
+		int i;
+
+		eprintinfo("[PAD] SDL_NumJoysticks=%d\n", n);
+
+		for (i = 0; i < n; i++)
+		{
+			const char* nm = SDL_JoystickNameForIndex(i);
+			eprintinfo("[PAD]   %d '%s' isGameController=%d\n",
+				i, nm ? nm : "?", SDL_IsGameController(i) ? 1 : 0);
+		}
+	}
 
 	return 1;
 }
@@ -225,6 +252,11 @@ void PsyX_Pad_InternalPadUpdates()
 
 	kbInputs = PsyX_Pad_UpdateKeyboardInput();
 
+	/* Rebuild the virtual touch pad here rather than from the frame loop: this
+	 * is the one place guaranteed to run exactly once per pad read, so the
+	 * gesture state a read sees can never be a frame stale or a frame early. */
+	Pc_Touch_Update();
+
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
 	{
 		controller = &g_controllers[i];
@@ -247,6 +279,28 @@ void PsyX_Pad_InternalPadUpdates()
 			if (controller->gc && SDL_GameControllerGetAttached(controller->gc))
 			{
 				pad->id = (g_cfg_controllerMovement == 1) ? 0x41 : 0x73;
+			}
+
+			/* Touch presents itself as an ordinary analog pad on port 1, so
+			 * nothing downstream of libpad needs to know a finger is involved.
+			 * It runs AFTER the controller read (which zeroes everything when
+			 * no gamepad is open) and BEFORE the keyboard merge, so a physical
+			 * key can still add presses on top. id 0x73 is what makes the game
+			 * read the sticks at all -- 0x41 is digital-only. */
+			if (i == 0 && Pc_Touch_Active())
+			{
+				unsigned short tw = 0xFFFF;
+				unsigned char  rx = 128, ry = 128, lx = 128, ly = 128;
+
+				Pc_Touch_GetPad(&tw, &rx, &ry, &lx, &ly);
+
+				*(u_short*)pad->buttons &= tw;
+				pad->analog[0] = rx;
+				pad->analog[1] = ry;
+				pad->analog[2] = lx;
+				pad->analog[3] = ly;
+				pad->id        = 0x73;
+				pad->status    = 0;
 			}
 
 			// Update keyboard for PAD
@@ -504,6 +558,48 @@ u_short PsyX_Pad_UpdateKeyboardInput()
 		ret &= PsyX_Pad_BuildKbWord(g_cfg_keyboardMapping2);
 		ret &= PsyX_Pad_BuildMouseWord();
 	}
+
+#if defined(__ANDROID__)
+	/* Android hands one physical gamepad button to SDL through several input
+	 * devices at once (a pad enumerates a main node plus a "Consumer Control"
+	 * node), and SDL folds them all into ONE global scancode array with no
+	 * device identity. The devices' UP/DOWN events interleave, so one node's UP
+	 * clears the shared bit while the button is still physically held. Measured
+	 * on a GameSir X5: press, 32ms, release, 16ms, press again — which the game
+	 * reads as two rising edges and hands to two different screens (Start on the
+	 * title also picking New Game; a press that skips the intro FMV also
+	 * confirming its way into the difficulty select).
+	 *
+	 * Hold a release briefly: one reversed this fast was never a real release.
+	 * Only the release edge is affected, so presses stay instant, and the window
+	 * is well under the ~120ms a deliberate double-tap takes.
+	 *
+	 * This is a repair for the shared-scancode collision, not for the pad. The
+	 * clean route is opening the device as an SDL_GameController so each node
+	 * keeps its own state — see the [PAD] enumeration logged at init. */
+	{
+		#define KB_RELEASE_HOLD_MS 40
+
+		static Uint32 s_lastPressedMs[16];
+		Uint32        now = SDL_GetTicks();
+		int           bit;
+
+		for (bit = 0; bit < 16; bit++)
+		{
+			u_short mask = (u_short)(1 << bit);
+
+			if (!(ret & mask))
+			{
+				s_lastPressedMs[bit] = now;
+			}
+			else if (s_lastPressedMs[bit] != 0 &&
+			         (now - s_lastPressedMs[bit]) < KB_RELEASE_HOLD_MS)
+			{
+				ret &= ~mask;
+			}
+		}
+	}
+#endif
 
 	return ret;
 }
