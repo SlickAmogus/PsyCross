@@ -184,7 +184,7 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+4), 9);\
 		CTC2(*(uint*)((char*)(r0)+8), 10);\
 		CTC2(*(uint*)((char*)(r0)+12), 11);\
-		CTC2(*(uint*)((char*)(r0)+16), 12);}
+		CTC2(((const short*)(r0))[8], 12);}
 
 // load ctc2 16-20
 #define gte_SetColorMatrix( r0 ) \
@@ -192,15 +192,26 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+4), 17);\
 		CTC2(*(uint*)((char*)(r0)+8), 18);\
 		CTC2(*(uint*)((char*)(r0)+12), 19);\
-		CTC2(*(uint*)((char*)(r0)+16), 20);}
+		CTC2(((const short*)(r0))[8], 20);}
 
 // load ctc2 0-4
+//
+// The LAST register of each matrix (R33/L33/LB3, ctc2 4/12/20) is a lone 16-bit
+// coefficient, and CTC2 sign-extends it with (int)(short)value -- a shift, which
+// does not depend on byte order. Reading it as *(uint*)(m+16) does: on a
+// little-endian host m[2][2] lands in the low half and the cast finds it, on a
+// big-endian host it lands in the high half and the cast picks up the struct
+// padding instead. That read zero for R33, which collapses every transform to
+// z=0 (Xbox 360, first boot: RotTransPers -> sz=0, flag 0x80021000).
+//
+// Passing the coefficient directly is correct on BOTH endiannesses -- it is a
+// value, not a reinterpreted word -- so this is a fix rather than a port ifdef.
 #define gte_SetRotMatrix( r0 )	\
 	{	CTC2(*(uint*)((char*)(r0)), 0);\
 		CTC2(*(uint*)((char*)(r0)+4), 1);\
 		CTC2(*(uint*)((char*)(r0)+8), 2);\
 		CTC2(*(uint*)((char*)(r0)+12), 3);\
-		CTC2(*(uint*)((char*)(r0)+16), 4);}
+		CTC2(((const short*)(r0))[8], 4);}
 
 // load ctc2 5-7
 #define gte_SetTransVector( r0 )\
@@ -220,7 +231,7 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+4), 9);\
 		CTC2(*(uint*)((char*)(r0)+8), 10);\
 		CTC2(*(uint*)((char*)(r0)+12), 11);\
-		CTC2(*(uint*)((char*)(r0)+16), 12);}
+		CTC2(((const short*)(r0))[8], 12);}
 
 // ctc2 16-20
 #define gte_SetColorMatrix( r0 )\
@@ -228,7 +239,7 @@ extern int doCOP2(int op);
 		CTC2(*(uint*)((char*)(r0)+4), 17);\
 		CTC2(*(uint*)((char*)(r0)+8), 18);\
 		CTC2(*(uint*)((char*)(r0)+12), 19);\
-		CTC2(*(uint*)((char*)(r0)+16), 20);}
+		CTC2(((const short*)(r0))[8], 20);}
 
 // mtc2 9,10,11
 #define gte_ldopv2SV( r0 ) \
@@ -543,26 +554,42 @@ extern int doCOP2(int op);
 		*(ushort*)((char*)(r0)+6) = MFC2(10) & 0xFFFF; \
 		*(ushort*)((char*)(r0)+12) = MFC2(11) & 0xFFFF;}
 
+/* SXY is a PACKED PAIR, and its consumers decode it with shifts:
+ *   sx = sxy & 0xFFFF;  sy = (sxy >> 16) & 0xFFFF;
+ * The GTE writes the halves through the C2_SXn and C2_SYn accessors, which are
+ * struct members of
+ * the PAIR union -- memory order, not bit position. On a little-endian host the
+ * two coincide; on big-endian C2_SX2 lands in the HIGH half and the consumer's
+ * mask reads SY instead (Xbox 360: sx/sy came out swapped, 256/352 where 352/256
+ * was expected).
+ *
+ * Composing the word with shifts from the accessors is endian-neutral and yields
+ * the layout the PSX defines, which is what every caller assumes. Same value as
+ * MFC2 on little-endian, so this is a fix rather than a port ifdef.
+ */
+#define SH_PACK_SXY( sx, sy ) \
+	(((uint)(ushort)(sy) << 16) | (uint)(ushort)(sx))
+
 // swc2 14
 #define gte_stsxy( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(14);}
+	{	*(uint*)((char*)(r0)) = SH_PACK_SXY(C2_SX2, C2_SY2);}
 
 // mfc2 12-14
 #define gte_stsxy3( r0, r1, r2 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(12); \
-		*(uint*)((char*)(r1)) = MFC2(13); \
-		*(uint*)((char*)(r2)) = MFC2(14);}
+	{	*(uint*)((char*)(r0)) = SH_PACK_SXY(C2_SX0, C2_SY0); \
+		*(uint*)((char*)(r1)) = SH_PACK_SXY(C2_SX1, C2_SY1); \
+		*(uint*)((char*)(r2)) = SH_PACK_SXY(C2_SX2, C2_SY2);}
 
 // swc2 14
 #define gte_stsxy2( r0 ) gte_stsxy(r0)
 
 // swc2 13
 #define gte_stsxy1( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(13);}
+	{	*(uint*)((char*)(r0)) = SH_PACK_SXY(C2_SX1, C2_SY1);}
 
 // swc2 12
 #define gte_stsxy0( r0 ) \
-	{	*(uint*)((char*)(r0)) = MFC2(12);}
+	{	*(uint*)((char*)(r0)) = SH_PACK_SXY(C2_SX0, C2_SY0);}
 
 // swc2 8
 #define gte_stdp( r0 ) \

@@ -31,7 +31,10 @@ GTERegisters gteRegs;
 #define MX23(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 2 ].sw.h : C2_R13)
 #define MX31(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 3 ].sw.l : C2_R22)
 #define MX32(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 3 ].sw.h : C2_R22)
-#define MX33(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 4 ].sw.l : C2_R22)
+/* .sd, not .sw.l: R33/L33/LB3 are lone 16-bit coefficients that CTC2
+ * sign-extends into the FULL word, so the low half only happens to hold them on
+ * a little-endian host. See the gte_SetRotMatrix comment in inline_c.h. */
+#define MX33(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 4 ].sd : C2_R22)
 #define CV1(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 5 ].sd : 0)
 #define CV2(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 6 ].sd : 0)
 #define CV3(n)				(n < 3 ? gteRegs.CP2C.p[ (n << 3) + 7 ].sd : 0)
