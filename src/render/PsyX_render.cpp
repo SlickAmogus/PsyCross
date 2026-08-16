@@ -2324,10 +2324,19 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * HD menu/map art stayed bilinear with menu_filter off. It gets 1 on 3D frames
 	 * unconditionally so world texture packs keep sampling exactly as before,
 	 * while its 2D prims follow the same v_is3d gate the VRAM path uses. */
+	/* menu_filter smooths HD menu/map art, so it only applies to art that is
+	 * actually hi-res. Forcing it on PALETTISED (4/8-bit) textures smeared the
+	 * PSX-native art it was never meant to touch — including the kanji atlas,
+	 * whose 12px cells are packed edge to edge in the framebuffer margins, so a
+	 * bilinear tap at a cell boundary pulls in the NEXT glyph's first column and
+	 * draws it as a full-height vertical bar between characters. That is the
+	 * stray-lines report from the Chinese text, and it would hit Japanese the
+	 * same way. Native paletted art now stays nearest on menu frames, which is
+	 * also what it looks like on hardware. */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
-		                ? (g_cfg_menuFilter ? 2 : 0)
+		                ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
 		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_bilinearFiltering) ? 1 : 0));
 
 	if (g_dbg_texturelessMode) {
