@@ -48,6 +48,7 @@ void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad
 /* Touch controls live in the port (pc_touch.c), which knows about game state;
  * declared rather than included so PsyCross keeps no pc_port include path. */
 extern "C" void Pc_Touch_Update(void);
+extern "C" void Pc_Touch_NoteOtherInput(int padAttached, int keyWord);
 extern "C" int  Pc_Touch_Active(void);
 extern "C" void Pc_Touch_GetPad(unsigned short* word,
                                 unsigned char* rightX, unsigned char* rightY,
@@ -251,6 +252,25 @@ void PsyX_Pad_InternalPadUpdates()
 		return;
 
 	kbInputs = PsyX_Pad_UpdateKeyboardInput();
+
+	/* Let the touch layer stand aside for real hardware. Both facts are needed:
+	 * an opened GameController covers the normal case, and the key word covers
+	 * Android pads that SDL never enumerates as controllers at all. */
+	{
+		int attached = 0;
+		int i;
+
+		for (i = 0; i < MAX_CONTROLLERS; i++)
+		{
+			if (g_controllers[i].gc && SDL_GameControllerGetAttached(g_controllers[i].gc))
+			{
+				attached = 1;
+				break;
+			}
+		}
+
+		Pc_Touch_NoteOtherInput(attached, (int)kbInputs);
+	}
 
 	/* Rebuild the virtual touch pad here rather than from the frame loop: this
 	 * is the one place guaranteed to run exactly once per pad read, so the
