@@ -1,6 +1,11 @@
 #ifndef INLINE_C_H
 #define INLINE_C_H
 
+/* gte_stsxy* compose the packed SXY word from the C2_SXn / C2_SYn accessors so
+ * the layout does not depend on byte order, and those live here. Guarded, and
+ * gtereg.h includes nothing, so there is no cycle. */
+#include "gtereg.h"
+
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 extern "C" {
 #endif
