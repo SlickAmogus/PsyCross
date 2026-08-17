@@ -333,6 +333,10 @@ static int    g_freezeFrameW = 0;
 static int    g_freezeFrameH = 0;
 static int    g_freezeFrameValid = 0;
 static int    g_freezePresentedThisFrame = 0;
+/* ES3 resolve-blit format matching, see GR_CaptureLastFrame. */
+static int    g_freezeRealloc = 0;
+static int    g_freezeFlipFormat = 0;
+static int    g_freezeAlphaBits = -1;
 int framebuffer_need_update = 0;
 
 #if defined(__EMSCRIPTEN__) || defined(__RPI__) || defined(__ANDROID__)
@@ -3655,12 +3659,40 @@ void GR_CaptureLastFrame(void)
 		glGenFramebuffers(1, &g_freezeFrameFBO);
 	}
 
-	if (g_freezeFrameW != g_windowWidth || g_freezeFrameH != g_windowHeight)
+	if (g_freezeFrameW != g_windowWidth || g_freezeFrameH != g_windowHeight || g_freezeRealloc)
 	{
-		g_freezeFrameW = g_windowWidth;
-		g_freezeFrameH = g_windowHeight;
+		g_freezeFrameW  = g_windowWidth;
+		g_freezeFrameH  = g_windowHeight;
+		g_freezeRealloc = 0;
 		glBindTexture(GL_TEXTURE_2D, g_freezeFrameTex);
+#if defined(ES3_SHADERS)
+		/* The blit below is a multisample RESOLVE whenever MSAA is on, and ES3
+		 * rejects a resolve outright unless the read and draw buffers have
+		 * IDENTICAL formats -- desktop GL happily converts. A fixed GL_RGBA8
+		 * against a window with no alpha therefore failed with INVALID_OPERATION
+		 * every frame, leaving the freeze texture black: the black pause screen.
+		 *
+		 * Match the window instead of assuming. If the guess is still refused,
+		 * the error path below flips it once and re-allocates, so an odd EGL
+		 * config resolves itself rather than silently showing black forever. */
+		{
+			int alphaBits = 8;
+
+			if (SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alphaBits) != 0)
+				alphaBits = 8;
+			if (g_freezeFlipFormat)
+				alphaBits = (alphaBits > 0) ? 0 : 8;
+
+			if (alphaBits > 0)
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_freezeFrameW, g_freezeFrameH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+			else
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8,  g_freezeFrameW, g_freezeFrameH, 0, GL_RGB,  GL_UNSIGNED_BYTE, NULL);
+
+			g_freezeAlphaBits = alphaBits;
+		}
+#else
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_freezeFrameW, g_freezeFrameH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+#endif
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
@@ -3671,14 +3703,64 @@ void GR_CaptureLastFrame(void)
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
+	/* Clear the error state FIRST. This frame already carries a recurring
+	 * 0x0502 from elsewhere (see the GR_SwapWindow drain), and glGetError
+	 * returns the oldest error, so checking after the blit without draining
+	 * first blames this call for someone else's failure -- which is exactly
+	 * what it did: it reported a capture that had actually succeeded. */
+	{
+		int guard = 0;
+		while (glGetError() != GL_NO_ERROR && ++guard < 8) { }
+	}
+
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
+	/* Report once whether the capture actually happened. g_freezeFrameValid used
+	 * to be set unconditionally, so a capture that failed still counted as good
+	 * and pause presented a black texture with no clue why -- which is exactly
+	 * what Android shows. With MSAA the read buffer is multisample, making this
+	 * a resolve blit, and ES3 rejects those on any format/size mismatch. */
+	{
+		static int s_reported = 0;
+		GLenum     err = glGetError();
+
+		if (err != GL_NO_ERROR)
+		{
+			/* Only ever mark the capture good when it really succeeded --
+			 * setting this unconditionally is what made a failed capture
+			 * present as a black screen with nothing to point at. */
+			if (s_reported < 3)
+			{
+				s_reported++;
+				eprintwarn("[FREEZE] capture %dx%d FAILED err=0x%04X msaa=%d fbo=0x%04X%s\n",
+					g_freezeFrameW, g_freezeFrameH, (unsigned)err, g_cfg_msaaSamples,
+					(unsigned)glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER),
+					g_freezeFlipFormat ? "" : " - retrying with the other format");
+			}
+
+			if (!g_freezeFlipFormat)
+			{
+				g_freezeFlipFormat = 1;
+				g_freezeRealloc    = 1;
+			}
+		}
+		else
+		{
+			if (!s_reported)
+			{
+				s_reported = 1;
+				eprintinfo("[FREEZE] capture %dx%d ok (msaa=%d, %s)\n",
+					g_freezeFrameW, g_freezeFrameH, g_cfg_msaaSamples,
+					g_freezeAlphaBits > 0 ? "RGBA8" : "RGB8");
+			}
+			g_freezeFrameValid = 1;
+		}
+	}
+
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-
-	g_freezeFrameValid = 1;
 #endif
 }
 
