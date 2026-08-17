@@ -528,6 +528,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 
 #if defined(__ANDROID__)
 	windowFlags |= SDL_WINDOW_FULLSCREEN;
+#elif defined(PSYX_IOS)
+	/* A phone has no windowed mode, so the config's fullscreen setting is
+	 * meaningless here and its 640x480 would otherwise be taken literally.
+	 *
+	 * ALLOW_HIGHDPI is what makes the difference between rendering at points
+	 * and rendering at pixels: without it SDL hands back a 956x440 drawable on
+	 * a 16 Pro Max and iOS upscales the result. With it the drawable is the
+	 * panel's real 2868x1320. */
+	windowFlags |= SDL_WINDOW_FULLSCREEN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS;
 #else
 	/* 0 = windowed, 1 = exclusive fullscreen, 2 = borderless (fullscreen
 	 * desktop: covers the screen at desktop resolution, no mode switch). */
@@ -584,14 +593,18 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		return 0;
 	}
 
-#if defined(__ANDROID__)
-	/* Android always hands back a fullscreen surface whose size is the display's,
+#if defined(__ANDROID__) || defined(PSYX_IOS)
+	/* Both phones hand back a fullscreen surface whose size is the display's,
 	 * not the one requested of SDL_CreateWindow. g_windowWidth/Height feed the
 	 * viewport and the aspect-corrected cull bounds, so they have to be the real
 	 * drawable size or every clip rect is computed against the wrong extents.
 	 * (The upstream block that used to sit here assigned to screenWidth/
 	 * windowWidth — names this fork does not have — and ran before the window
-	 * existed, so it could never have taken effect anyway.) */
+	 * existed, so it could never have taken effect anyway.)
+	 *
+	 * iOS was left out of this originally and kept the config's 640x480, so the
+	 * viewport covered a corner of a 2868x1320 panel and the picture sat inset
+	 * with dead space beside it. */
 	{
 		int drawableW = 0, drawableH = 0;
 		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
@@ -599,6 +612,7 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		{
 			g_windowWidth = drawableW;
 			g_windowHeight = drawableH;
+			eprintf("*Drawable size: %dx%d\n", drawableW, drawableH);
 		}
 	}
 #endif
