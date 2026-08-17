@@ -634,6 +634,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 }
 #endif
 
+#if defined(PSYX_IOS)
+/* See PSYX_DEFAULT_FBO in PsyX_render.h. Resolved below, before anything has
+ * had a chance to bind a framebuffer of its own. */
+extern "C" unsigned int g_PsyX_DefaultFBO = 0;
+#endif
+
 int GR_InitialiseGLExt()
 {
 #ifdef USE_GLAD
@@ -642,7 +648,19 @@ int GR_InitialiseGLExt()
 	if (err == 0)
 		return 0;
 #endif
-	
+
+#if defined(PSYX_IOS)
+	/* SDL's UIKit backend has its CAEAGLLayer framebuffer bound at this point.
+	 * Whatever name it got is what "back to the screen" means for the rest of
+	 * the run; 0 would be a framebuffer that does not exist. */
+	{
+		GLint fbo = 0;
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+		g_PsyX_DefaultFBO = (unsigned int)fbo;
+		eprintf("*Default framebuffer: %u\n", g_PsyX_DefaultFBO);
+	}
+#endif
+
 	const char* rend = (const char*)glGetString(GL_RENDERER);
 	const char* vendor = (const char*)glGetString(GL_VENDOR);
 	eprintf("*Video adapter: %s by %s\n", rend, vendor);
@@ -1860,7 +1878,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		}
 	}
 
@@ -1891,7 +1909,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		}
 	}
 
@@ -1941,7 +1959,7 @@ int GR_InitialisePSX()
 				           VRAM_WIDTH, VRAM_HEIGHT);
 			}
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		}
 	}
 
@@ -2956,7 +2974,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		 * only the writes are suppressed. */
 		if (g_PsxSkipFramebufferStore)
 		{
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		}
 		else if (g_PreviousOffscreen.w > 0 && g_PreviousOffscreen.h > 0 &&
 		         g_PreviousOffscreen.w <= 64 && g_PreviousOffscreen.h <= 64)
@@ -2976,7 +2994,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
 			glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, s_scratchRGBA);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 			GR_CopyRGBAFramebufferToVRAM(s_scratchRGBA,
 				g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh, 0, 1);
@@ -3016,12 +3034,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 								GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 			// done, unbind
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		}
 #endif
 
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		// copy rendering results to VRAM texture
 		{
 			// reat the texture
@@ -3252,7 +3270,7 @@ static void GR_EnsurePostTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_postFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_postTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 }
 
 /* Draw a full-screen triangle sampling `tex` into the currently bound default
@@ -3261,7 +3279,7 @@ static void GR_EnsurePostTarget(int w, int h)
  * cached GL state so the next frame's prims re-establish it. */
 static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 {
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	glViewport(0, 0, g_windowWidth, g_windowHeight);
 
 	glDisable(GL_DEPTH_TEST);
@@ -3333,11 +3351,11 @@ void GR_PostProcess(void)
 
 	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
 	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	g_postFrame++;
 	GR_DrawFullscreenTexture(g_postTex, g_cfg_postProcess);
@@ -3473,7 +3491,7 @@ static void GR_EnsureShadowTarget(void)
 	glDrawBuffer(GL_NONE);
 #endif
 	glReadBuffer(GL_NONE);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	if (g_shadowDepthShader == (ShaderID)-1)
 	{
@@ -3637,14 +3655,14 @@ void GR_CaptureLastFrame(void)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	g_freezeFrameValid = 1;
 #endif
@@ -3673,13 +3691,13 @@ void GR_PresentLastFrame(void)
 #endif
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	glBlitFramebuffer(0, 0, g_freezeFrameW, g_freezeFrameH,
 		0, 0, g_windowWidth, g_windowHeight,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	g_freezePresentedThisFrame = 1;
 #endif
@@ -3914,7 +3932,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbPackFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbPackTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 }
 
 /* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
@@ -3952,7 +3970,7 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	glBindVertexArray(0);
 
 	glEnable(GL_STENCIL_TEST);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture: recording the
@@ -4009,7 +4027,7 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(cc[0], cc[1], cc[2], cc[3]);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
 	g_PreviousBlendMode    = -999;
@@ -4071,7 +4089,7 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	if (g_cfg_msaaSamples > 0)
 	{
 		GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 		glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -4143,8 +4161,8 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		}
 	}
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
@@ -4228,7 +4246,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 		if (g_cfg_msaaSamples > 0)
 		{
 			GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 			glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			storeReadFBO = g_postFBO;
@@ -4263,8 +4281,8 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 		
 		// done, unbind
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	}
 
 	g_fbStoreValid = 1;
@@ -4288,7 +4306,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 	}
 
 	// after drawing
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 	glFlush();
 #endif
 
@@ -4328,9 +4346,9 @@ static void GR_RestoreStoredFramebufferRegion(void)
 		x, y + h, x + w, y,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	/* A full vram[] re-upload also stamped TIM bytes over the scene scratch
 	 * rect — re-blit the stored frame there too (no TTL decrement here). */

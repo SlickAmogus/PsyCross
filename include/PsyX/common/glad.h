@@ -38,6 +38,22 @@
 #   include <TargetConditionals.h>
 #endif
 
+/* Also defined in PsyX/PsyX_render.h — see the note there. iOS renders into
+ * SDL's CAEAGLLayer framebuffer, not object 0, so "unbind to the screen" has to
+ * name it. Compile-time 0 on every other platform. */
+#ifndef PSYX_DEFAULT_FBO
+#   if defined(__APPLE__) && TARGET_OS_IPHONE
+#       ifdef __cplusplus
+extern "C" unsigned int g_PsyX_DefaultFBO;
+#       else
+extern unsigned int g_PsyX_DefaultFBO;
+#       endif
+#       define PSYX_DEFAULT_FBO (g_PsyX_DefaultFBO)
+#   else
+#       define PSYX_DEFAULT_FBO 0
+#   endif
+#endif
+
 #if defined(__ANDROID__)
 #   include <GLES3/gl3.h>
 #   include <GLES2/gl2ext.h>

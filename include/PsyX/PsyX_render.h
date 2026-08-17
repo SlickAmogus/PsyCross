@@ -94,6 +94,34 @@
 #   define TEXTURE_FORMAT GL_UNSIGNED_SHORT_5_5_5_1
 #endif
 
+/* "Unbind the framebuffer" is not `0` everywhere.
+ *
+ * On desktop GL and on Android's EGL the window surface IS framebuffer object
+ * 0, so binding 0 puts you back on screen. iOS has no such default: SDL's UIKit
+ * backend renders into a framebuffer it creates around a CAEAGLLayer, and its
+ * name is whatever the driver handed out. Binding 0 there selects a framebuffer
+ * that does not exist, so every draw is silently discarded — the game runs,
+ * audio plays, and the screen stays black.
+ *
+ * Captured once from GL_FRAMEBUFFER_BINDING in GR_InitialiseGLExt, which runs
+ * with SDL's own framebuffer still current. Compile-time 0 everywhere else, so
+ * no other platform's generated code changes. */
+/* Also defined in common/glad.h: PsyCross reaches this header, while pc_port's
+ * GL code includes only glad.h, and on iOS neither includes the other. Both
+ * copies are identical and guarded, so whichever arrives first wins. */
+#ifndef PSYX_DEFAULT_FBO
+#   if defined(PSYX_IOS)
+#       ifdef __cplusplus
+extern "C" unsigned int g_PsyX_DefaultFBO;
+#       else
+extern unsigned int g_PsyX_DefaultFBO;
+#       endif
+#       define PSYX_DEFAULT_FBO (g_PsyX_DefaultFBO)
+#   else
+#       define PSYX_DEFAULT_FBO 0
+#   endif
+#endif
+
 #include "psx/types.h"
 
 #include "common/pgxp_defs.h"
