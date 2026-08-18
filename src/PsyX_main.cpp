@@ -827,7 +827,25 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 
 void PsyX_GetScreenSize(int* screenWidth, int* screenHeight)
 {
+/* Detected here rather than via PSYX_IOS: nothing this file includes reaches
+ * PsyX_render.h, so that macro is not defined in this translation unit and the
+ * branch would silently never be taken. TargetConditionals comes in through
+ * platform.h. */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	/* SDL_GetWindowSize reports POINTS. With SDL_WINDOW_ALLOW_HIGHDPI the
+	 * drawable is PIXELS — 3x larger on a modern iPhone — and everything that
+	 * consumes this function works in that pixel space: glViewport, and
+	 * PsyX_MapWindowToViewport, which reasons in g_windowWidth/Height.
+	 *
+	 * Mixing the two put the FMV in a bottom-left box at a ninth of the area and
+	 * folded every touch into the same ninth, so a finger at the bottom centre
+	 * registered near the top left. Report the pixels everyone else assumes.
+	 * (Points still matter for the desktop mouse, which is why this is gated.) */
+	if (screenWidth)  *screenWidth  = g_windowWidth;
+	if (screenHeight) *screenHeight = g_windowHeight;
+#else
 	SDL_GetWindowSize(g_window, screenWidth, screenHeight);
+#endif
 }
 
 void PsyX_SetCursorPosition(int x, int y)
