@@ -312,6 +312,10 @@ int vram_need_update = 1;
 
 /* PC port: runtime gate for framebuffer→VRAM feedback. See PsyX_render.h. */
 int g_PsxSkipFramebufferStore = 0;
+/* PC port: force the GL error sweep on for any backend (it is automatic on
+ * GLES/ANGLE, where silent failures are the norm). */
+extern "C" { int g_dbg_glDiag = 0; }
+void GR_DiagGLError(const char* where);
 
 /* PC port: framebuffer feedback is LOADING-SCREEN ONLY for now. The generic
  * store also drives the per-map dream/ghosting overlays (map6 otherworld,
@@ -1050,6 +1054,8 @@ void GR_BeginScene()
 
 void GR_EndScene()
 {
+	GR_DiagGLError("scene draw");
+
 	framebuffer_need_update = 1;
 	
 	if (g_dbg_wireframeMode)
@@ -4778,8 +4784,41 @@ void GR_DumpVRAM(const char* path)
 	fclose(f);
 }
 
+/* PC port: one-shot GL error sweep, for diagnosing a renderer that draws
+ * without complaining. Nothing in the frame path calls glGetError, so an
+ * illegal call — and ES is far stricter than desktop GL about framebuffer
+ * blits, formats and multisample resolves — fails silently and the frame just
+ * comes out black. Reported once per call site so a single log names the first
+ * thing that broke instead of a wall of repeats. */
+void GR_DiagGLError(const char* where)
+{
+	static const char* s_seen[16];
+	static int         s_seenCount = 0;
+	GLenum             err;
+
+	if (!g_grIsGLES && !g_dbg_glDiag)
+		return;
+
+	err = glGetError();
+	if (err == GL_NO_ERROR)
+		return;
+
+	for (int i = 0; i < s_seenCount; i++)
+	{
+		if (s_seen[i] == where)
+			return;
+	}
+	if (s_seenCount < 16)
+		s_seen[s_seenCount++] = where;
+
+	eprintwarn("[GLDIAG] GL error 0x%04X at %s (backend=%s)\n",
+		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
+}
+
 void GR_SwapWindow()
 {
+	GR_DiagGLError("end of frame");
+
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	if (PsyX_Angle_Active())
 		PsyX_Angle_Swap();
@@ -5122,6 +5161,24 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	GR_BindVertexBuffer();
 
 #if USE_OPENGL
+	/* ORPHAN the buffer before writing it.
+	 *
+	 * Overwriting storage the GPU may still be reading forces the driver to
+	 * either block until those draws retire or silently shadow the allocation.
+	 * GR_BindVertexBuffer alternates between two VBOs, which halves the odds but
+	 * does not remove them: with several DrawAllSplits per frame each buffer
+	 * comes back around while its previous contents can still be in flight.
+	 *
+	 * Passing NULL for the same size says "the old contents are dead" — the
+	 * driver hands back fresh storage immediately and the in-flight draws keep
+	 * reading the old block. Measured on a Mali-T720 (Arcade1Up cabinet), where
+	 * a tiler defers work to end-of-tile and the buffer is almost always still
+	 * busy: GL submission fell from 167.9 ms/frame to 7.3 ms, and an in-game
+	 * cutscene went from ~6.7 fps to ~53 fps. The win scales with how long the
+	 * GPU holds the buffer, so it is largest on tilers and shared-memory iGPUs
+	 * and smallest on a discrete desktop card — but it is never a pessimisation,
+	 * and the size is constant so drivers can recycle identical blocks. */
+	glBufferData(GL_ARRAY_BUFFER, MAX_VERTEX_BUFFER_SIZE * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
 	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
 #else
 #error
