@@ -425,6 +425,19 @@ int PsyX_LookupGameControllerMapping(const char* str, int default_value)
 		if (!_stricmp("NONE", str))
 			return SDL_CONTROLLER_BUTTON_INVALID;
 
+		/* "joyN" = raw joystick button N, for buttons SDL's controller profile
+		 * does not describe (see CONTROLLER_MAP_FLAG_RAWBTN). */
+		if ((str[0] == 'j' || str[0] == 'J') &&
+		    (str[1] == 'o' || str[1] == 'O') &&
+		    (str[2] == 'y' || str[2] == 'Y') &&
+		    str[3] >= '0' && str[3] <= '9')
+		{
+			int raw = atoi(str + 3);
+
+			if (raw >= 0 && raw < 0x1000)
+				return CONTROLLER_MAP_FLAG_RAWBTN | raw;
+		}
+
 		// check buttons
 		for (i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++)
 		{
@@ -868,8 +881,19 @@ void PsyX_Sys_DoPollEvent()
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
-					g_windowWidth = event.window.data1;
-					g_windowHeight = event.window.data2;
+					/* This is the SURFACE size; the render size is derived from
+					 * it. Assigning g_windowWidth directly silently undid render
+					 * scaling -- Android fires a resize during startup, right
+					 * after init had computed the scaled size, so the setting
+					 * looked like it did nothing at all. */
+					{
+						extern int g_surfaceWidth, g_surfaceHeight;
+						extern void GR_ApplyRenderScale(void);
+
+						g_surfaceWidth  = event.window.data1;
+						g_surfaceHeight = event.window.data2;
+						GR_ApplyRenderScale();
+					}
 					GR_ResetDevice();
 					break;
 				case SDL_WINDOWEVENT_CLOSE:
@@ -999,6 +1023,13 @@ char PsyX_BeginScene()
 	// set — leaving stale "street sign" garbage from the prior frame
 	// visible for a split second. Forcing a clear every frame is the
 	// PC equivalent of glClear(GL_COLOR_BUFFER_BIT) at frame start.
+	/* Bind the scaled render target before anything is drawn or cleared, so the
+	 * whole frame lands in it. No-op at scale 1.0. */
+	{
+		extern void GR_BeginRenderScale(void);
+		GR_BeginRenderScale();
+	}
+
 	{
 		const RECT16 clipenv = activeDrawEnv.clip;
 		const u_char r = activeDrawEnv.isbg ? activeDrawEnv.r0 : 0;
@@ -1088,6 +1119,13 @@ void PsyX_EndScene()
 	{
 		extern void GR_PostProcess(void);
 		GR_PostProcess();
+	}
+
+	/* Upscale the scaled frame onto the window. After the post-process and the
+	 * freeze capture, both of which want the frame at its render size. */
+	{
+		extern void GR_EndRenderScale(void);
+		GR_EndRenderScale();
 	}
 
 	GR_SwapWindow();
@@ -1295,6 +1333,17 @@ void PsyX_WaitForTimestep(int count)
 #ifdef __EMSCRIPTEN__
 			emscripten_sleep(0);
 #endif
+			/* Low-end: yield instead of spinning. This loop otherwise burns a
+			 * core flat out waiting for the vblank counter to tick, which on a
+			 * 4-core cabinet is a core taken from the audio and render threads
+			 * (and makes the governor see a permanently busy CPU). Sleeping
+			 * costs at most a millisecond of wait precision. */
+			{
+				extern int g_cfg_lowEnd;
+				if (g_cfg_lowEnd)
+					SDL_Delay(1);
+			}
+
 			vbl = PsyX_Sys_GetVBlankCount();
 		}
 		while (vbl - swapLastVbl < count);

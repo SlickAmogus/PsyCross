@@ -1,5 +1,6 @@
 #include "psx/libgte.h"
 #include "psx/libgpu.h"
+#include <SDL.h>
 #include "psx/libetc.h"
 
 #include "../gpu/PsyX_GPU.h"
@@ -479,7 +480,17 @@ void DrawOTag(u_long* p)
 		//if (activeDrawEnv.isbg)
 		//	ClearImage(&activeDrawEnv.clip, activeDrawEnv.r0, activeDrawEnv.g0, activeDrawEnv.b0);
 
-		ParsePrimitivesLinkedList(p, 0);
+		/* Split the OT draw into parse vs submit. The whole call costs ~120ms on
+		 * a 2D screen for 2356 nodes and 7 draw calls, which is ~400us per
+		 * primitive -- so the cost is per-prim work, not the walk. These two
+		 * numbers say which half owns it. */
+		{
+			extern unsigned g_PsyX_MsParse, g_PsyX_MsSubmit, g_PsyX_OtPrims;
+			unsigned t0 = (unsigned)SDL_GetTicks();
+
+			ParsePrimitivesLinkedList(p, 0);
+			g_PsyX_MsParse += (unsigned)SDL_GetTicks() - t0;
+		}
 
 		/* No glFinish here: the parse is CPU-side and the GL command stream is
 		 * ordered, so DrawAllSplits needs no completion barrier. The old
@@ -487,7 +498,13 @@ void DrawOTag(u_long* p)
 		 * OT2 + water OT), serializing CPU against GPU — on 2012-era Intel
 		 * that alone pushed frames onto multi-vblank boundaries (~10fps). */
 
-		DrawAllSplits();
+		{
+			extern unsigned g_PsyX_MsSubmit;
+			unsigned t1 = (unsigned)SDL_GetTicks();
+
+			DrawAllSplits();
+			g_PsyX_MsSubmit += (unsigned)SDL_GetTicks() - t1;
+		}
 	} while (g_dbg_emulatorPaused);
 }
  

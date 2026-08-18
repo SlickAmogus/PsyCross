@@ -5,6 +5,12 @@
 
 #define CONTROLLER_MAP_FLAG_AXIS		0x4000
 #define CONTROLLER_MAP_FLAG_INVERSE		0x8000
+/* RAW joystick button, bound as "joyN". SDL_GameController only exposes buttons
+ * its per-device mapping describes, so hardware with more buttons than the
+ * profile lists has some that no controller name can reach -- an Arcade1Up
+ * panel reports 6 buttons of which SDL names only 4. The raw device sees them
+ * all, and this encoding binds one by its raw index. */
+#define CONTROLLER_MAP_FLAG_RAWBTN		0x2000
 
 typedef struct
 {

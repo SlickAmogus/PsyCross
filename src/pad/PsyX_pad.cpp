@@ -140,6 +140,58 @@ void PsyX_Pad_Debug_ListControllers()
 		eprintwarn("No SDL haptics found!\n");
 }
 
+
+/* One-shot detailed dump of a controller, for building a proper SDL mapping (or
+ * a softmod patch) for hardware whose stock profile is incomplete. Prints the
+ * GUID, the raw button/axis/hat counts and the mapping string SDL is using, so
+ * the gap between "buttons the device has" and "buttons the profile names" is
+ * visible in one place. */
+static void PsyX_Pad_DumpDeviceDetail(SDL_GameController* gc)
+{
+	SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
+	char          guid[64];
+	char*         map;
+	int           i;
+
+	if (js == NULL)
+		return;
+
+	SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(js), guid, sizeof(guid));
+
+	eprintinfo("[PADINFO] name='%s' guid=%s%s",
+		SDL_JoystickName(js) ? SDL_JoystickName(js) : "?", guid, "\n");
+	eprintinfo("[PADINFO] raw buttons=%d axes=%d hats=%d balls=%d%s",
+		SDL_JoystickNumButtons(js), SDL_JoystickNumAxes(js),
+		SDL_JoystickNumHats(js), SDL_JoystickNumBalls(js), "\n");
+	eprintinfo("[PADINFO] vendor=0x%04X product=0x%04X version=0x%04X%s",
+		SDL_JoystickGetVendor(js), SDL_JoystickGetProduct(js),
+		SDL_JoystickGetProductVersion(js), "\n");
+
+	map = SDL_GameControllerMapping(gc);
+	if (map != NULL)
+	{
+		eprintinfo("[PADINFO] sdl mapping: %s%s", map, "\n");
+		SDL_free(map);
+	}
+
+	/* Which controller name each raw button currently answers to, so an unnamed
+	 * one shows up as a hole in the list rather than being invisible. */
+	for (i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++)
+	{
+		SDL_GameControllerButtonBind b =
+			SDL_GameControllerGetBindForButton(gc, (SDL_GameControllerButton)i);
+
+		if (b.bindType == SDL_CONTROLLER_BINDTYPE_BUTTON)
+			eprintinfo("[PADINFO] '%s' <- raw button %d%s",
+				SDL_GameControllerGetStringForButton((SDL_GameControllerButton)i),
+				b.value.button, "\n");
+		else if (b.bindType == SDL_CONTROLLER_BINDTYPE_HAT)
+			eprintinfo("[PADINFO] '%s' <- hat %d mask %d%s",
+				SDL_GameControllerGetStringForButton((SDL_GameControllerButton)i),
+				b.value.hat.hat, b.value.hat.hat_mask, "\n");
+	}
+}
+
 // Opens specific system controller and assigns to specified slot
 void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 {
@@ -158,6 +210,8 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 		// assign device id automatically
 		if (controller->deviceId == -1)
 			controller->deviceId = deviceId;
+
+		PsyX_Pad_DumpDeviceDetail(controller->gc);
 	}
 }
 
@@ -341,9 +395,58 @@ void PsyX_Pad_InternalPadUpdates()
 		}
 	}
 
-#if defined(__ANDROID__)
-	///@TODO SDL_NumJoysticks always reports > 0 for some reason on Android.
-#endif
+	/* Fold every other controller into player 1.
+	 *
+	 * Controllers are opened first-come into slots, so whichever device SDL
+	 * enumerates first becomes player 1 -- and that is not necessarily the one
+	 * a human is holding. On an arcade cabinet a 'Logitech USB Receiver' dongle
+	 * claimed slot 0 while the actual panel landed in slot 1, so the panel was
+	 * driving a second player this game does not have and almost nothing
+	 * responded.
+	 *
+	 * Silent Hill is single-player, so merging is strictly a gain: any pad on
+	 * the machine drives Harry, including a cabinet's second-player controls.
+	 * Purely additive -- each slot still gets its own state above, so a port
+	 * that wants pad 2 can still read it. Active-low, so AND means "pressed on
+	 * either". */
+	{
+		LPPADRAW p0 = (LPPADRAW)g_controllers[0].padData;
+		int      i;
+
+		if (p0 != NULL)
+		{
+			for (i = 1; i < MAX_CONTROLLERS; i++)
+			{
+				LPPADRAW pn = (LPPADRAW)g_controllers[i].padData;
+
+				if (pn == NULL || g_controllers[i].gc == NULL ||
+				    !SDL_GameControllerGetAttached(g_controllers[i].gc))
+					continue;
+
+				*(u_short*)p0->buttons &= *(u_short*)pn->buttons;
+
+				/* Sticks can't be OR'd, so the first deflected one wins;
+				 * a centred pad never fights one being pushed. */
+				{
+					const int n0 = (abs((int)p0->analog[0] - 128) + abs((int)p0->analog[1] - 128) +
+					                abs((int)p0->analog[2] - 128) + abs((int)p0->analog[3] - 128));
+					const int nn = (abs((int)pn->analog[0] - 128) + abs((int)pn->analog[1] - 128) +
+					                abs((int)pn->analog[2] - 128) + abs((int)pn->analog[3] - 128));
+
+					if (nn > n0)
+					{
+						p0->analog[0] = pn->analog[0];
+						p0->analog[1] = pn->analog[1];
+						p0->analog[2] = pn->analog[2];
+						p0->analog[3] = pn->analog[3];
+						p0->id        = pn->id;
+					}
+				}
+
+				p0->status = 0;
+			}
+		}
+	}
 }
 
 
@@ -371,6 +474,19 @@ extern "C" int PsyX_Pad_SkipButtonHeld(void)
 
 int GetControllerButtonState(SDL_GameController* cont, int buttonOrAxis)
 {
+	/* Raw joystick button: bypasses the controller profile entirely, which is
+	 * the only way to reach a button the profile does not name. */
+	if (buttonOrAxis & CONTROLLER_MAP_FLAG_RAWBTN)
+	{
+		SDL_Joystick* js = SDL_GameControllerGetJoystick(cont);
+		const int     raw = buttonOrAxis & 0x0FFF;
+
+		if (js == NULL || raw >= SDL_JoystickNumButtons(js))
+			return 0;
+
+		return SDL_JoystickGetButton(js, raw) * 32767;
+	}
+
 	if (buttonOrAxis & CONTROLLER_MAP_FLAG_AXIS)
 	{
 		int value = SDL_GameControllerGetAxis(cont, (SDL_GameControllerAxis)(buttonOrAxis & ~(CONTROLLER_MAP_FLAG_AXIS | CONTROLLER_MAP_FLAG_INVERSE)));
@@ -481,6 +597,70 @@ void PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad
 	/* Primary binds AND the secondary (second-button-per-action) binds: active-low,
 	 * so an action reads pressed if EITHER mapping clears its bit. Analog sticks come
 	 * from the primary mapping's axes only. */
+	/* Report every controller button this device can produce, once each.
+	 *
+	 * The keyboard probe found nothing on an arcade cabinet because its panel is
+	 * a game controller, not a keyboard -- and which SDL buttons a panel exposes
+	 * is not guessable: a 6-button stick has no triggers and no Back, which is
+	 * exactly why Aim (R2) and Inventory (Select) did nothing there while the
+	 * face buttons worked. Press each button once and this prints the map. */
+	{
+		static unsigned char s_btnSeen[SDL_CONTROLLER_BUTTON_MAX];
+		static unsigned char s_axSeen[SDL_CONTROLLER_AXIS_MAX];
+		int b;
+
+		for (b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
+		{
+			if (!s_btnSeen[b] && SDL_GameControllerGetButton(cont, (SDL_GameControllerButton)b))
+			{
+				s_btnSeen[b] = 1;
+				eprintinfo("[BTN] button '%s' on '%s'\n",
+					SDL_GameControllerGetStringForButton((SDL_GameControllerButton)b),
+					SDL_GameControllerName(cont) ? SDL_GameControllerName(cont) : "?");
+			}
+		}
+
+		/* RAW joystick buttons as well. SDL_GameController only exposes buttons
+		 * its mapping covers, so a panel with more buttons than the profile
+		 * describes has some that are simply invisible above -- which is exactly
+		 * what two dead buttons on a 6-button cabinet look like. The raw device
+		 * sees every one, and the index printed here is what a binding needs. */
+		{
+			SDL_Joystick* js = SDL_GameControllerGetJoystick(cont);
+
+			if (js != NULL)
+			{
+				static unsigned char s_rawSeen[32];
+				int nb = SDL_JoystickNumButtons(js);
+				int r;
+
+				if (nb > 32) nb = 32;
+				for (r = 0; r < nb; r++)
+				{
+					if (!s_rawSeen[r] && SDL_JoystickGetButton(js, r))
+					{
+						s_rawSeen[r] = 1;
+						eprintinfo("[BTN] RAW joystick button %d on '%s'\n",
+							r, SDL_JoystickName(js) ? SDL_JoystickName(js) : "?");
+					}
+				}
+			}
+		}
+
+		/* Triggers and sticks are axes, not buttons; a panel that reports its
+		 * shoulder buttons as axes would otherwise look like it had none. */
+		for (b = 0; b < SDL_CONTROLLER_AXIS_MAX; b++)
+		{
+			if (!s_axSeen[b] && abs(SDL_GameControllerGetAxis(cont, (SDL_GameControllerAxis)b)) > 16384)
+			{
+				s_axSeen[b] = 1;
+				eprintinfo("[BTN] axis '%s' on '%s'\n",
+					SDL_GameControllerGetStringForAxis((SDL_GameControllerAxis)b),
+					SDL_GameControllerName(cont) ? SDL_GameControllerName(cont) : "?");
+			}
+		}
+	}
+
 	u_short w1 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping,  controller->hystWord[0]);
 	u_short w2 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping2, controller->hystWord[1]);
 	controller->hystWord[0] = w1;
@@ -567,6 +747,32 @@ u_short PsyX_Pad_UpdateKeyboardInput()
 		return 0xFFFF;
 
 	SDL_PumpEvents();
+
+	/* Report every distinct key this machine can produce, once each.
+	 *
+	 * An arcade cabinet's controls are an encoder emitting scancodes nobody can
+	 * guess from here, and "most buttons do nothing" cannot be fixed without
+	 * knowing WHICH ones they are -- the default map (C/V/Z/X/Enter/arrows) is
+	 * a PC keyboard layout that a cabinet has no reason to match. Each scancode
+	 * logs a single line the first time it is seen, so pressing every button
+	 * once produces a complete map of the hardware and nothing after that. */
+	{
+		static unsigned char s_keySeen[SDL_NUM_SCANCODES];
+		static int           s_keyCount = 0;
+		int                  sc;
+
+		for (sc = 0; sc < SDL_NUM_SCANCODES && s_keyCount < 64; sc++)
+		{
+			if (g_sdlKeyboardState[sc] && !s_keySeen[sc])
+			{
+				const char* nm = SDL_GetScancodeName((SDL_Scancode)sc);
+
+				s_keySeen[sc] = 1;
+				s_keyCount++;
+				eprintinfo("[KEY] scancode %d = '%s'\n", sc, (nm && nm[0]) ? nm : "(unnamed)");
+			}
+		}
+	}
 
 	ret = PsyX_Pad_BuildKbWord(g_cfg_keyboardMapping);
 

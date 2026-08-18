@@ -374,6 +374,8 @@ static unsigned s_dbgArmF = 0, s_dbgCapF = 0, s_dbgApplyCalls = 0, s_dbgStaleRej
  * armF~350k/s capF~100k/s hit F==splitWORLD, staleR<400/s, splitHW 794/4096,
  * szExhaust 0, no shift disagreement) — the dump is now opt-in diagnostics. */
 extern "C" { int g_PsxPgxpDepthStats = 0; }
+extern "C" { unsigned g_PsyX_OtNodes = 0; }
+extern "C" { unsigned g_PsyX_MsParse = 0, g_PsyX_MsSubmit = 0, g_PsyX_OtPrims = 0; }
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
@@ -2763,11 +2765,20 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 		g_otBucketDepth = -1.0f;
 		// walk OT_TAG linked list with safety guards
 		uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);
+		/* Cycle guard, see the Floyd step at the bottom of the loop. */
+		uintptr_t slowPacket = basePacket;
 		/* The safety cap guards against corrupt/cyclic lists, but it counts OT
 		 * NODES (2048 buckets + one per prim) — the whole-town render mode
 		 * legitimately submits far more than the old 16k prims. */
 		for (int safety = 0; safety < (1 << 20); safety++)
 		{
+			/* Count nodes walked. A menu with 5 prims should visit a couple of
+			 * thousand (one per OT bucket); anything near the 1<<20 cap means
+			 * the chain is running away into "wild but mapped" memory and the
+			 * walk is being stopped by the safety counter every single frame --
+			 * which at ~100ns a node is most of a 150ms frame. */
+			g_PsyX_OtNodes++;
+
 			const int tagLength = getlen(basePacket);
 			if (tagLength > 0 && tagLength <= 32)
 			{
@@ -2796,6 +2807,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 						flushSplit.numVerts = g_vertexIndex - flushSplit.startVertex;
 						DrawAllSplits();
 					}
+					g_PsyX_OtPrims++;
 					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
 					if (primLength <= 0) break;
 					currentPacket += (primLength + P_LEN) * sizeof(u_int);
@@ -2917,6 +2929,45 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 				break;
 			}
 			basePacket = nextPtr;
+
+			/* CYCLE GUARD (Floyd tortoise/hare).
+			 *
+			 * The checks above catch a next-pointer that is null, -1 or out of
+			 * range, but nothing catches a chain that simply loops back on
+			 * itself -- every pointer in it is valid and mapped, so the walk
+			 * follows it until the 1<<20 node cap, every single frame. When the
+			 * loop is among EMPTY bucket tags it emits no vertices either, so
+			 * the symptom is a frame that costs ~145ms and draws almost
+			 * nothing: the 2D screens (main menu, options) at ~6fps on a slow
+			 * device, while a fast CPU absorbs the same million nodes and only
+			 * looks a bit sluggish.
+			 *
+			 * The tortoise advances one node per two of ours, so it meets the
+			 * hare only inside a genuine cycle. A well-formed list terminates
+			 * before they ever meet, making this free in the normal case. */
+			/* ODD iterations only. Advancing on even ones moved the tortoise in
+			 * lockstep with the hare on the very first step, so they matched
+			 * immediately and every walk "detected" a cycle after 0 nodes. */
+			if ((safety & 1) == 1)
+			{
+				uintptr_t slowNext = reinterpret_cast<uintptr_t>(nextPrim(slowPacket));
+
+				if (slowNext >= 0x10000 && slowNext != static_cast<uintptr_t>(-1))
+					slowPacket = slowNext;
+			}
+
+			if (basePacket == slowPacket)
+			{
+				static int s_cycleLogged = 0;
+
+				if (s_cycleLogged < 8)
+				{
+					s_cycleLogged++;
+					eprintinfo("[OT] CYCLE after %d nodes at %p - walk halted\n",
+						safety, (void*)basePacket);
+				}
+				break;
+			}
 		}
 	}
 }

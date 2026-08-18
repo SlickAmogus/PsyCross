@@ -125,8 +125,71 @@ TextureID g_whiteTexture = -1;
 TextureID g_rgLutTexture = -1;
 TextureID g_lastBoundTexture = -1;
 
+/* RENDER size. With render scaling on this is smaller than the real surface:
+ * everything downstream (viewport, scissor, culling bounds, the 2D overlay
+ * extents) is expressed in these, so they all follow automatically and only the
+ * present step and window-pixel input have to know the difference. */
 int g_windowWidth = 0;
 int g_windowHeight = 0;
+
+/* REAL surface, always. Only the final upscale and the window->viewport input
+ * mapping use these. */
+int g_surfaceWidth = 0;
+int g_surfaceHeight = 0;
+
+/* 1.0 = render at native. Below that the frame is drawn into a smaller
+ * offscreen target and upscaled on present, which is the one setting that
+ * actually reduces PIXEL COUNT rather than per-pixel work -- the thing a weak
+ * GPU is short of. Clamped on apply; 1.0 keeps the original path exactly. */
+extern "C" { float g_cfg_renderScale = 1.0f; }
+
+/* Low-end mode: trades a little staleness for per-frame cost on weak GPUs.
+ * Gameplay is untouched -- this only affects work the renderer does every frame
+ * regardless of what is on screen. */
+extern "C" { int g_cfg_lowEnd = 0; }
+
+static GLuint    g_scaleFBO = 0;
+static TextureID g_scaleTex = (TextureID)-1;
+static GLuint    g_scaleDepth = 0;
+static int       g_scaleW = 0, g_scaleH = 0;
+static int       g_scaleActive = 0;
+
+/* The framebuffer the frame is being composed into: the scaled offscreen target
+ * when scaling, otherwise the window. Anything that resolves, captures or
+ * re-presents "the backbuffer" must ask this rather than assume 0. */
+GLuint GR_ActiveFramebuffer(void)
+{
+	return g_scaleActive ? g_scaleFBO : 0;
+}
+
+/* Recompute the render size from the surface and the scale setting. */
+void GR_ApplyRenderScale(void)
+{
+	float s = g_cfg_renderScale;
+	int   w, h;
+
+	if (s <= 0.0f || s > 1.0f)
+		s = 1.0f;
+
+	if (g_surfaceWidth <= 0 || g_surfaceHeight <= 0)
+		return;
+
+	/* Even dimensions keep the halved PSX buffer maths and the 2:1 blits from
+	 * landing on half pixels. */
+	w = (int)((float)g_surfaceWidth  * s + 0.5f) & ~1;
+	h = (int)((float)g_surfaceHeight * s + 0.5f) & ~1;
+	if (w < 256) w = 256;
+	if (h < 192) h = 192;
+
+	if (s >= 0.999f)
+	{
+		w = g_surfaceWidth;
+		h = g_surfaceHeight;
+	}
+
+	g_windowWidth  = w;
+	g_windowHeight = h;
+}
 
 int g_dbg_wireframeMode = 0;
 int g_dbg_texturelessMode = 0;
@@ -302,6 +365,7 @@ void GR_InitPostProcess(void);
 void GR_PostProcess(void);
 
 int vram_need_update = 1;
+extern "C" { extern unsigned g_PsyX_VramUploads; extern unsigned g_PsyX_DrawCalls; }
 
 /* PC port: runtime gate for framebuffer→VRAM feedback. See PsyX_render.h. */
 int g_PsxSkipFramebufferStore = 0;
@@ -601,8 +665,9 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
 		if (drawableW > 0 && drawableH > 0)
 		{
-			g_windowWidth = drawableW;
-			g_windowHeight = drawableH;
+			g_surfaceWidth  = drawableW;
+			g_surfaceHeight = drawableH;
+			GR_ApplyRenderScale();
 		}
 	}
 #endif
@@ -662,8 +727,9 @@ int GR_InitialiseGLExt()
 
 int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 {
-	g_windowWidth = width;
-	g_windowHeight = height;
+	g_surfaceWidth  = width;
+	g_surfaceHeight = height;
+	GR_ApplyRenderScale();
 
 	// Due to debugging in fullscreen
 	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
@@ -2701,6 +2767,16 @@ void GR_SetScissorState(int enable)
 extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* outFracY)
 {
 	int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
+
+	/* mx/my arrive in real window pixels; everything below is in render pixels,
+	 * which differ once render scaling is on. Convert first, or every touch and
+	 * click lands scaled-down toward the top-left. */
+	if (g_surfaceWidth > 0 && g_surfaceHeight > 0 &&
+	    (g_surfaceWidth != g_windowWidth || g_surfaceHeight != g_windowHeight))
+	{
+		mx = (int)((float)mx * (float)g_windowWidth  / (float)g_surfaceWidth  + 0.5f);
+		my = (int)((float)my * (float)g_windowHeight / (float)g_surfaceHeight + 0.5f);
+	}
 	const bool wantPillarbox =
 		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
@@ -3265,8 +3341,19 @@ static void GR_EnsurePostTarget(int w, int h)
  * cached GL state so the next frame's prims re-establish it. */
 static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 {
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(0, 0, g_windowWidth, g_windowHeight);
+	/* Draw into whatever target the frame is being composed into, at that
+	 * target's size. Hard-binding 0 sent the freeze-frame and the post-process
+	 * to the window while the frame itself went to the scaled buffer, and sized
+	 * the final upscale to the RENDER resolution -- which put the whole picture
+	 * at quarter size in the corner of the window. With scaling off both are
+	 * the window at its own size, exactly as before. */
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ActiveFramebuffer());
+	if (g_scaleActive)
+		glViewport(0, 0, g_windowWidth, g_windowHeight);
+	else
+		glViewport(0, 0,
+			(g_surfaceWidth  > 0) ? g_surfaceWidth  : g_windowWidth,
+			(g_surfaceHeight > 0) ? g_surfaceHeight : g_windowHeight);
 
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_BLEND);
@@ -3337,11 +3424,11 @@ void GR_PostProcess(void)
 
 	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
 	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ActiveFramebuffer());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ActiveFramebuffer());
 
 	g_postFrame++;
 	GR_DrawFullscreenTexture(g_postTex, g_cfg_postProcess);
@@ -3608,6 +3695,103 @@ void GR_ShadowPassDraw(int startVertex, int numVerts) { (void)startVertex; (void
 void GR_ShadowPassEnd(void) {}
 #endif
 
+/* Bind (creating/resizing as needed) the scaled offscreen target for this
+ * frame. No-op at scale 1.0, which leaves the original render-to-window path
+ * byte for byte. */
+void GR_BeginRenderScale(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (g_windowWidth <= 0 || g_windowHeight <= 0)
+		return;
+
+	if (g_windowWidth == g_surfaceWidth && g_windowHeight == g_surfaceHeight)
+	{
+		/* Scale is 1.0 (or unset): render straight to the window as before. */
+		if (g_scaleActive)
+		{
+			g_scaleActive = 0;
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		}
+		return;
+	}
+
+	if (g_scaleFBO == 0)
+	{
+		glGenFramebuffers(1, &g_scaleFBO);
+		glGenTextures(1, &g_scaleTex);
+		glGenRenderbuffers(1, &g_scaleDepth);
+	}
+
+	if (g_scaleW != g_windowWidth || g_scaleH != g_windowHeight)
+	{
+		g_scaleW = g_windowWidth;
+		g_scaleH = g_windowHeight;
+
+		glBindTexture(GL_TEXTURE_2D, g_scaleTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_scaleW, g_scaleH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		/* Linear on the way back up: the whole point is to hide the lower
+		 * resolution, and NEAREST would just look like a smaller screen. */
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		/* Depth AND stencil: the renderer uses the stencil test, and a target
+		 * without one silently loses those effects. */
+		glBindRenderbuffer(GL_RENDERBUFFER, g_scaleDepth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, g_scaleW, g_scaleH);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, g_scaleFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_scaleTex, 0);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g_scaleDepth);
+
+		{
+			GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+			if (st != GL_FRAMEBUFFER_COMPLETE)
+			{
+				eprinterr("[SCALE] target %dx%d incomplete (0x%04X) - render scale disabled\n",
+					g_scaleW, g_scaleH, (unsigned)st);
+				glBindFramebuffer(GL_FRAMEBUFFER, 0);
+				g_scaleActive  = 0;
+				g_scaleW = g_scaleH = 0;
+				g_windowWidth  = g_surfaceWidth;
+				g_windowHeight = g_surfaceHeight;
+				return;
+			}
+			eprintinfo("[SCALE] rendering %dx%d -> %dx%d (%.2f)\n",
+				g_scaleW, g_scaleH, g_surfaceWidth, g_surfaceHeight, (double)g_cfg_renderScale);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, g_scaleFBO);
+	glViewport(0, 0, g_scaleW, g_scaleH);
+	g_scaleActive = 1;
+#endif
+}
+
+/* Upscale the finished frame onto the window. Called just before the swap. */
+void GR_EndRenderScale(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (!g_scaleActive)
+		return;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	/* Cleared first: the draw below must size its viewport to the SURFACE, and
+	 * it decides that from this flag. */
+	g_scaleActive = 0;
+	glViewport(0, 0, g_surfaceWidth, g_surfaceHeight);
+
+	/* A shader draw, not a blit: the window may be multisample, and ES3 refuses
+	 * a blit into a multisample draw buffer (the same rule that made the paused
+	 * screen black). A textured triangle into it is always legal. */
+	GR_DrawFullscreenTexture(g_scaleTex, 0);
+#endif
+}
+
 /* See g_PsxPresentLastFrame above. Called from PsyX_EndScene after the
  * frame is fully composed in the backbuffer, before the swap. */
 void GR_CaptureLastFrame(void)
@@ -3619,6 +3803,18 @@ void GR_CaptureLastFrame(void)
 	{
 		g_freezePresentedThisFrame = 0;
 		return;
+	}
+
+	/* Low-end: this is a full-screen copy on EVERY frame, purely so that a pause
+	 * which may never come has an image ready. Capturing every 4th frame makes
+	 * the frozen image at most 3 frames stale -- invisible on a pause screen --
+	 * for a quarter of the cost. */
+	if (g_cfg_lowEnd)
+	{
+		static unsigned s_capTick = 0;
+
+		if ((++s_capTick & 3) != 0 && g_freezeFrameValid)
+			return;
 	}
 
 	if (!g_freezeFrameTex)
@@ -3669,7 +3865,7 @@ void GR_CaptureLastFrame(void)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ActiveFramebuffer());
 
 	/* Clear the error state FIRST. This frame already carries a recurring
 	 * 0x0502 from elsewhere (see the GR_SwapWindow drain), and glGetError
@@ -3755,7 +3951,7 @@ void GR_PresentLastFrame(void)
 #endif
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ActiveFramebuffer());
 
 	glBlitFramebuffer(0, 0, g_freezeFrameW, g_freezeFrameH,
 		0, 0, g_windowWidth, g_windowHeight,
@@ -4478,11 +4674,18 @@ void GR_ReadVRAM(unsigned short* dst, int x, int y, int dst_w, int dst_h)
 	}
 }
 
+/* Counters for the per-256-frame [PERF] line. A full VRAM upload is 1MB and
+ * alternates between two textures, so the driver cannot reuse either -- if this
+ * runs every frame it dominates everything else on a mobile GPU, and no amount
+ * of lowering the render scale would show it. */
+extern "C" { unsigned g_PsyX_VramUploads = 0; unsigned g_PsyX_DrawCalls = 0; }
+
 void GR_UpdateVRAM()
 {
 	if (!vram_need_update)
 		return;
 
+	g_PsyX_VramUploads++;
 	vram_need_update = 0;
 
 #if USE_OPENGL
@@ -4578,7 +4781,10 @@ void GR_SwapWindow()
 		static unsigned s_seenErrBits = 0;
 		static int      s_errLogged   = 0;
 		int             drain;
-		for (drain = 0; drain < 8; drain++)
+		/* glGetError can force a driver sync; on a weak GPU that is a real cost
+		 * for a diagnostic nobody is reading during play. */
+		const int       maxDrain = g_cfg_lowEnd ? 0 : 8;
+		for (drain = 0; drain < maxDrain; drain++)
 		{
 			const GLenum err = glGetError();
 			if (err == GL_NO_ERROR)
@@ -4930,6 +5136,13 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	GR_BindVertexBuffer();
 
 #if USE_OPENGL
+	/* ORPHAN before writing. Overwriting a buffer the GPU may still be reading
+	 * makes the driver either stall until those draws retire or quietly shadow
+	 * the allocation; on a tiler (Mali) that shows up as submission time rather
+	 * than draw time, which is exactly where this frame's cost sits -- 168ms in
+	 * submit against 2.6ms of parse. Handing back the whole buffer first lets
+	 * the driver give fresh storage instead of waiting. */
+	glBufferData(GL_ARRAY_BUFFER, MAX_VERTEX_BUFFER_SIZE * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
 	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
 #else
 #error
@@ -4939,6 +5152,7 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 void GR_DrawTriangles(int start_vertex, int triangles)
 {
 #if USE_OPENGL
+	g_PsyX_DrawCalls++;
 	glDrawArrays(GL_TRIANGLES, start_vertex, triangles * 3);
 #else
 #error
