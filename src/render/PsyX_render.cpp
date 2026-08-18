@@ -952,6 +952,28 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	 * window: picks GL vs ES and points ANGLE at D3D11/Vulkan if asked. */
 	GR_ResolveBackend();
 
+	/* MSAA is not survivable on the ES backends. Confirmed by bisect:
+	 * renderer=gles renders a completely black frame with MSAA on and works
+	 * with it off, on a driver that reports a valid ES 3.2 context, compiles
+	 * every shader, uploads every texture and submits the whole world each
+	 * frame. Desktop GL tolerates the multisample framebuffer blits this
+	 * renderer performs; ES enforces the spec and the frame never reaches the
+	 * screen. FMV survives because it does not share that path, which is
+	 * exactly how the report described it.
+	 *
+	 * Dropped here rather than left to fail: a translated/ES backend is what
+	 * someone selects BECAUSE their GL driver is misbehaving, so handing them a
+	 * black screen is the worst possible answer. Antialiasing is the thing
+	 * worth losing. Native GL is untouched. */
+	if (g_grIsGLES && g_cfg_msaaSamples > 0)
+	{
+		eprintwarn("MSAA %dx is not supported on the '%s' backend (its framebuffer blits are \n"
+			"illegal on ES); disabling it for this run. Use the OpenGL (native) renderer \n"
+			"if you want antialiasing.\n",
+			g_cfg_msaaSamples, PsyX_Backend_GetName(g_grActiveBackend));
+		g_cfg_msaaSamples = 0;
+	}
+
 #if USE_OPENGL
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
 
