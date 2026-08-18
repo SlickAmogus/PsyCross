@@ -840,7 +840,50 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 
 void PsyX_GetScreenSize(int* screenWidth, int* screenHeight)
 {
+/* Detected here rather than via PSYX_IOS: nothing this file includes reaches
+ * PsyX_render.h, so that macro is not defined in this translation unit and the
+ * branch would silently never be taken. TargetConditionals comes in through
+ * platform.h. */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	/* SDL_GetWindowSize reports POINTS. With SDL_WINDOW_ALLOW_HIGHDPI the
+	 * drawable is PIXELS — 3x larger on a modern iPhone — and everything that
+	 * consumes this function works in that pixel space: glViewport, and
+	 * PsyX_MapWindowToViewport, which reasons in g_windowWidth/Height.
+	 *
+	 * Mixing the two put the FMV in a bottom-left box at a ninth of the area and
+	 * folded every touch into the same ninth, so a finger at the bottom centre
+	 * registered near the top left. Report the pixels everyone else assumes.
+	 * (Points still matter for the desktop mouse, which is why this is gated.) */
+	if (screenWidth)  *screenWidth  = g_windowWidth;
+	if (screenHeight) *screenHeight = g_windowHeight;
+#else
 	SDL_GetWindowSize(g_window, screenWidth, screenHeight);
+#endif
+}
+
+/* SDL reports mouse positions -- including the ones it synthesises from touch --
+ * in window POINTS. PsyX_MapWindowToViewport reasons in drawable PIXELS. They
+ * are the same number everywhere except iOS with high-DPI enabled, where the
+ * drawable is 3x the window on a modern iPhone, so an unscaled pointer lands at
+ * a third of its true position: touch the centre of the menu, watch the cursor
+ * appear up in the top-left corner.
+ *
+ * No-op off iOS, where window and drawable already agree. */
+extern "C" void PsyX_ScaleWindowToDrawable(int* x, int* y)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	int winW = 0, winH = 0;
+
+	SDL_GetWindowSize(g_window, &winW, &winH);
+
+	if (winW > 0 && winH > 0)
+	{
+		if (x) *x = (int)((float)*x * ((float)g_windowWidth  / (float)winW));
+		if (y) *y = (int)((float)*y * ((float)g_windowHeight / (float)winH));
+	}
+#else
+	(void)x; (void)y;
+#endif
 }
 
 void PsyX_SetCursorPosition(int x, int y)

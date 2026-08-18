@@ -6,7 +6,20 @@
 /*
  * Platform specific emulator setup
  */
-#if (defined(_WIN32) || defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
+#if defined(__APPLE__)
+#   include <TargetConditionals.h>
+#endif
+
+/* iOS must be tested before the desktop branch below: __APPLE__ is defined on
+ * iPhone too, so it would otherwise select desktop GL and glad, neither of
+ * which exists there. iOS caps out at OpenGL ES 3.0 (deprecated since iOS 12,
+ * still functional), and its GLES entry points link statically from
+ * OpenGLES.framework, so no loader is used. */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#   define PSYX_IOS 1
+#   define RENDERER_OGLES
+#   define OGLES_VERSION (3)
+#elif (defined(_WIN32) || defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && !defined(__RPI__)
 #   define RENDERER_OGL
 #   define USE_GLAD
 #elif defined(__RPI__)
@@ -53,6 +66,10 @@
 #else
 #   ifdef __EMSCRIPTEN__
 #      include <GL/gl.h>
+#   elif defined(PSYX_IOS)
+/* Apple ships GLES under its own framework layout, not the Khronos paths. */
+#      include <OpenGLES/ES3/gl.h>
+#      include <OpenGLES/ES3/glext.h>
 #   else
 #      if OGLES_VERSION == 2
 #          include <GLES2/gl2.h>
@@ -63,7 +80,10 @@
 #   endif
 #endif
 
+/* iOS has no EGL at all — context creation goes through EAGL, which SDL owns. */
+#if !defined(PSYX_IOS)
 #   include <EGL/egl.h>
+#endif
 
 #endif
 
@@ -72,6 +92,34 @@
 #   define TEXTURE_FORMAT GL_UNSIGNED_SHORT_1_5_5_5_REV
 #elif defined(RENDERER_OGLES)
 #   define TEXTURE_FORMAT GL_UNSIGNED_SHORT_5_5_5_1
+#endif
+
+/* "Unbind the framebuffer" is not `0` everywhere.
+ *
+ * On desktop GL and on Android's EGL the window surface IS framebuffer object
+ * 0, so binding 0 puts you back on screen. iOS has no such default: SDL's UIKit
+ * backend renders into a framebuffer it creates around a CAEAGLLayer, and its
+ * name is whatever the driver handed out. Binding 0 there selects a framebuffer
+ * that does not exist, so every draw is silently discarded — the game runs,
+ * audio plays, and the screen stays black.
+ *
+ * Captured once from GL_FRAMEBUFFER_BINDING in GR_InitialiseGLExt, which runs
+ * with SDL's own framebuffer still current. Compile-time 0 everywhere else, so
+ * no other platform's generated code changes. */
+/* Also defined in common/glad.h: PsyCross reaches this header, while pc_port's
+ * GL code includes only glad.h, and on iOS neither includes the other. Both
+ * copies are identical and guarded, so whichever arrives first wins. */
+#ifndef PSYX_DEFAULT_FBO
+#   if defined(PSYX_IOS)
+#       ifdef __cplusplus
+extern "C" unsigned int g_PsyX_DefaultFBO;
+#       else
+extern unsigned int g_PsyX_DefaultFBO;
+#       endif
+#       define PSYX_DEFAULT_FBO (g_PsyX_DefaultFBO)
+#   else
+#       define PSYX_DEFAULT_FBO 0
+#   endif
 #endif
 
 #include "psx/types.h"

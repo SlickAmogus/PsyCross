@@ -122,12 +122,24 @@ extern float						g_PsyX_FlashlightShadowFpsDrop;
  * shadow (Harry's own body); reset to 0 after. Per-vertex, rides the view-space FIFO. */
 extern int							g_PsyX_NoShadowCast;
 
+/* 0 = lit normally, 1 = fully faded. Set by game code around a character draw
+ * whose LIGHTING the game is scaling down (func_8003DA9C's `timer`, which is how
+ * a Larval Stalker vanishes). The per-pixel flashlight adds its light on top of
+ * the TEXTURE, not the vertex colour, so without this it happily relights a
+ * character the game has already faded to nothing. Per-vertex, rides the same
+ * view-space FIFO as g_PsyX_NoShadowCast. */
+extern float						g_PsyX_CharaFade;
+
 /* Optional per-sound sample replacement. A voice plays from an SPU address; the
  * host may answer that address with its own PCM (any length or rate) instead of
  * the ADPCM resident there, which is how loose-file sound mods bypass both the
  * bank container and its size ceiling. Returns non-zero on a hit. NULL by
  * default, so PsyCross on its own behaves exactly as before. */
-typedef int (*PsyX_SfxOverrideFn)(int spuAddr, const short** outPcm, int* outSampleCount);
+/* outRate is the WAV's own sample rate, so the mixer can play a replacement at
+ * the rate it was authored at instead of assuming the original's. 0 = unknown,
+ * which keeps the old behaviour for that sample. */
+typedef int (*PsyX_SfxOverrideFn)(int spuAddr, const short** outPcm, int* outSampleCount,
+                                  int* outRate);
 extern PsyX_SfxOverrideFn			g_PsyX_SfxOverride;
 
 /* PC port: per-pixel flashlight cone parameters, pushed once per frame by game
@@ -185,6 +197,9 @@ extern GameDebugMouseHandlerFunc	g_dbg_gameDebugMouse;
  * point is inside the viewport, 0 if it falls in the black bars. Used to convert
  * an OS mouse position into the game's 2D coordinate space. */
 extern int							PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* outFracY);
+/* SDL pointer coords are window POINTS; the viewport map wants drawable
+ * PIXELS. Identical off iOS, 3x apart on a high-DPI iPhone. */
+extern void							PsyX_ScaleWindowToDrawable(int* x, int* y);
 
 /* PC port: route PsyX logging into the host's stdio stream (pass NULL to
  * silence PsyX logging entirely). Call BEFORE PsyX_Initialise so PsyX never

@@ -10,6 +10,16 @@
 //-----------------------------------------------------------------------
 
 #if defined(__APPLE__)
+#   include <TargetConditionals.h>
+#endif
+
+/* macOS links a system/Homebrew SDL2, which installs its headers under an SDL2/
+ * prefix. iOS builds SDL from the submodule as a subdirectory target, and that
+ * exports its include dir directly, so the prefixed form does not resolve --
+ * same as Android. */
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#   include <SDL.h>
+#elif defined(__APPLE__)
 #   include <SDL2/SDL.h>
 #elif defined(__EMSCRIPTEN__)
 #   include <emscripten/emscripten.h>
