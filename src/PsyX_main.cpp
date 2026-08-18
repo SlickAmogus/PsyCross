@@ -848,6 +848,31 @@ void PsyX_GetScreenSize(int* screenWidth, int* screenHeight)
 #endif
 }
 
+/* SDL reports mouse positions -- including the ones it synthesises from touch --
+ * in window POINTS. PsyX_MapWindowToViewport reasons in drawable PIXELS. They
+ * are the same number everywhere except iOS with high-DPI enabled, where the
+ * drawable is 3x the window on a modern iPhone, so an unscaled pointer lands at
+ * a third of its true position: touch the centre of the menu, watch the cursor
+ * appear up in the top-left corner.
+ *
+ * No-op off iOS, where window and drawable already agree. */
+extern "C" void PsyX_ScaleWindowToDrawable(int* x, int* y)
+{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	int winW = 0, winH = 0;
+
+	SDL_GetWindowSize(g_window, &winW, &winH);
+
+	if (winW > 0 && winH > 0)
+	{
+		if (x) *x = (int)((float)*x * ((float)g_windowWidth  / (float)winW));
+		if (y) *y = (int)((float)*y * ((float)g_windowHeight / (float)winH));
+	}
+#else
+	(void)x; (void)y;
+#endif
+}
+
 void PsyX_SetCursorPosition(int x, int y)
 {
 	SDL_WarpMouseInWindow(g_window, x, y);

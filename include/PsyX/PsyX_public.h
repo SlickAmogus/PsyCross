@@ -191,6 +191,9 @@ extern GameDebugMouseHandlerFunc	g_dbg_gameDebugMouse;
  * point is inside the viewport, 0 if it falls in the black bars. Used to convert
  * an OS mouse position into the game's 2D coordinate space. */
 extern int							PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* outFracY);
+/* SDL pointer coords are window POINTS; the viewport map wants drawable
+ * PIXELS. Identical off iOS, 3x apart on a high-DPI iPhone. */
+extern void							PsyX_ScaleWindowToDrawable(int* x, int* y);
 
 /* PC port: route PsyX logging into the host's stdio stream (pass NULL to
  * silence PsyX logging entirely). Call BEFORE PsyX_Initialise so PsyX never
