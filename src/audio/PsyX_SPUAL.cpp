@@ -815,15 +815,43 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		// lifts the limit on how big a replacement sound can be.
 		const short* modPcm = NULL;
 		int modCount = 0;
+		int modRate = 0;
 
 		if (g_PsyX_SfxOverride != NULL &&
-			g_PsyX_SfxOverride((int)voice->attr.addr, &modPcm, &modCount) && modCount > 0)
+			g_PsyX_SfxOverride((int)voice->attr.addr, &modPcm, &modCount, &modRate) && modCount > 0)
 		{
+			// A replacement plays at the rate it was AUTHORED at, whatever that is.
+			//
+			// The voice multiplies whatever we upload by attr.pitch/4096 (see the
+			// AL_PITCH write in the attribute path), so uploading at 44100 like the
+			// native decode path made the final rate 44100*pitch/4096 — the rate the
+			// ORIGINAL sample happened to play at. A replacement then had to be
+			// authored at exactly that rate or it came out slow and low, like tape
+			// speed, which is unguessable without the launcher's Audio tool and worst
+			// on the map banks (several are authored very low).
+			//
+			// Dividing the pitch back out makes the final rate the file's own, so a
+			// 44100 WAV sounds like a 44100 WAV. Files already authored at the
+			// original's rate are unaffected: for those this lands on the same number
+			// it used before.
+			//
+			// Pitch the game applies LATER still scales from here, so a modulated
+			// sound (elevator hum, ambience) keeps its modulation. What this does
+			// give up is pitch variation applied at trigger time — a sample the game
+			// plays at two different pitches, or with a random offset, now starts at
+			// its authored pitch both times. That is the trade the contract asks for:
+			// the replacement sounds like the file.
+			int rate = 44100;
+			if (modRate > 0 && voice->attr.pitch > 0)
+			{
+				double r = (double)modRate * 4096.0 / (double)voice->attr.pitch;
+				// AL rejects nonsense rates; keep it in a sane band and fall back
+				// to the old behaviour rather than dropping the sound.
+				if (r >= 1000.0 && r <= 192000.0)
+					rate = (int)(r + 0.5);
+			}
 			alSourcei(alSource, AL_BUFFER, 0);
-			// Uploaded at the same 44100 the native path uses so the voice's pitch
-			// scales it exactly as it would have scaled the original: a file at the
-			// rate the Audio tool exported plays at the intended speed.
-			alBufferData(alBuffer, AL_FORMAT_MONO16, modPcm, modCount * sizeof(short), 44100);
+			alBufferData(alBuffer, AL_FORMAT_MONO16, modPcm, modCount * sizeof(short), rate);
 			alSourcei(alSource, AL_BUFFER, alBuffer);
 			return;
 		}

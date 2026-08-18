@@ -1136,6 +1136,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec4 a_zw;\n"\
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
+	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1169,6 +1170,7 @@ int g_PsxFogToBlack = 0;
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
+	"		v_fade = a_normal.z;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -1304,7 +1306,7 @@ int g_PsxFogToBlack = 0;
 	"					}\n"\
 	"				}\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
-	"				fragColor.rgb += flAlbedo * fl;\n"\
+	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
@@ -1343,6 +1345,7 @@ const char* gte_shader_4 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1358,6 +1361,7 @@ const char* gte_shader_8 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1373,6 +1377,7 @@ const char* gte_shader_16 =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1388,6 +1393,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
+	"varying float v_fade;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2437,10 +2443,19 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * HD menu/map art stayed bilinear with menu_filter off. It gets 1 on 3D frames
 	 * unconditionally so world texture packs keep sampling exactly as before,
 	 * while its 2D prims follow the same v_is3d gate the VRAM path uses. */
+	/* menu_filter smooths HD menu/map art, so it only applies to art that is
+	 * actually hi-res. Forcing it on PALETTISED (4/8-bit) textures smeared the
+	 * PSX-native art it was never meant to touch — including the kanji atlas,
+	 * whose 12px cells are packed edge to edge in the framebuffer margins, so a
+	 * bilinear tap at a cell boundary pulls in the NEXT glyph's first column and
+	 * draws it as a full-height vertical bar between characters. That is the
+	 * stray-lines report from the Chinese text, and it would hit Japanese the
+	 * same way. Native paletted art now stays nearest on menu frames, which is
+	 * also what it looks like on hardware. */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
-		                ? (g_cfg_menuFilter ? 2 : 0)
+		                ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
 		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_bilinearFiltering) ? 1 : 0));
 
 	if (g_dbg_texturelessMode) {
