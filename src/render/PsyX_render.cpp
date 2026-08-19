@@ -3833,8 +3833,15 @@ static void GR_EnsureShadowTarget(void)
 
 	glGenTextures(1, &g_shadowDepthTex);
 	glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
+	/* ES pairs DEPTH_COMPONENT24 with UNSIGNED_INT only -- FLOAT is legal solely
+	 * with DEPTH_COMPONENT32F (ES 3.0 table 3.2). Desktop GL tolerates the
+	 * mismatch for a NULL upload, ANGLE raises INVALID_OPERATION and the texture
+	 * is never allocated: the FBO's depth attachment is incomplete, the pre-pass
+	 * writes nothing, and every receiver then samples as occluded. That zeroes
+	 * the cone while the whole-scene dim above it still lands, which is why only
+	 * the shadow flashlight modes went dark and Classic/Modern were fine. */
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE,
-	             0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	             0, GL_DEPTH_COMPONENT, g_grIsGLES ? GL_UNSIGNED_INT : GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
@@ -3868,6 +3875,22 @@ static void GR_EnsureShadowTarget(void)
 		glDrawBuffers(1, &none);
 	}
 	glReadBuffer(GL_NONE);
+
+	/* An incomplete shadow FBO does not fail loudly -- it just makes every
+	 * receiver read as shadowed. Say so once instead. */
+	{
+		GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+
+		if (st != GL_FRAMEBUFFER_COMPLETE)
+		{
+			eprinterr("shadow FBO incomplete: 0x%04X (flashlight shadows will read as fully occluded)\n", st);
+		}
+		else
+		{
+			eprintf("*shadow target ready: %dx%d depth24\n", PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
+		}
+	}
+
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 	if (g_shadowDepthShader == (ShaderID)-1)
