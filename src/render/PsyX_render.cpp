@@ -2100,6 +2100,24 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->flInnerCosLoc = glGetUniformLocation(sh->shader, "u_flInnerCos");
 	sh->flOuterCosLoc = glGetUniformLocation(sh->shader, "u_flOuterCos");
 	sh->flRangeLoc = glGetUniformLocation(sh->shader, "u_flRange");
+
+	/* A uniform that resolves to -1 was dropped by the compiler, which on a
+	 * translated backend (ANGLE -> D3D11/Vulkan) is how the per-pixel flashlight
+	 * silently does nothing: the uniforms are set, but into a program that has no
+	 * such uniform. Report the resolution once per shader so one log from an
+	 * affected machine settles whether the branch survived compilation. */
+	{
+		static int s_flLocLogs = 0;
+
+		if (s_flLocLogs < 8)
+		{
+			s_flLocLogs++;
+			eprintf("*[FLLOC] gles=%d on=%d style=%d pos=%d dir=%d col=%d inner=%d outer=%d range=%d shadowOn=%d\n",
+			        g_grIsGLES, sh->flashlightOnLoc, sh->flStyleLoc, sh->flLightPosLoc,
+			        sh->flDirLoc, sh->flColorLoc, sh->flInnerCosLoc, sh->flOuterCosLoc,
+			        sh->flRangeLoc, sh->shadowOnLoc);
+		}
+	}
 	sh->shadowOnLoc = glGetUniformLocation(sh->shader, "u_shadowOn");
 	sh->shadowMatrixLoc = glGetUniformLocation(sh->shader, "u_shadowMatrix");
 	sh->shadowBiasLoc = glGetUniformLocation(sh->shader, "u_shadowBias");
