@@ -1523,7 +1523,13 @@ int g_PsxFogToBlack = 0;
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
 	"				fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
-	"				vec3 flDir = normalize(u_flDir);\n"\
+	/* normalize() of a zero vector is 0/0 = NaN, and a NaN here propagates through
+	 * dot/smoothstep into the += below, wiping the cone while the dim above has
+	 * already landed -- a dark scene with no beam. Desktop drivers commonly flush
+	 * that to zero; ANGLE -> Vulkan does not, which is why the same build lights
+	 * correctly on one backend and not the other. Guard the degenerate case. */\
+	"				vec3 flDirRaw = u_flDir;\n"\
+	"				vec3 flDir = (dot(flDirRaw, flDirRaw) > 1e-12) ? normalize(flDirRaw) : vec3(0.0, 0.0, 1.0);\n"\
 	"				vec3 flOrigin = (u_flStyle > 0) ? (u_flLightPos - flDir * 39.0) : u_flLightPos;\n"\
 	"				vec3 L = flOrigin - flP;\n"\
 	"				float d = length(L);\n"\
@@ -2635,6 +2641,29 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		glUniform1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
 	if (u_flLightPosLoc != -1)
 		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
+
+	/* The cone collapses if any of these is degenerate -- a zero direction most of
+	 * all. Reported on change so a backend that lights wrongly can be compared
+	 * against one that does not, without a per-frame flood. */
+	{
+		static float s_lastDir[3] = { 9e9f, 9e9f, 9e9f };
+		static int   s_flValLogs  = 0;
+
+		if (g_PsyX_FlashlightActive && s_flValLogs < 24 &&
+		    (g_PsyX_FlashlightDir[0] != s_lastDir[0] ||
+		     g_PsyX_FlashlightDir[1] != s_lastDir[1] ||
+		     g_PsyX_FlashlightDir[2] != s_lastDir[2]))
+		{
+			s_lastDir[0] = g_PsyX_FlashlightDir[0];
+			s_lastDir[1] = g_PsyX_FlashlightDir[1];
+			s_lastDir[2] = g_PsyX_FlashlightDir[2];
+			s_flValLogs++;
+			eprintf("*[FLVAL] pos=(%.1f,%.1f,%.1f) dir=(%.3f,%.3f,%.3f) range=%.1f style=%d\n",
+			        g_PsyX_FlashlightPos[0], g_PsyX_FlashlightPos[1], g_PsyX_FlashlightPos[2],
+			        g_PsyX_FlashlightDir[0], g_PsyX_FlashlightDir[1], g_PsyX_FlashlightDir[2],
+			        g_PsyX_FlashlightRange, g_PsyX_FlashlightStyle);
+		}
+	}
 	if (u_flDirLoc != -1)
 		glUniform3fv(u_flDirLoc, 1, g_PsyX_FlashlightDir);
 	/* FPS mode swaps in its own (tighter/dimmer) cone size + brightness. */
