@@ -2655,6 +2655,27 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
 		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
+		/* shadowOn is a BINARY whole-scene lighting term: when it drops, every
+		 * shadowed surface becomes lit and the frame pops brighter. A single
+		 * frame of that reads exactly like the dim-gate flicker already fixed on
+		 * the game side. Report each flip with its terms so one run names which
+		 * one is unstable, rather than guessing between them. */
+		{
+			static int s_prevShadowOn = -1;
+			static int s_shadowLogs   = 0;
+
+			if (shadowOn != s_prevShadowOn && s_shadowLogs < 40)
+			{
+				s_shadowLogs++;
+				eprintf("[SHADOWDIAG] shadowOn=%d useShadows=%d perPixel=%d flActive=%d tex=%d allowed=%d freeze=%d\n",
+				        shadowOn, g_PsyX_UseFlashlightShadows, g_PsyX_UsePerPixelFlashlight,
+				        g_PsyX_FlashlightActive, (g_shadowDepthTex != 0),
+				        g_PsyX_ShadowsAllowed, g_PsxPresentLastFrame);
+			}
+
+			s_prevShadowOn = shadowOn;
+		}
+
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
