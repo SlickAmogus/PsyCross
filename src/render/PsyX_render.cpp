@@ -87,6 +87,10 @@ float g_PsxWorldVScale = 0.872f;
  * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
  * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
 float g_PsxWorldVShift = 20.0f;
+/* Same units, but for authored (cutscene / letterboxed) shots, which run at the
+ * clean 0 baseline rather than inheriting the gameplay shift. Console `cutshift`.
+ * Default 0 = today's framing exactly. */
+float g_PsxCutsceneVShift = 0.0f;
 int   g_PsxFixedCamActive = 0;
 /* Set by the game while a cutscene is active. Cutscenes frame themselves with letterbox
  * bars, so the gameplay vertical crop (g_PsxWorldVScale) is skipped while this is set —
