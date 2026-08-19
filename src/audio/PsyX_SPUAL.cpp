@@ -1428,6 +1428,40 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 	SDL_UnlockMutex(g_SpuMutex);
 }
 
+// Stop every LOOPING voice, and only those.
+//
+// The PSX ran a blanket SfxStop (SD_Call(22)) when a scene tore down its audio.
+// That blanket stop is disabled on PC because OpenAL cuts a sample dead where
+// PSX ADPCM decays naturally, so it audibly chopped the death scream and the
+// pickup voice mid-word. Removing it outright, though, left nothing that ends
+// an ambient LOOP: a looping bed (the bridge wind) survived a quickload and
+// played forever, because a loop is by definition the one voice that will never
+// finish on its own.
+//
+// Looping voices are also exactly the ones with no decay tail to lose, so
+// stopping only those ends the stuck ambience without reintroducing the
+// truncation that motivated disabling the blanket stop.
+extern "C" void Pc_SpuStopLoopingVoices(void)
+{
+	SDL_LockMutex(g_SpuMutex);
+
+	for (int i = 0; i < s_spuVoiceCount; i++)
+	{
+		SPUALVoice* voice = &g_SpuVoices[i];
+
+		if (!voice->looping)
+			continue;
+
+		alSourcei(voice->alSource, AL_LOOPING, AL_FALSE);
+		alSourceStop(voice->alSource);
+
+		voice->looping  = 0;
+		voice->envPhase = ENV_OFF;
+	}
+
+	SDL_UnlockMutex(g_SpuMutex);
+}
+
 // PSX SpuGetKeyStatus is a 4-state value, and the SH sound driver (libsd)
 // depends on the full distinction — collapsing it to on/off silently breaks
 // voice allocation:
