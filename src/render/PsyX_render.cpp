@@ -657,45 +657,37 @@ int GR_SetInternalResolution(int w, int h)
 
 	GR_DestroyInternalTarget();
 
-	/* With MSAA the scene target is multisampled, so antialiasing is kept
-	 * instead of being dropped when the internal target engages. A multisample
-	 * blit must be a 1:1 RESOLVE -- scaling one is illegal -- so the present
-	 * goes through a same-size single-sample FBO first, then scales that. */
-	s_internalSamples = (g_cfg_msaaSamples > 0) ? g_cfg_msaaSamples : 0;
+	/* Single-sampled, always.
+	 *
+	 * A MULTISAMPLE scene target black-screens this renderer: the freeze capture
+	 * and the framebuffer-feedback paths glReadPixels and blit FROM the screen
+	 * target, and both are illegal on a multisample framebuffer -- they fail, the
+	 * captured frame comes back empty, and the composite is black. Making that
+	 * work would mean resolving before every read, not just at present.
+	 *
+	 * Antialiasing instead comes from supersampling: with AA on, the target is
+	 * rendered larger and the present blit downscales it, which is what actually
+	 * removes the jaggies. Every read path keeps working because nothing is ever
+	 * multisampled. See GR_InternalScaleForAA. */
+	s_internalSamples = 0;
 
-	if (s_internalSamples > 0)
-	{
-		glGenRenderbuffers(1, &s_internalColorRbo);
-		glBindRenderbuffer(GL_RENDERBUFFER, s_internalColorRbo);
-		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_RGBA8, w, h);
-		glBindRenderbuffer(GL_RENDERBUFFER, 0);
-	}
-	else
-	{
-		glGenTextures(1, &s_internalColorTex);
-		glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glBindTexture(GL_TEXTURE_2D, 0);
-	}
+	glGenTextures(1, &s_internalColorTex);
+	glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenRenderbuffers(1, &s_internalDepthRbo);
 	glBindRenderbuffer(GL_RENDERBUFFER, s_internalDepthRbo);
-	if (s_internalSamples > 0)
-		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_DEPTH24_STENCIL8, w, h);
-	else
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
 	glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
 	glGenFramebuffers(1, &g_internalFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
-	if (s_internalSamples > 0)
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_internalColorRbo);
-	else
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
 
 	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -706,29 +698,6 @@ int GR_SetInternalResolution(int w, int h)
 		eprintwarn("internal render target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
 		GR_DestroyInternalTarget();
 		return 0;
-	}
-
-	if (s_internalSamples > 0)
-	{
-		glGenTextures(1, &s_resolveTex);
-		glBindTexture(GL_TEXTURE_2D, s_resolveTex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glBindTexture(GL_TEXTURE_2D, 0);
-
-		glGenFramebuffers(1, &s_resolveFBO);
-		glBindFramebuffer(GL_FRAMEBUFFER, s_resolveFBO);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_resolveTex, 0);
-		st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-		if (st != GL_FRAMEBUFFER_COMPLETE)
-		{
-			eprintwarn("internal resolve target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
-			GR_DestroyInternalTarget();
-			return 0;
-		}
 	}
 
 	s_internalW = w;
@@ -1161,6 +1130,29 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 	{
 		g_windowWidth  = g_cfgRenderWidth;
 		g_windowHeight = g_cfgRenderHeight;
+
+		/* MSAA lives on the WINDOW's buffer, and the scene no longer draws there,
+		 * so it is inert while this is active. It cannot simply be moved onto the
+		 * internal target: the freeze capture and framebuffer feedback read the
+		 * scene target with glReadPixels and blits, both illegal on a multisample
+		 * framebuffer -- that combination black-screened. Supersampling is not a
+		 * substitute either, because a target SMALLER than the window is upscaled
+		 * at present, so there is nothing to downsample. Say so once rather than
+		 * leave someone wondering where their antialiasing went. */
+		if (g_cfg_msaaSamples > 0)
+		{
+			static int s_saidOnce = 0;
+
+			if (!s_saidOnce)
+			{
+				s_saidOnce = 1;
+				eprintwarn("MSAA is inactive in borderless at %dx%d: the scene renders to an internal target, "
+				           "and the frame read-back paths cannot read a multisample one. "
+				           "Use exclusive fullscreen, or set the resolution to the desktop size, to keep MSAA.\n",
+				           g_cfgRenderWidth, g_cfgRenderHeight);
+			}
+		}
+
 		return;
 	}
 
@@ -5233,19 +5225,6 @@ void GR_SwapWindow()
 	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
 	{
 		GLuint src = g_internalFBO;
-
-		/* Multisample first: a multisample blit must be 1:1, so resolve at the
-		 * internal size and scale the resolved copy. */
-		if (s_internalSamples > 0 && s_resolveFBO != 0)
-		{
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
-			glBlitFramebuffer(0, 0, s_internalW, s_internalH,
-			                  0, 0, s_internalW, s_internalH,
-			                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-			src = s_resolveFBO;
-		}
-
 		int dx, dy, dw, dh;
 		GR_PresentRect(&dx, &dy, &dw, &dh);
 
