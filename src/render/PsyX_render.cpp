@@ -1637,8 +1637,17 @@ int g_PsxFogToBlack = 0;
 	"	float c_textureSize = 1.0;\n"\
 	"	float c_onePixel = 1.0;\n"\
 	"	vec4 BilinearTextureSample(vec2 P) {\n"\
-	"		vec2 frac = fract(P);\n"\
-	"		vec2 pixel = floor(P);\n"\
+	/* Sample around P - 0.5, not P. A texel's colour belongs at its CENTRE,
+	 * so the four taps for a point P are the texels whose centres bracket it.
+	 * Blending texel N with N+1 weighted by fract(P) instead does two visible
+	 * things: it shifts the whole image half a texel toward +X/+Y -- the
+	 * glyphs sliding down and right when filtering is switched on -- and
+	 * wherever the UVs land on integer texel coordinates fract(P) is 0, so it
+	 * returns texel N exactly and is indistinguishable from nearest. That is
+	 * why bilinear appeared to do nothing to the 3D world. */\
+	"		vec2 tapP = P - 0.5;\n"\
+	"		vec2 frac = fract(tapP);\n"\
+	"		vec2 pixel = floor(tapP);\n"\
 	"		vec2 C11 = samplePSX(pixel);\n"\
 	"		vec2 C21 = samplePSX(pixel + vec2(c_onePixel, 0.0));\n"\
 	"		vec2 C12 = samplePSX(pixel + vec2(0.0, c_onePixel));\n"\
