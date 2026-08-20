@@ -1188,7 +1188,11 @@ GLint u_shadowFadeDistLoc;
 /* Flashlight shadow map (see g_PsyX_UseFlashlightShadows). Depth-only FBO rendered
  * from the light POV each frame; g_shadowLightMatrix maps view space -> light clip.
  * Column-major, identity until the first shadow pass computes it. */
-#define PSYX_SHADOW_MAP_SIZE 1024
+/* Allocated size of the flashlight shadow map. Runtime so it can be raised
+ * without a rebuild; GR_EnsureShadowTarget reallocates when it changes. */
+int g_PsyX_ShadowMapSize = 1024;
+static int s_shadowTexSize = 0;
+#define PSYX_SHADOW_MAP_SIZE g_PsyX_ShadowMapSize
 static GLuint g_shadowFBO = 0;
 static GLuint g_shadowDepthTex = 0;
 static ShaderID g_shadowDepthShader = (ShaderID)-1;
@@ -2699,9 +2703,19 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	/* Flashlight shadow map: same gate as the depth pre-pass in DrawAllSplits, so the
 	 * shader only samples the shadow texture on frames one was actually rendered. */
 	{
+		/* Deliberately does NOT require g_PsyX_ShadowsAllowed, unlike the depth
+		 * pre-pass. That flag exists because RENDERING the light-POV pass on a
+		 * menu / room-fade / transition frame corrupts unrelated drawing --
+		 * SAMPLING an already-built map does nothing of the sort. Requiring it
+		 * here made every shadow vanish the moment the game paused or opened the
+		 * map, then reappear on unpause. The world is frozen during those
+		 * frames, so the map from the last gameplay frame is still exactly
+		 * right; the pre-pass simply stops refreshing it. The cone's own gate
+		 * (u_flashlightOn) still turns everything off where the flashlight
+		 * itself is inactive. */
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
-		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
+		                !g_PsxPresentLastFrame) ? 1 : 0;
 		/* shadowOn is a BINARY whole-scene lighting term: when it drops, every
 		 * shadowed surface becomes lit and the frame pops brighter. A single
 		 * frame of that reads exactly like the dim-gate flicker already fixed on
@@ -3828,8 +3842,24 @@ static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
 
 static void GR_EnsureShadowTarget(void)
 {
+	/* Clamp once, so a bad config value cannot ask the driver for something
+	 * absurd. 4096 is comfortably within ES 3.0's guaranteed max texture size. */
+	if (g_PsyX_ShadowMapSize < 256)   g_PsyX_ShadowMapSize = 256;
+	if (g_PsyX_ShadowMapSize > 4096)  g_PsyX_ShadowMapSize = 4096;
+
+	/* Resolution changed at runtime: drop the old target and build a new one. */
+	if (g_shadowFBO != 0 && s_shadowTexSize != g_PsyX_ShadowMapSize)
+	{
+		glDeleteFramebuffers(1, &g_shadowFBO);
+		glDeleteTextures(1, &g_shadowDepthTex);
+		g_shadowFBO      = 0;
+		g_shadowDepthTex = 0;
+	}
+
 	if (g_shadowFBO != 0)
 		return;
+
+	s_shadowTexSize = g_PsyX_ShadowMapSize;
 
 	glGenTextures(1, &g_shadowDepthTex);
 	glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
