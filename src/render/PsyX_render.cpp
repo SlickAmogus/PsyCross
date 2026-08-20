@@ -5284,6 +5284,27 @@ void GR_SwapWindow()
 {
 	GR_DiagGLError("end of frame");
 
+	/* [BILINDIAG] see VsFillVertex. Also reports the bilinear mode last pushed,
+	 * so one line says both what the shader was told and whether the geometry
+	 * marker it depends on is actually resolving. */
+	{
+		extern unsigned g_vsHits, g_vsMisses;
+		static unsigned s_lastTick = 0;
+		static int      s_lines = 0;
+		unsigned now = SDL_GetTicks();
+
+		if (g_cfg_bilinearFiltering && s_lines < 20 && (now - s_lastTick) >= 1000)
+		{
+			unsigned tot = g_vsHits + g_vsMisses;
+			s_lastTick = now;
+			s_lines++;
+			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) suppressed=%d gles=%d\n",
+			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
+			        g_PsxDitherSuppressed, g_grIsGLES);
+			g_vsHits = g_vsMisses = 0;
+		}
+	}
+
 	/* Stretch the internal target onto the real window. This is the only bind of
 	 * framebuffer 0 that genuinely means "the window" -- every other one means
 	 * "the scene target" and goes through GR_ScreenFBO(). LINEAR so a lower
