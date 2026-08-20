@@ -595,6 +595,40 @@ GLuint GR_ScreenFBO(void)
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
 
+/* Where the internal target lands inside the real window.
+ *
+ * Stretch to fill by default. When pillarboxing is on, preserve the render
+ * aspect instead and centre it -- so a 4:3 render scaled to a 16:9 desktop gets
+ * bars rather than being distorted, in borderless exactly as it would in
+ * exclusive fullscreen. Shared with PsyX_MapWindowToViewport so the pointer
+ * cannot disagree with what is on screen. */
+static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
+{
+	int x = 0, y = 0, w = g_presentWidth, h = g_presentHeight;
+	const bool wantPillarbox =
+		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+
+	if (wantPillarbox && s_internalW > 0 && s_internalH > 0 && h > 0)
+	{
+		const float srcAspect = (float)s_internalW / (float)s_internalH;
+		const float dstAspect = (float)w / (float)h;
+
+		if (dstAspect > srcAspect)
+		{
+			w = (int)(h * srcAspect + 0.5f);
+			x = (g_presentWidth - w) / 2;
+		}
+		else if (dstAspect < srcAspect)
+		{
+			h = (int)(w / srcAspect + 0.5f);
+			y = (g_presentHeight - h) / 2;
+		}
+	}
+
+	*outX = x; *outY = y; *outW = w; *outH = h;
+}
+
 void GR_DestroyInternalTarget(void)
 {
 	if (s_internalColorTex) { glDeleteTextures(1, &s_internalColorTex); s_internalColorTex = 0; }
@@ -3327,8 +3361,14 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 	 * consumer is corrected at once. */
 	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
 	{
-		mx = (int)((float)mx * (float)g_windowWidth  / (float)g_presentWidth);
-		my = (int)((float)my * (float)g_windowHeight / (float)g_presentHeight);
+		int dx, dy, dw, dh;
+		GR_PresentRect(&dx, &dy, &dw, &dh);
+
+		if (dw > 0 && dh > 0)
+		{
+			mx = (int)((float)(mx - dx) * (float)g_windowWidth  / (float)dw);
+			my = (int)((float)(my - dy) * (float)g_windowHeight / (float)dh);
+		}
 	}
 	const bool wantPillarbox =
 		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
@@ -5206,11 +5246,27 @@ void GR_SwapWindow()
 			src = s_resolveFBO;
 		}
 
+		int dx, dy, dw, dh;
+		GR_PresentRect(&dx, &dy, &dw, &dh);
+
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 		glViewport(0, 0, g_presentWidth, g_presentHeight);
+
+		/* Scissor would clip both the clear and the blit to whatever the frame
+		 * last set, so it is off for the present. */
+		glDisable(GL_SCISSOR_TEST);
+
+		/* Only needed when the image does not fill the window, but harmless
+		 * otherwise and it keeps stale edges from ever showing through. */
+		if (dw != g_presentWidth || dh != g_presentHeight)
+		{
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
-		                  0, 0, g_presentWidth, g_presentHeight,
+		                  dx, dy, dx + dw, dy + dh,
 		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
 	}
