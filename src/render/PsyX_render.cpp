@@ -1720,6 +1720,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
 	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
+	"	attribute float a_geom3d; // 1 = GTE-projected primitive (world geometry)\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1760,7 +1761,7 @@ int g_PsxFogToBlack = 0;
 	 * says "was PGXP-projected", so with PGXP off it is 1.0 for the 2D UI too
 	 * and with PGXP on it is 0.0 for world prims that took the affine path.
 	 * That is why bilinear filtered menu text and missed the world. */\
-	"		v_geom3d = a_normal.y;\n"\
+	"		v_geom3d = a_geom3d;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -2280,6 +2281,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_extra, "a_extra");
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
+	glBindAttribLocation(program, a_geom3d, "a_geom3d");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -5603,6 +5605,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_normal);
 	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
 	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
+	glEnableVertexAttribArray(a_geom3d);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;

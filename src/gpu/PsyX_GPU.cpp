@@ -1755,6 +1755,14 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
 		VsFillVertex(&vertex[2], p2);
+
+		/* Per-PRIMITIVE 3D marker. The lookup resolves ~84% of vertices, and
+		 * geom3d reaches the fragment stage as a varying -- so a prim with a
+		 * mix of resolved and unresolved vertices would interpolate across 0.5
+		 * and split one surface into filtered and unfiltered halves. One
+		 * resolved vertex is proof the whole primitive came from the GTE. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
+			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
 	}
 
 	if (g_PsxUsePgxp)
@@ -1811,6 +1819,14 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		VsFillVertex(&vertex[1], p1);
 		VsFillVertex(&vertex[2], p2);
 		VsFillVertex(&vertex[3], p3);
+
+		/* Per-primitive, same reasoning as MakeVertexTriangle. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f ||
+		    vertex[2].ny > 0.5f || vertex[3].ny > 0.5f)
+		{
+			vertex[0].geom3d = vertex[1].geom3d =
+			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
+		}
 	}
 
 	if (g_PsxUsePgxp)
