@@ -574,18 +574,34 @@ GLuint		g_glBlitFramebuffer;
  * the real window, used only by the final blit. */
 GLuint g_internalFBO      = 0;
 static GLuint s_internalColorTex = 0;
+static GLuint s_internalColorRbo = 0;
+static int    s_internalSamples = 0;
 static GLuint s_internalDepthRbo = 0;
 static int    s_internalW = 0, s_internalH = 0;
 int g_presentWidth = 0, g_presentHeight = 0;
+
+/* What the launcher asked for, and which display mode. The window itself cannot
+ * be trusted for this: a borderless window is created at desktop size and SDL
+ * then fires a resize event with the desktop size, which is exactly how the
+ * chosen resolution used to get lost. */
+int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
+
+static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 
 GLuint GR_ScreenFBO(void)
 {
 	return g_internalFBO;
 }
 
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+
 void GR_DestroyInternalTarget(void)
 {
 	if (s_internalColorTex) { glDeleteTextures(1, &s_internalColorTex); s_internalColorTex = 0; }
+	if (s_internalColorRbo) { glDeleteRenderbuffers(1, &s_internalColorRbo); s_internalColorRbo = 0; }
+	if (s_resolveTex)       { glDeleteTextures(1, &s_resolveTex); s_resolveTex = 0; }
+	if (s_resolveFBO)       { glDeleteFramebuffers(1, &s_resolveFBO); s_resolveFBO = 0; }
+	s_internalSamples = 0;
 	if (s_internalDepthRbo) { glDeleteRenderbuffers(1, &s_internalDepthRbo); s_internalDepthRbo = 0; }
 	if (g_internalFBO)      { glDeleteFramebuffers(1, &g_internalFBO); g_internalFBO = 0; }
 	s_internalW = s_internalH = 0;
@@ -607,23 +623,45 @@ int GR_SetInternalResolution(int w, int h)
 
 	GR_DestroyInternalTarget();
 
-	glGenTextures(1, &s_internalColorTex);
-	glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glBindTexture(GL_TEXTURE_2D, 0);
+	/* With MSAA the scene target is multisampled, so antialiasing is kept
+	 * instead of being dropped when the internal target engages. A multisample
+	 * blit must be a 1:1 RESOLVE -- scaling one is illegal -- so the present
+	 * goes through a same-size single-sample FBO first, then scales that. */
+	s_internalSamples = (g_cfg_msaaSamples > 0) ? g_cfg_msaaSamples : 0;
+
+	if (s_internalSamples > 0)
+	{
+		glGenRenderbuffers(1, &s_internalColorRbo);
+		glBindRenderbuffer(GL_RENDERBUFFER, s_internalColorRbo);
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_RGBA8, w, h);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	}
+	else
+	{
+		glGenTextures(1, &s_internalColorTex);
+		glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
 
 	glGenRenderbuffers(1, &s_internalDepthRbo);
 	glBindRenderbuffer(GL_RENDERBUFFER, s_internalDepthRbo);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	if (s_internalSamples > 0)
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_DEPTH24_STENCIL8, w, h);
+	else
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
 	glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
 	glGenFramebuffers(1, &g_internalFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+	if (s_internalSamples > 0)
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_internalColorRbo);
+	else
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
 
 	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -634,6 +672,29 @@ int GR_SetInternalResolution(int w, int h)
 		eprintwarn("internal render target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
 		GR_DestroyInternalTarget();
 		return 0;
+	}
+
+	if (s_internalSamples > 0)
+	{
+		glGenTextures(1, &s_resolveTex);
+		glBindTexture(GL_TEXTURE_2D, s_resolveTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		glGenFramebuffers(1, &s_resolveFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, s_resolveFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_resolveTex, 0);
+		st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		if (st != GL_FRAMEBUFFER_COMPLETE)
+		{
+			eprintwarn("internal resolve target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
+			GR_DestroyInternalTarget();
+			return 0;
+		}
 	}
 
 	s_internalW = w;
@@ -1036,13 +1097,53 @@ int GR_InitialiseGLExt()
 
 	GR_ProbeCapabilities();
 
+	/* GL is up, so the internal target can be built now. A borderless window was
+	 * created at desktop size, so this is where the chosen resolution is turned
+	 * back into the RENDER size instead of being lost. */
+	{
+		int realW = 0, realH = 0;
+		SDL_GetWindowSize(g_window, &realW, &realH);
+		GR_ApplyPresentSize(realW, realH);
+	}
+
 	return 1;
+}
+
+/* The single decision point for "what size do we render, what size do we
+ * present". Called after window creation, on every SDL resize, and whenever the
+ * resolution is changed at runtime -- the resize event is what used to silently
+ * overwrite the chosen resolution with the desktop size in borderless. */
+extern "C" void GR_ApplyPresentSize(int realW, int realH)
+{
+	if (realW <= 0 || realH <= 0)
+		return;
+
+	g_presentWidth  = realW;
+	g_presentHeight = realH;
+
+	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
+	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
+	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
+	{
+		g_windowWidth  = g_cfgRenderWidth;
+		g_windowHeight = g_cfgRenderHeight;
+		return;
+	}
+
+	GR_DestroyInternalTarget();
+	g_windowWidth  = realW;
+	g_windowHeight = realH;
 }
 
 int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 {
 	g_windowWidth = width;
 	g_windowHeight = height;
+
+	/* Remember the request before SDL gets a chance to replace it. */
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
 
 	// Due to debugging in fullscreen
 	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
@@ -5091,7 +5192,21 @@ void GR_SwapWindow()
 	 * internal resolution scales up smoothly rather than blockily. */
 	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
 	{
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+		GLuint src = g_internalFBO;
+
+		/* Multisample first: a multisample blit must be 1:1, so resolve at the
+		 * internal size and scale the resolved copy. */
+		if (s_internalSamples > 0 && s_resolveFBO != 0)
+		{
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
+			glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+			                  0, 0, s_internalW, s_internalH,
+			                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			src = s_resolveFBO;
+		}
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 		glViewport(0, 0, g_presentWidth, g_presentHeight);
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,

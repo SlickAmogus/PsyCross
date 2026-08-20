@@ -48,9 +48,8 @@ int strcasecmp(const char* _l, const char* _r)
 
 SDL_Window* g_window = NULL;
 extern int  g_presentWidth, g_presentHeight;
-extern int  g_cfg_msaaSamples;
-extern int  GR_SetInternalResolution(int w, int h);
-extern void GR_DestroyInternalTarget(void);
+extern int  g_cfgRenderWidth, g_cfgRenderHeight, g_cfgFullscreenMode;
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
 
 
 /* PC port: mouse confinement. Default on; the launcher/config can clear it. */
@@ -852,8 +851,10 @@ void PsyX_Sys_DoPollEvent()
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
-					g_windowWidth = event.window.data1;
-					g_windowHeight = event.window.data2;
+					/* This used to assign the render size directly, which is how
+					 * borderless lost the chosen resolution: a fullscreen-desktop
+					 * window reports the DESKTOP size here right after creation. */
+					GR_ApplyPresentSize(event.window.data1, event.window.data2);
 					GR_ResetDevice();
 					break;
 				case SDL_WINDOWEVENT_CLOSE:
@@ -1272,23 +1273,10 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	 * redirecting the scene into a single-sampled target would silently throw
 	 * antialiasing away. If the target cannot be allocated the helper returns 0
 	 * and the stock desktop-resolution path runs exactly as before. */
-	g_presentWidth  = g_windowWidth;
-	g_presentHeight = g_windowHeight;
-
-	if (fullscreen == 2 && width > 0 && height > 0 &&
-	    (width != g_windowWidth || height != g_windowHeight) &&
-	    g_cfg_msaaSamples <= 0)
-	{
-		if (GR_SetInternalResolution(width, height))
-		{
-			g_windowWidth  = width;
-			g_windowHeight = height;
-		}
-	}
-	else
-	{
-		GR_DestroyInternalTarget();
-	}
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
+	GR_ApplyPresentSize(g_windowWidth, g_windowHeight);
 
 	GR_ResetDevice();
 	PsyX_UpdateMouseConfinement();
