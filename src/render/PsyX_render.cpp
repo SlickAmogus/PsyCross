@@ -2815,11 +2815,29 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * stray-lines report from the Chinese text, and it would hit Japanese the
 	 * same way. Native paletted art now stays nearest on menu frames, which is
 	 * also what it looks like on hardware. */
+	/* Mode 3 = filter every prim on this 3D frame, not just the ones the shader
+	 * can prove are 3D.
+	 *
+	 * Mode 1 defers to v_is3d, which is `a_pgxp.z > 0.0` whenever PGXP is on --
+	 * "this vertex was PGXP-projected", NOT "this vertex is 3D". World prims that
+	 * take the legacy affine path carry no PGXP data, so they read as 2D and stay
+	 * point-sampled: bilinear appeared to do nothing to the world while menus
+	 * (which filter through the >= 2 menu_filter tier) plainly worked. That is the
+	 * reported symptom.
+	 *
+	 * When the user has explicitly asked for bilinear, the frame class is the
+	 * honest signal -- g_PsxDitherSuppressed already separates 2D-only frames from
+	 * gameplay -- so filter the whole 3D frame. This is exactly what already
+	 * happens with PGXP off, where v_is3d is 1.0 for everything, so it is the
+	 * shipped default behaviour extended to PGXP users rather than a new one.
+	 * TF_32_BIT_RGBA keeps mode 1 when bilinear was NOT requested, so texture
+	 * packs sample as before. Both samplers already treat >= 2 as unconditional. */
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
 		                ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
-		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_bilinearFiltering) ? 1 : 0));
+		                : (g_cfg_bilinearFiltering ? 3
+		                                           : (texFormat == TF_32_BIT_RGBA ? 1 : 0)));
 
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;
