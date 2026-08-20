@@ -589,7 +589,7 @@ int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
 
-GLuint GR_ScreenFBO(void)
+extern "C" GLuint GR_ScreenFBO(void)
 {
 	return g_internalFBO;
 }
