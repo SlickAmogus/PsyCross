@@ -174,6 +174,19 @@ int g_cfg_pgxpZBuffer = 1;
  * (config key: use_pgxp). */
 int g_PsxUsePgxp = 0;
 int g_cfg_bilinearFiltering = 0;
+
+/* Does anything need the per-vertex view-space capture this frame?
+ *
+ * The capture is what stamps a_normal.y = 1.0 on vertices the GTE projected,
+ * and that marker is the renderer's only trustworthy "this is world geometry"
+ * signal. The flashlight cone and PGXP already required it; bilinear now does
+ * too, because without it every vertex reads as 2D and the 3D world silently
+ * stays point-sampled. Kept as one predicate so the five capture sites in
+ * PsyX_GPU/PsyX_GTE cannot drift apart. */
+extern "C" int GR_NeedViewSpaceData(void)
+{
+	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_bilinearFiltering) ? 1 : 0;
+}
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
 int g_cfg_menuFilter = 0;
@@ -545,6 +558,89 @@ GLuint		g_glVertexBuffer[2];
 int			g_curVertexBuffer = 0;
 
 GLuint		g_glBlitFramebuffer;
+
+/* Internal render target: borderless renders the scene at the CHOSEN resolution
+ * and stretches it to the desktop, instead of ignoring the resolution and
+ * running at desktop size.
+ *
+ * Everything in this renderer that means "the screen" binds framebuffer 0, so
+ * the whole scene is redirected simply by handing those sites GR_ScreenFBO()
+ * instead. It returns 0 whenever the target is inactive, which is every mode
+ * except borderless-with-a-different-resolution -- so the stock path is
+ * bit-identical and a failed allocation degrades to it automatically.
+ *
+ * g_windowWidth/Height stay the RENDER size (all viewport, scissor and aspect
+ * maths already key off them and need no changes); g_presentWidth/Height are
+ * the real window, used only by the final blit. */
+GLuint g_internalFBO      = 0;
+static GLuint s_internalColorTex = 0;
+static GLuint s_internalDepthRbo = 0;
+static int    s_internalW = 0, s_internalH = 0;
+int g_presentWidth = 0, g_presentHeight = 0;
+
+GLuint GR_ScreenFBO(void)
+{
+	return g_internalFBO;
+}
+
+void GR_DestroyInternalTarget(void)
+{
+	if (s_internalColorTex) { glDeleteTextures(1, &s_internalColorTex); s_internalColorTex = 0; }
+	if (s_internalDepthRbo) { glDeleteRenderbuffers(1, &s_internalDepthRbo); s_internalDepthRbo = 0; }
+	if (g_internalFBO)      { glDeleteFramebuffers(1, &g_internalFBO); g_internalFBO = 0; }
+	s_internalW = s_internalH = 0;
+}
+
+/* Returns 1 when the scene should render into the internal target at w x h. */
+int GR_SetInternalResolution(int w, int h)
+{
+	GLenum st;
+
+	if (w <= 0 || h <= 0)
+	{
+		GR_DestroyInternalTarget();
+		return 0;
+	}
+
+	if (g_internalFBO != 0 && s_internalW == w && s_internalH == h)
+		return 1;
+
+	GR_DestroyInternalTarget();
+
+	glGenTextures(1, &s_internalColorTex);
+	glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenRenderbuffers(1, &s_internalDepthRbo);
+	glBindRenderbuffer(GL_RENDERBUFFER, s_internalDepthRbo);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+	glGenFramebuffers(1, &g_internalFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
+
+	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if (st != GL_FRAMEBUFFER_COMPLETE)
+	{
+		eprintwarn("internal render target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
+		GR_DestroyInternalTarget();
+		return 0;
+	}
+
+	s_internalW = w;
+	s_internalH = h;
+	eprintf("*internal render target: %dx%d, stretched to the window\n", w, h);
+	return 1;
+}
 GrPBO		g_glFramebufferPBO;
 
 GLuint		g_glVRAMFramebuffer;
@@ -1465,6 +1561,13 @@ int g_PsxFogToBlack = 0;
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
 	"		v_fade = a_normal.z;\n"\
+	/* a_normal.y is 1.0 only for a vertex that carried a view-space FIFO
+	 * entry, i.e. one the GTE actually projected -- a true "this is world
+	 * geometry" marker. v_is3d cannot answer that: it reads a_pgxp.z, which
+	 * says "was PGXP-projected", so with PGXP off it is 1.0 for the 2D UI too
+	 * and with PGXP on it is 0.0 for world prims that took the affine path.
+	 * That is why bilinear filtered menu text and missed the world. */\
+	"		v_geom3d = a_normal.y;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -1629,7 +1732,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
-	"		if((bilinearFilter == 1 && v_is3d > 0.5) || bilinearFilter >= 2)\n"\
+	"		if((bilinearFilter == 1 && v_geom3d > 0.5) || bilinearFilter >= 2)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
@@ -1646,6 +1749,7 @@ const char* gte_shader_4 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1662,6 +1766,7 @@ const char* gte_shader_8 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1678,6 +1783,7 @@ const char* gte_shader_16 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1694,6 +1800,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1729,7 +1836,7 @@ const char* gte_shader_32_rgba =
 	 * level, or a minified HD atlas would still blur in through the mip chain. A
 	 * native-res replacement already lands on the texel centre (u_hiresHalf == 0.5),
 	 * so it comes out bit-identical either way. */
-	"		if (bilinearFilter == 0 || (bilinearFilter == 1 && v_is3d < 0.5)) {\n"\
+	"		if (bilinearFilter == 0 || (bilinearFilter == 1 && v_geom3d < 0.5)) {\n"\
 	"			vec2 hiresSize = vec2(textureSize(s_texture, 0));\n"\
 	"			fragColor = textureLod(s_texture, (floor(tc * hiresSize) + 0.5) / hiresSize, 0.0);\n"\
 	"		} else {\n"\
@@ -2226,7 +2333,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -2257,7 +2364,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -2292,7 +2399,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -3110,6 +3217,18 @@ void GR_SetScissorState(int enable)
 extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* outFracY)
 {
 	int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
+
+	/* mx/my arrive in WINDOW pixels from SDL, but everything below works in
+	 * render pixels. Those are the same thing except in borderless with an
+	 * internal target, where the scene is drawn smaller and stretched at
+	 * present -- so scale the pointer by the same factor or the cursor drifts
+	 * from what it is pointing at. Single conversion point, so every mouse
+	 * consumer is corrected at once. */
+	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
+	{
+		mx = (int)((float)mx * (float)g_windowWidth  / (float)g_presentWidth);
+		my = (int)((float)my * (float)g_windowHeight / (float)g_presentHeight);
+	}
 	const bool wantPillarbox =
 		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
@@ -3369,7 +3488,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		 * only the writes are suppressed. */
 		if (g_PsxSkipFramebufferStore)
 		{
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 		else if (g_PreviousOffscreen.w > 0 && g_PreviousOffscreen.h > 0 &&
 		         g_PreviousOffscreen.w <= 64 && g_PreviousOffscreen.h <= 64)
@@ -3389,7 +3508,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
 			glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, s_scratchRGBA);
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 			GR_CopyRGBAFramebufferToVRAM(s_scratchRGBA,
 				g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh, 0, 1);
@@ -3429,12 +3548,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 								GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 			// done, unbind
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 		}
 #endif
 
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		// copy rendering results to VRAM texture
 		{
 			// reat the texture
@@ -3665,7 +3784,7 @@ static void GR_EnsurePostTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_postFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_postTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 }
 
 /* Draw a full-screen triangle sampling `tex` into the currently bound default
@@ -3674,7 +3793,7 @@ static void GR_EnsurePostTarget(int w, int h)
  * cached GL state so the next frame's prims re-establish it. */
 static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 {
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 	glViewport(0, 0, g_windowWidth, g_windowHeight);
 
 	glDisable(GL_DEPTH_TEST);
@@ -3746,11 +3865,11 @@ void GR_PostProcess(void)
 
 	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
 	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_postFrame++;
 	GR_DrawFullscreenTexture(g_postTex, g_cfg_postProcess);
@@ -3921,7 +4040,7 @@ static void GR_EnsureShadowTarget(void)
 		}
 	}
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	if (g_shadowDepthShader == (ShaderID)-1)
 	{
@@ -4085,14 +4204,14 @@ void GR_CaptureLastFrame(void)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
 
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_freezeFrameValid = 1;
 #endif
@@ -4121,13 +4240,13 @@ void GR_PresentLastFrame(void)
 #endif
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	glBlitFramebuffer(0, 0, g_freezeFrameW, g_freezeFrameH,
 		0, 0, g_windowWidth, g_windowHeight,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_freezePresentedThisFrame = 1;
 #endif
@@ -4362,7 +4481,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbPackFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbPackTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 }
 
 /* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
@@ -4400,7 +4519,7 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	glBindVertexArray(0);
 
 	glEnable(GL_STENCIL_TEST);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture: recording the
@@ -4457,7 +4576,7 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(cc[0], cc[1], cc[2], cc[3]);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
 	g_PreviousBlendMode    = -999;
@@ -4519,7 +4638,7 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	if (g_cfg_msaaSamples > 0)
 	{
 		GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 		glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -4591,8 +4710,8 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		}
 	}
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
@@ -4676,7 +4795,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 		if (g_cfg_msaaSamples > 0)
 		{
 			GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 			glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			storeReadFBO = g_postFBO;
@@ -4711,8 +4830,8 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 		
 		// done, unbind
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	}
 
 	g_fbStoreValid = 1;
@@ -4736,7 +4855,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 	}
 
 	// after drawing
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 	glFlush();
 #endif
 
@@ -4776,9 +4895,9 @@ static void GR_RestoreStoredFramebufferRegion(void)
 		x, y + h, x + w, y,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* A full vram[] re-upload also stamped TIM bytes over the scene scratch
 	 * rect — re-blit the stored frame there too (no TTL decrement here). */
@@ -4965,6 +5084,21 @@ void GR_DiagGLError(const char* where)
 void GR_SwapWindow()
 {
 	GR_DiagGLError("end of frame");
+
+	/* Stretch the internal target onto the real window. This is the only bind of
+	 * framebuffer 0 that genuinely means "the window" -- every other one means
+	 * "the scene target" and goes through GR_ScreenFBO(). LINEAR so a lower
+	 * internal resolution scales up smoothly rather than blockily. */
+	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
+	{
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glViewport(0, 0, g_presentWidth, g_presentHeight);
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+		                  0, 0, g_presentWidth, g_presentHeight,
+		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	}
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	if (PsyX_Angle_Active())

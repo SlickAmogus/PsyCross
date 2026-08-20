@@ -12,6 +12,8 @@
 
 #include "psx/gtereg.h"
 
+extern "C" int GR_NeedViewSpaceData(void);
+
 #define GET_TPAGE_FORMAT(tpage) ((TexFormat)((tpage >> 7) & 0x3))
 #define GET_TPAGE_BLEND(tpage)  ((BlendMode)(((tpage >> 5) & 3) + 1))
 
@@ -183,7 +185,7 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	}
 	/* View-space propagates whenever PGXP is on too — the near-plane clipper
 	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
+	if (GR_NeedViewSpaceData()) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
 		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst,
 		               ve->ofx, ve->ofy, ve->h, ve->fade);
@@ -1739,7 +1741,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	 * view-space data these fill. Skipped for the isolated item model — it must
 	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
 	 * so losing near-clip eligibility is harmless). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
@@ -1794,7 +1796,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 	/* Before the PGXP block: near-clip eligibility reads the view-space data.
 	 * Skipped for the isolated item model so it stays out of the world's per-pixel
 	 * flashlight (see MakeVertexTriangle). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
