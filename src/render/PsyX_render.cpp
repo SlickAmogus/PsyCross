@@ -587,6 +587,7 @@ int g_presentWidth = 0, g_presentHeight = 0;
 int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
+static int    s_suppressWindowMsaa = 0;
 
 GLuint GR_ScreenFBO(void)
 {
@@ -880,7 +881,7 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 			SDL_GL_ResetAttributes();
 			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
-			if (g_cfg_msaaSamples > 0)
+			if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
 			{
 				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
 				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
@@ -919,7 +920,7 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 			SDL_GL_ResetAttributes();
 			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
-			if (g_cfg_msaaSamples > 0)
+			if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
 			{
 				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
 				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
@@ -1131,28 +1132,6 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 		g_windowWidth  = g_cfgRenderWidth;
 		g_windowHeight = g_cfgRenderHeight;
 
-		/* MSAA lives on the WINDOW's buffer, and the scene no longer draws there,
-		 * so it is inert while this is active. It cannot simply be moved onto the
-		 * internal target: the freeze capture and framebuffer feedback read the
-		 * scene target with glReadPixels and blits, both illegal on a multisample
-		 * framebuffer -- that combination black-screened. Supersampling is not a
-		 * substitute either, because a target SMALLER than the window is upscaled
-		 * at present, so there is nothing to downsample. Say so once rather than
-		 * leave someone wondering where their antialiasing went. */
-		if (g_cfg_msaaSamples > 0)
-		{
-			static int s_saidOnce = 0;
-
-			if (!s_saidOnce)
-			{
-				s_saidOnce = 1;
-				eprintwarn("MSAA is inactive in borderless at %dx%d: the scene renders to an internal target, "
-				           "and the frame read-back paths cannot read a multisample one. "
-				           "Use exclusive fullscreen, or set the resolution to the desktop size, to keep MSAA.\n",
-				           g_cfgRenderWidth, g_cfgRenderHeight);
-			}
-		}
-
 		return;
 	}
 
@@ -1170,6 +1149,29 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	g_cfgRenderWidth    = width;
 	g_cfgRenderHeight   = height;
 	g_cfgFullscreenMode = fullscreen;
+
+	/* The window must NOT be multisampled if the scene is going to render into
+	 * an internal target, because the present is a glBlitFramebuffer into the
+	 * default framebuffer -- and blitting a single-sample source into a
+	 * MULTISAMPLE destination is INVALID_OPERATION. The blit silently does
+	 * nothing and the screen stays black, which is exactly what MSAA + borderless
+	 * did. Decide it here, before the pixel format is chosen. */
+	{
+		SDL_DisplayMode dm;
+
+		s_suppressWindowMsaa = 0;
+
+		if (fullscreen == 2 && width > 0 && height > 0 && g_cfg_msaaSamples > 0 &&
+		    SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
+		    (width != dm.w || height != dm.h))
+		{
+			s_suppressWindowMsaa = 1;
+			eprintwarn("MSAA disabled: borderless at %dx%d renders through an internal target, and the "
+			           "present blit cannot write into a multisample window. Use exclusive fullscreen, or "
+			           "a borderless resolution matching the desktop (%dx%d), to keep it.\n",
+			           width, height, dm.w, dm.h);
+		}
+	}
 
 	// Due to debugging in fullscreen
 	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
@@ -1208,7 +1210,7 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	 * set before the window/context is created (GR_InitialiseGLContext). The
 	 * driver picks a multisample pixel format; if it can't, window creation is
 	 * retried without MSAA inside GR_InitialiseGLContext. */
-	if (g_cfg_msaaSamples > 0)
+	if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
 	{
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
