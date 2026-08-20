@@ -559,6 +559,9 @@ extern int g_PsyX_ForceItemDepth;
  * being treated as 2D and left point-sampled. Counts only; reported once a
  * second by the renderer. */
 unsigned g_vsHits = 0, g_vsMisses = 0;
+/* Primitives marked as world geometry vs left as 2D, so the gate can be judged
+ * by what it actually classifies rather than by reasoning about it. */
+unsigned g_prims3d = 0, g_prims2d = 0;
 
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
@@ -1762,7 +1765,14 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * and split one surface into filtered and unfiltered halves. One
 		 * resolved vertex is proof the whole primitive came from the GTE. */
 		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
+		{
 			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
+			g_prims3d++;
+		}
+		else
+		{
+			g_prims2d++;
+		}
 	}
 
 	if (g_PsxUsePgxp)
@@ -1826,6 +1836,11 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		{
 			vertex[0].geom3d = vertex[1].geom3d =
 			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
+			g_prims3d++;
+		}
+		else
+		{
+			g_prims2d++;
 		}
 	}
 

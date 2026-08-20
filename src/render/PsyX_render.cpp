@@ -5299,7 +5299,7 @@ void GR_SwapWindow()
 	 * so one line says both what the shader was told and whether the geometry
 	 * marker it depends on is actually resolving. */
 	{
-		extern unsigned g_vsHits, g_vsMisses;
+		extern unsigned g_vsHits, g_vsMisses, g_prims3d, g_prims2d;
 		static unsigned s_lastTick = 0;
 		static int      s_lines = 0;
 		unsigned now = SDL_GetTicks();
@@ -5309,10 +5309,11 @@ void GR_SwapWindow()
 			unsigned tot = g_vsHits + g_vsMisses;
 			s_lastTick = now;
 			s_lines++;
-			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) suppressed=%d gles=%d\n",
+			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d\n",
 			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
-			        g_PsxDitherSuppressed, g_grIsGLES);
+			        g_prims3d, g_prims2d, g_PsxDitherSuppressed);
 			g_vsHits = g_vsMisses = 0;
+			g_prims3d = g_prims2d = 0;
 		}
 	}
 
