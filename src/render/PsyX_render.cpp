@@ -596,6 +596,28 @@ extern "C" GLuint GR_ScreenFBO(void)
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
 
+/* The scene target as a READ source.
+ *
+ * Identical to GR_ScreenFBO() unless the scene target is multisampled, in which
+ * case reading it directly is illegal -- so it is resolved 1:1 into the mirror
+ * and the mirror is returned. Every read of the screen goes through here, which
+ * is what makes a multisample scene target survive the freeze capture and the
+ * framebuffer-feedback paths. */
+extern "C" GLuint GR_ScreenReadFBO(void)
+{
+	if (s_internalSamples > 0 && s_resolveFBO != 0)
+	{
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+		                  0, 0, s_internalW, s_internalH,
+		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		return s_resolveFBO;
+	}
+
+	return g_internalFBO;
+}
+
 /* Where the internal target lands inside the real window.
  *
  * Stretch to fill by default. When pillarboxing is on, preserve the render
@@ -658,19 +680,26 @@ int GR_SetInternalResolution(int w, int h)
 
 	GR_DestroyInternalTarget();
 
-	/* Single-sampled, always.
+	/* Multisample the scene target when MSAA is on, so borderless keeps its
+	 * antialiasing, and resolve into a single-sample MIRROR that every read goes
+	 * through (GR_ScreenReadFBO). Reading a multisample framebuffer is illegal,
+	 * and the freeze capture and framebuffer-feedback paths do read the scene
+	 * target -- that is what black-screened the first attempt.
 	 *
-	 * A MULTISAMPLE scene target black-screens this renderer: the freeze capture
-	 * and the framebuffer-feedback paths glReadPixels and blit FROM the screen
-	 * target, and both are illegal on a multisample framebuffer -- they fail, the
-	 * captured frame comes back empty, and the composite is black. Making that
-	 * work would mean resolving before every read, not just at present.
-	 *
-	 * Antialiasing instead comes from supersampling: with AA on, the target is
-	 * rendered larger and the present blit downscales it, which is what actually
-	 * removes the jaggies. Every read path keeps working because nothing is ever
-	 * multisampled. See GR_InternalScaleForAA. */
-	s_internalSamples = 0;
+	 * Desktop GL only. There the read-back helper uses glGetTexImage on its own
+	 * texture, so no read ever touches the scene target; on GLES it falls back to
+	 * glReadPixels from the bound framebuffer, which would be the multisample
+	 * target. Rather than guess at that path on ANGLE, GLES keeps the
+	 * single-sample target and the existing "MSAA off in borderless" notice. */
+	s_internalSamples = (g_cfg_msaaSamples > 0 && !g_grIsGLES) ? g_cfg_msaaSamples : 0;
+
+	if (s_internalSamples > 0)
+	{
+		glGenRenderbuffers(1, &s_internalColorRbo);
+		glBindRenderbuffer(GL_RENDERBUFFER, s_internalColorRbo);
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_RGBA8, w, h);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	}
 
 	glGenTextures(1, &s_internalColorTex);
 	glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
@@ -683,12 +712,20 @@ int GR_SetInternalResolution(int w, int h)
 
 	glGenRenderbuffers(1, &s_internalDepthRbo);
 	glBindRenderbuffer(GL_RENDERBUFFER, s_internalDepthRbo);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	if (s_internalSamples > 0)
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_DEPTH24_STENCIL8, w, h);
+	else
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
 	glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
+	/* The scene target. Multisample colour when AA is on; the texture created
+	 * above then becomes the resolve mirror instead of the scene's own colour. */
 	glGenFramebuffers(1, &g_internalFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+	if (s_internalSamples > 0)
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_internalColorRbo);
+	else
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
 
 	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
@@ -699,6 +736,22 @@ int GR_SetInternalResolution(int w, int h)
 		eprintwarn("internal render target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
 		GR_DestroyInternalTarget();
 		return 0;
+	}
+
+	if (s_internalSamples > 0)
+	{
+		glGenFramebuffers(1, &s_resolveFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, s_resolveFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+		st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		if (st != GL_FRAMEBUFFER_COMPLETE)
+		{
+			eprintwarn("internal resolve mirror %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
+			GR_DestroyInternalTarget();
+			return 0;
+		}
 	}
 
 	s_internalW = w;
@@ -1165,11 +1218,22 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 		    SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
 		    (width != dm.w || height != dm.h))
 		{
+			/* The WINDOW must stay single-sample either way: the present is a
+			 * blit into the default framebuffer, and a single-sample source into
+			 * a multisample destination is INVALID_OPERATION. Antialiasing moves
+			 * onto the internal target instead, which is multisampled and
+			 * resolved before every read and before the present -- so MSAA is
+			 * kept, just not on the window. Not available on GLES, where the
+			 * read-back helper would glReadPixels the scene target; there it
+			 * really is off (see GR_SetInternalResolution). */
 			s_suppressWindowMsaa = 1;
-			eprintwarn("MSAA disabled: borderless at %dx%d renders through an internal target, and the "
-			           "present blit cannot write into a multisample window. Use exclusive fullscreen, or "
-			           "a borderless resolution matching the desktop (%dx%d), to keep it.\n",
-			           width, height, dm.w, dm.h);
+
+			if (g_grIsGLES)
+			{
+				eprintwarn("MSAA disabled: borderless at %dx%d renders through an internal target, and this "
+				           "backend reads that target back directly, which a multisample target does not allow.\n",
+				           width, height);
+			}
 		}
 	}
 
@@ -3683,7 +3747,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 								GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 			// done, unbind
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 		}
 #endif
@@ -4000,10 +4064,10 @@ void GR_PostProcess(void)
 
 	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
 	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_postFrame++;
@@ -4339,13 +4403,13 @@ void GR_CaptureLastFrame(void)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_freezeFrameValid = 1;
@@ -4381,7 +4445,7 @@ void GR_PresentLastFrame(void)
 		0, 0, g_windowWidth, g_windowHeight,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
 	g_freezePresentedThisFrame = 1;
 #endif
@@ -4773,7 +4837,7 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	if (g_cfg_msaaSamples > 0)
 	{
 		GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 		glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -4845,7 +4909,7 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		}
 	}
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	g_PreviousScissorState = 0;
 
@@ -4930,7 +4994,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 		if (g_cfg_msaaSamples > 0)
 		{
 			GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 			glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			storeReadFBO = g_postFBO;
@@ -4965,7 +5029,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 		
 		// done, unbind
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	}
 
@@ -5030,7 +5094,7 @@ static void GR_RestoreStoredFramebufferRegion(void)
 		x, y + h, x + w, y,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
@@ -5226,8 +5290,9 @@ void GR_SwapWindow()
 	 * internal resolution scales up smoothly rather than blockily. */
 	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
 	{
-		GLuint src = g_internalFBO;
 		int dx, dy, dw, dh;
+		GLuint src = GR_ScreenReadFBO();   /* resolves first when multisampled */
+
 		GR_PresentRect(&dx, &dy, &dw, &dh);
 
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
