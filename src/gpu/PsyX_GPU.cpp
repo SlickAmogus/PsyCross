@@ -1888,6 +1888,29 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
+
+/* Stamp the polygon's UV bounding box on every vertex (see GrVertex.ulo). */
+static inline void SetUvLimits(GrVertex* vertex, int count)
+{
+	unsigned char ulo = vertex[0].u, uhi = vertex[0].u;
+	unsigned char vlo = vertex[0].v, vhi = vertex[0].v;
+	int i;
+
+	for (i = 1; i < count; i++)
+	{
+		if (vertex[i].u < ulo) ulo = vertex[i].u;
+		if (vertex[i].u > uhi) uhi = vertex[i].u;
+		if (vertex[i].v < vlo) vlo = vertex[i].v;
+		if (vertex[i].v > vhi) vhi = vertex[i].v;
+	}
+
+	for (i = 0; i < count; i++)
+	{
+		vertex[i].ulo = ulo; vertex[i].vlo = vlo;
+		vertex[i].uhi = uhi; vertex[i].vhi = vhi;
+	}
+}
+
 void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, unsigned char* uv3, short page, short clut, unsigned char dither)
 {
 	assert(uv0);
@@ -1941,6 +1964,8 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 4);
 }
 
 void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, short page, short clut, unsigned char dither)
@@ -1988,6 +2013,8 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 3);
 }
 
 void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clut, short w, short h)
@@ -2048,6 +2075,8 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	 * MakeTexcoordQuad/Triangle were already commented out for what looks like
 	 * the same reason; this one was missed. The sampler now brackets its taps
 	 * around P - 0.5 itself, so nothing needs compensating here. */
+
+	SetUvLimits(vertex, 4);
 }
 
 void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)

@@ -1800,6 +1800,14 @@ int g_PsxFogToBlack = 0;
 	 * a transparent tap contributes nothing and only adds to coverage when
 	 * it is opaque. */\
 	"	vec4 TapWeighted(vec2 idx, float w, inout float cov) {\n"\
+	/* Clamp the tap to the POLYGON'S own UV bounds. PSX pages pack unrelated
+	 * regions edge to edge, so a tap that steps one texel past a UV seam reads
+	 * another body part's texels -- the bright line down a character's pants
+	 * seam under bilinear/aniso. Bounds are the prim's vertex-UV bbox, stamped
+	 * CPU-side; all-zero means a path that never sets them, which keeps the
+	 * unclamped behaviour. DuckStation resolves this identically. */\
+	"		if (v_uvlim.z > 0.0 || v_uvlim.w > 0.0)\n"\
+	"			idx = clamp(idx, v_uvlim.xy, v_uvlim.zw);\n"\
 	"		vec2 rg = samplePSX(idx);\n"\
 	"		float o = (rg.x + rg.y > 0.0) ? w : 0.0;\n"\
 	"		cov += o;\n"\
@@ -1930,6 +1938,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec3 a_viewpos;\n"\
 	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
 	"	attribute float a_geom3d; // 1 = GTE-projected primitive (world geometry)\n"\
+	"	attribute vec4 a_uvlim; // per-poly UV bounds (texels), all-zero = none\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1971,6 +1980,7 @@ int g_PsxFogToBlack = 0;
 	 * and with PGXP on it is 0.0 for world prims that took the affine path.
 	 * That is why bilinear filtered menu text and missed the world. */\
 	"		v_geom3d = a_geom3d;\n"\
+	"		v_uvlim = a_uvlim;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -2157,6 +2167,7 @@ const char* gte_shader_4 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2174,6 +2185,7 @@ const char* gte_shader_8 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2191,6 +2203,7 @@ const char* gte_shader_16 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2208,6 +2221,7 @@ const char* gte_shader_32_rgba =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2491,6 +2505,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
 	glBindAttribLocation(program, a_geom3d, "a_geom3d");
+	glBindAttribLocation(program, a_uvlim, "a_uvlim");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -5866,6 +5881,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_viewpos);
 	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
 	glEnableVertexAttribArray(a_geom3d);
+	glVertexAttribPointer(a_uvlim, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ulo);
+	glEnableVertexAttribArray(a_uvlim);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;
