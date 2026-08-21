@@ -2031,20 +2031,23 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
 
-	if (g_cfg_bilinearFiltering)
-	{
-		vertex[0].tcx = -1;
-		vertex[0].tcy = -1;
-
-		vertex[1].tcx = -1;
-		vertex[1].tcy = -1;
-
-		vertex[2].tcx = -1;
-		vertex[2].tcy = -1;
-
-		vertex[3].tcx = -1;
-		vertex[3].tcy = -1;
-	}
+	/* An upstream half-texel UV nudge used to sit here, applied to every RECT
+	 * whenever filtering was enabled: tcx/tcy reach the vertex shader as
+	 * a_extra.xy and it adds a_extra.xy * 0.5 to the texture coordinate.
+	 *
+	 * RECTs are how 2D sprites and TEXT GLYPHS are drawn, and font atlases pack
+	 * their cells edge to edge with no gutter -- so half a texel over lands
+	 * inside the neighbouring glyph and draws a slice of it beside the letter,
+	 * with the whole 2D layer shifted down and right. That is the reported
+	 * corruption, and it appeared for every mode except Off and Dithering
+	 * because those are the only two that leave this flag clear.
+	 *
+	 * It also could not have been doing any good: the gate reports 0 on menu
+	 * frames, so those glyphs are point-sampled anyway and were paying the
+	 * offset for filtering they never received. The two sibling call sites in
+	 * MakeTexcoordQuad/Triangle were already commented out for what looks like
+	 * the same reason; this one was missed. The sampler now brackets its taps
+	 * around P - 0.5 itself, so nothing needs compensating here. */
 }
 
 void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
