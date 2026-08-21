@@ -1739,6 +1739,13 @@ int g_PsxFogToBlack = 0;
  * from contributing colour at all, and the fragment is only discarded when no
  * tap is opaque. */
 #define GPU_BILINEAR_SAMPLE_FUNC \
+	/* Declared HERE, not with the other uniforms further down the shader:
+	 * GLSL requires a declaration before use, and these sampler functions are
+	 * emitted BEFORE that uniform block. Declaring it late cost a fragment
+	 * shader that failed to compile outright ("u_anisoTaps : undeclared
+	 * identifier"), which is what garbled characters -- the whole program was
+	 * dead, not just the filtering. */\
+	"	uniform float u_anisoTaps; // >1 = anisotropic tap budget\n"\
 	/* One tap, weighted by its own opacity. PSX CLUT entry 0 is transparent;
 	 * blending its colour like any other tap drags black into every edge, so
 	 * a transparent tap contributes nothing and only adds to coverage when
@@ -2075,7 +2082,6 @@ int g_PsxFogToBlack = 0;
 	GPU_BILINEAR_SAMPLE_FUNC\
 	GPU_NEAREST_SAMPLE_FUNC\
 	"	uniform int bilinearFilter;\n"\
-	"	uniform float u_anisoTaps; // >1 = anisotropic tap budget\n"\
 	"	uniform float u_ditherForce;\n"\
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
@@ -2159,7 +2165,6 @@ const char* gte_shader_32_rgba =
 	"#else\n"
 	"	uniform sampler2D s_texture;\n"\
 	"	uniform int bilinearFilter;\n"\
-	"	uniform float u_anisoTaps; // >1 = anisotropic tap budget\n"\
 	"	uniform float u_ditherForce;\n"\
 	"	uniform float u_pixelScale;\n"\
 	"	uniform vec2 texelSize;\n"\
