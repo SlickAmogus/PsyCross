@@ -208,11 +208,58 @@ static float s_glMaxAniso = 0.0f;  /* 0 = extension absent */
  * mode falls back to plain linear when there is no mip chain -- asking for
  * MIPMAP_LINEAR on a texture without mips renders it undefined. The query is
  * desktop-only, so GLES takes the same safe fallback. */
-static void GR_ApplyTextureFilter(TexFormat texFormat)
+/* Textures that must never be filtered, whatever the mode.
+ *
+ * Font atlases paint their glyph cells edge to edge with NO gutter, so a linear
+ * tap at a cell boundary reaches into the neighbouring glyph and draws its first
+ * column as a full-height bar beside the letter. hires_override.c already
+ * point-samples them at upload for exactly that reason -- but a filter applied
+ * per BIND overwrites that decision every frame, which put the ghost text back
+ * the moment any filtering mode was selected. Marked textures keep the sampling
+ * their loader chose. */
+#define GR_NEAREST_SET_SIZE 256
+static TextureID s_nearestTex[GR_NEAREST_SET_SIZE];
+static int       s_nearestCount = 0;
+
+extern "C" void GR_MarkTextureNearest(TextureID tex)
+{
+	int i;
+
+	if (tex == 0)
+		return;
+
+	for (i = 0; i < s_nearestCount; i++)
+	{
+		if (s_nearestTex[i] == tex)
+			return;
+	}
+
+	if (s_nearestCount < GR_NEAREST_SET_SIZE)
+		s_nearestTex[s_nearestCount++] = tex;
+}
+
+static int GR_TextureIsNearest(TextureID tex)
+{
+	int i;
+
+	for (i = 0; i < s_nearestCount; i++)
+	{
+		if (s_nearestTex[i] == tex)
+			return 1;
+	}
+
+	return 0;
+}
+
+static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 {
 	GLint minFilter, magFilter;
 
 	if (texFormat != TF_32_BIT_RGBA)
+		return;
+
+	/* Its loader asked for point sampling and meant it. */
+	if (GR_TextureIsNearest(tex))
 		return;
 
 	if (g_cfg_textureFilter <= 0)
@@ -3319,7 +3366,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
-	GR_ApplyTextureFilter(texFormat);
+	GR_ApplyTextureFilter(texture, texFormat);
 #endif
 
 	g_lastBoundTexture = texture;
