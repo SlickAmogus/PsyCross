@@ -779,6 +779,9 @@ struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind
  * needs to dissolve into fog, since no vertex-colour arithmetic can lift a dark
  * texture above the fog it darkens. */
 static int g_primAlphaNext = 255;
+/* Set per prim by ApplyGtePerVertexDepthImpl (which runs before the colour
+ * builders), consumed and reset by them. */
+static unsigned char s_primAlphaPending = 255;
 
 extern "C" void PsyX_SetNextPrimAlpha(int a)
 {
@@ -1147,20 +1150,12 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		else                             s_dbgParseHitNone++;
 	}
 
-	/* Per-prim alpha: 255 for everything that never armed it, so this is inert
-	 * outside the prims that ask (the fog-faded bullet decals). */
-	{
-		unsigned char a = PsyX_LookupGteAlpha(polyTag);
-
-		if (a != 255)
-		{
-			int nv = isQuad ? 4 : 3;
-			int vi;
-
-			for (vi = 0; vi < nv; vi++)
-				vertex[vi].a = a;
-		}
-	}
+	/* Per-prim alpha: 255 for everything that never armed it. NOT written to
+	 * the vertices here -- the parse calls the COLOUR builders after this
+	 * function, and every one of them writes a = 255, which silently stomped
+	 * the first version of this. Stashed instead; the colour builders consume
+	 * it (s_primAlphaPending) and reset it to 255. */
+	s_primAlphaPending = PsyX_LookupGteAlpha(polyTag);
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
@@ -2220,13 +2215,16 @@ void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 
 void MakeColourNoShade(GrVertex* vertex, int n)
 {
+	const unsigned char a = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
 	--n;
 	while (n >= 0)
 	{
 		vertex[n].r = 128;
 		vertex[n].g = 128;
 		vertex[n].b = 128;
-		vertex[n].a = 255;
+		vertex[n].a = a;
 		vertex[n]._p0 = 0;
 		--n;
 	}
@@ -2234,8 +2232,15 @@ void MakeColourNoShade(GrVertex* vertex, int n)
 
 void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2245,32 +2250,39 @@ void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col1[0];
 	vertex[2].g = col1[1];
 	vertex[2].b = col1[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col0[0];
 	vertex[3].g = col0[1];
 	vertex[3].b = col0[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 
 void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 3);
 		return;
 	}
@@ -2282,26 +2294,33 @@ void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, 
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 }
 
 void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2314,25 +2333,25 @@ void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col3[0];
 	vertex[3].g = col3[1];
 	vertex[3].b = col3[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 
