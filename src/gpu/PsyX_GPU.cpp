@@ -553,22 +553,9 @@ extern int g_PsyX_ForceItemDepth;
  * at the vertex's prim-field address (same address-keyed lookup as PGXP). A miss
  * leaves the memset-0 default, which the shader treats as "untracked" (vsz<=0,
  * not lit). Called when g_PsyX_UsePerPixelFlashlight or g_PsxUsePgxp (near clip). */
-/* [BILINDIAG] How often the view-space lookup actually resolves. a_normal.y --
- * and therefore v_geom3d, the shader's "this is 3D geometry" test for bilinear
- * -- is set ONLY on a hit, so a low hit rate means world geometry is silently
- * being treated as 2D and left point-sampled. Counts only; reported once a
- * second by the renderer. */
-unsigned g_vsHits = 0, g_vsMisses = 0;
-/* Primitives marked as world geometry vs left as 2D, so the gate can be judged
- * by what it actually classifies rather than by reasoning about it. */
-unsigned g_prims3d = 0, g_prims2d = 0;
-unsigned g_filtSeen32 = 0, g_filtSeenClut = 0, g_filtGateSum = 0, g_filtDraws = 0;
-
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
 	const VsEntry* e = Vs_Get(addr, *(const unsigned*)addr);
-
-	if (e) g_vsHits++; else g_vsMisses++;
 	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
 	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
 	 * memset-0 default = casts normally. ny doubles as the "view-space entry valid"
@@ -1808,14 +1795,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * and split one surface into filtered and unfiltered halves. One
 		 * resolved vertex is proof the whole primitive came from the GTE. */
 		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
-		{
 			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
-			g_prims3d++;
-		}
-		else
-		{
-			g_prims2d++;
-		}
 	}
 
 	if (g_PsxUsePgxp)
@@ -1879,11 +1859,6 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		{
 			vertex[0].geom3d = vertex[1].geom3d =
 			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
-			g_prims3d++;
-		}
-		else
-		{
-			g_prims2d++;
 		}
 	}
 

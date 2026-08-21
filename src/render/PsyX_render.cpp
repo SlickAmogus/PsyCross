@@ -3360,19 +3360,6 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * stray-lines report from the Chinese text, and it would hit Japanese the
 	 * same way. Native paletted art now stays nearest on menu frames, which is
 	 * also what it looks like on hardware. */
-	/* [BILINDIAG] which gate value each texture class actually receives. Text
-	 * still picking up neighbouring glyphs means something IS filtering 2D, and
-	 * reading the code has not found which path -- so record it. */
-	{
-		extern unsigned g_filtSeen32, g_filtSeenClut, g_filtGateSum, g_filtDraws;
-		int gateNow = g_PsxDitherSuppressed
-		                  ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
-		                  : ((texFormat == TF_32_BIT_RGBA || g_cfg_textureFilter > 0) ? 1 : 0);
-		if (texFormat == TF_32_BIT_RGBA) g_filtSeen32++; else g_filtSeenClut++;
-		g_filtGateSum += (unsigned)gateNow;
-		g_filtDraws++;
-	}
-
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
@@ -5560,32 +5547,6 @@ void GR_DiagGLError(const char* where)
 void GR_SwapWindow()
 {
 	GR_DiagGLError("end of frame");
-
-	/* [BILINDIAG] see VsFillVertex. Also reports the bilinear mode last pushed,
-	 * so one line says both what the shader was told and whether the geometry
-	 * marker it depends on is actually resolving. */
-	{
-		extern unsigned g_vsHits, g_vsMisses, g_prims3d, g_prims2d;
-		extern unsigned g_filtSeen32, g_filtSeenClut, g_filtGateSum, g_filtDraws;
-		static unsigned s_lastTick = 0;
-		static int      s_lines = 0;
-		unsigned now = SDL_GetTicks();
-
-		if (g_cfg_textureFilter > 0 && s_lines < 20 && (now - s_lastTick) >= 1000)
-		{
-			unsigned tot = g_vsHits + g_vsMisses;
-			s_lastTick = now;
-			s_lines++;
-			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d tex32=%u texClut=%u gateAvg=%u\n",
-			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
-			        g_prims3d, g_prims2d, g_PsxDitherSuppressed,
-			        g_filtSeen32, g_filtSeenClut,
-			        g_filtDraws ? (g_filtGateSum * 100u / g_filtDraws) : 0u);
-			g_vsHits = g_vsMisses = 0;
-			g_prims3d = g_prims2d = 0;
-			g_filtSeen32 = g_filtSeenClut = g_filtGateSum = g_filtDraws = 0;
-		}
-	}
 
 	/* Stretch the internal target onto the real window. This is the only bind of
 	 * framebuffer 0 that genuinely means "the window" -- every other one means
