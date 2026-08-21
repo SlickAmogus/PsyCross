@@ -770,7 +770,22 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
  * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
  * address from a previous frame must then read as a miss, exactly like the
  * s_shadow / s_affine tables already do). Inert while the memset still runs. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; unsigned char alpha; };
+
+/* Per-prim ALPHA (0..255, default 255 = opaque semantics unchanged), armed like
+ * the SZ payload and carried in the same entry. BM_AVERAGE is real
+ * SRC_ALPHA blending on PC, so scaling a prim's alpha is a true transparency
+ * fade -- the one thing an average-blended DARK texture (the bullet decal)
+ * needs to dissolve into fog, since no vertex-colour arithmetic can lift a dark
+ * texture above the fog it darkens. */
+static int g_primAlphaNext = 255;
+
+extern "C" void PsyX_SetNextPrimAlpha(int a)
+{
+	if (a < 0)   a = 0;
+	if (a > 255) a = 255;
+	g_primAlphaNext = a;
+}
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
 /* --- Depth channel Step 3 (docs: PGXP_PR51_Vetting.md; live only when PGXP is
@@ -976,12 +991,16 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			g_szTable[s].gen = s_pgxpGen;
 			g_szTable[s].kind = kind;
+			g_szTable[s].alpha = (unsigned char)g_primAlphaNext;
+			g_primAlphaNext = 255;
 			return;
 		}
 	}
 	// Probe exhausted — overwrite initial slot
 	if (g_PsxUsePgxp) s_dbgSzExhaust++;
 	g_szTable[slot].key = key;
+	g_szTable[slot].alpha = (unsigned char)g_primAlphaNext;
+	g_primAlphaNext = 255;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 	g_szTable[slot].gen = s_pgxpGen;
@@ -1060,6 +1079,19 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curNoFlashlight = false;
 }
 
+static unsigned char PsyX_LookupGteAlpha(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
+	for (int i = 0; i < 16; i++) {
+		int s = (slot + i) & SZ_TABLE_MASK;
+		if (g_szTable[s].key == key)
+			return g_szTable[s].alpha;
+		if (g_szTable[s].key == 0) break;
+	}
+	return 255;
+}
+
 static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* kindOut = nullptr)
 {
 	uintptr_t key = (uintptr_t)prim;
@@ -1113,6 +1145,21 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		if (kind == SZ_KIND_FLAT)       s_dbgParseHitFlat++;
 		else if (kind == SZ_KIND_EXACT) s_dbgParseHitExact++;
 		else                             s_dbgParseHitNone++;
+	}
+
+	/* Per-prim alpha: 255 for everything that never armed it, so this is inert
+	 * outside the prims that ask (the fog-faded bullet decals). */
+	{
+		unsigned char a = PsyX_LookupGteAlpha(polyTag);
+
+		if (a != 255)
+		{
+			int nv = isQuad ? 4 : 3;
+			int vi;
+
+			for (vi = 0; vi < nv; vi++)
+				vertex[vi].a = a;
+		}
 	}
 
 	float sv0, sv1, sv2, sv3 = 0.0f;

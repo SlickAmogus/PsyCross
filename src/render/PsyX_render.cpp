@@ -2269,6 +2269,12 @@ const char* gte_shader_32_rgba =
 	 * edges blending on semi-transparent prims while opaque cutouts
 	 * (foliage/UI) stay clean. */
 	"		if (fragColor.a < 0.5) discard;\n"\
+	/* Per-prim alpha fade (v_color.a, default 1.0 -- see
+	 * PsyX_SetNextPrimAlpha). BM_AVERAGE is genuine SRC_ALPHA blending on
+	 * PC, so scaling the surviving texels' alpha is a true transparency
+	 * fade: the fog-faded bullet decals dissolve instead of darkening.
+	 * Applied after the discard so the cutout shape is unchanged. */\
+	"		fragColor.a *= v_color.a;\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
