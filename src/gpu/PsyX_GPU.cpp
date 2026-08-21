@@ -785,6 +785,11 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
 /* Kill-switch (console PGXPWORLDDEPTH): suppresses FLAT promotion everywhere,
  * dropping the whole feature back to bucket+painter behavior instantly. */
 extern "C" { int g_PsxPgxpWorldDepth = 1; }
+/* Bisect knob (console PGXPAFFINE): PGXP stays ON but every poly is forced to
+ * the whole-poly affine path (ppw = 0), exactly as a shadow-table miss already
+ * does per poly. Isolates the precise-vertex projection from everything else
+ * that keys on g_PsxUsePgxp. */
+extern "C" { int g_PsxPgxpForceAffine = 0; }
 /* Writer-side far-push margin M in SZ units (console PGXPWALLBIAS): world
  * geometry is pushed slightly FARTHER so coplanar testers (props against a
  * wall/floor) win LEQUAL without any tester-side bias or tie-rank. */
@@ -1792,7 +1797,8 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * the screen edge (the grazing-angle case); consistent affine matches PSX.
 		 * EXCEPT when the near clipper will split this straddling poly — it needs the
 		 * in-front vertices' precise projections kept intact. */
-		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
+		if ((g_PsxPgxpForceAffine ||
+		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 3))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = 0.0f;
 	}
@@ -1858,7 +1864,8 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
-		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
+		if ((g_PsxPgxpForceAffine ||
+		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
 		     vertex[2].ppw <= 0.0f || vertex[3].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 4))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = vertex[3].ppw = 0.0f;
