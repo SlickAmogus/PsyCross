@@ -785,45 +785,6 @@ static SZEntry g_szTable[SZ_TABLE_SIZE];
 /* Kill-switch (console PGXPWORLDDEPTH): suppresses FLAT promotion everywhere,
  * dropping the whole feature back to bucket+painter behavior instantly. */
 extern "C" { int g_PsxPgxpWorldDepth = 1; }
-/* Bisect knob (console PGXPAFFINE): PGXP stays ON but every poly is forced to
- * the whole-poly affine path (ppw = 0), exactly as a shadow-table miss already
- * does per poly. Isolates the precise-vertex projection from everything else
- * that keys on g_PsxUsePgxp. */
-extern "C" { int g_PsxPgxpForceAffine = 0; }
-/* Minimum screen span (px) below which a poly keeps the affine path even with
- * precise data available. Console PGXPMINSPAN. Two reasons, same place:
- * perspective correction is invisible on a poly a few pixels across, and the
- * far field is precisely where the shadow table's value validation goes blind --
- * many vertices pack to the SAME s16 screen word there, so a lookup can hand a
- * poly another vertex's W. A wrong W does not move the poly (clip position is
- * scaled uniformly) but it wrecks the perspective-correct varyings; the fog
- * amount is one, and a near-vertex W dominating a far quad floods it with that
- * vertex's fog -- the pale checkerboard on distant roads. Skipping precision
- * where it cannot help removes the whole exposure. */
-extern "C" { int g_PsxPgxpMinSpanPx = 0; }
-/* Where the world-mesh position snap begins, in SZ units (Q8: 256 = one world
- * unit). Console PGXPSNAP takes WORLD units. Below this depth, world vertices
- * keep full sub-pixel PGXP positions; from here the precise xy is blended
- * toward the s16 grid, reaching a full snap at twice this depth. */
-extern "C" { int g_PsxPgxpSnapStartSz = 15 * 256; }
-
-static inline int PgxpPolySpanTiny(const GrVertex* v, int n)
-{
-	float minX = v[0].x, maxX = v[0].x;
-	float minY = v[0].y, maxY = v[0].y;
-	int   i;
-
-	for (i = 1; i < n; i++)
-	{
-		if (v[i].x < minX) minX = v[i].x;
-		if (v[i].x > maxX) maxX = v[i].x;
-		if (v[i].y < minY) minY = v[i].y;
-		if (v[i].y > maxY) maxY = v[i].y;
-	}
-
-	return (maxX - minX) < (float)g_PsxPgxpMinSpanPx &&
-	       (maxY - minY) < (float)g_PsxPgxpMinSpanPx;
-}
 /* Writer-side far-push margin M in SZ units (console PGXPWALLBIAS): world
  * geometry is pushed slightly FARTHER so coplanar testers (props against a
  * wall/floor) win LEQUAL without any tester-side bias or tie-rank. */
@@ -919,16 +880,11 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	else
 	{
 		uint32_t avg = ((unsigned)s0 + s1 + s2 + s3) >> 2;
-		/* Depth channel: keep the RAW average only while the WHOLE depth channel
-		 * is on. The 64-unit quantization exists to force coplanar street layers
-		 * (asphalt / markings / crosswalk) into shared depth buckets so their
-		 * LEQUAL ties resolve by painter order, consistently. Un-quantizing was
-		 * keyed on g_PsxUsePgxp alone, NOT on g_PsxPgxpWorldDepth -- so with the
-		 * depth channel off, near-coplanar quads got raw averages that differ by
-		 * a few units, and which layer won flipped per quad at distance: the
-		 * checkerboard on far roads with PGXP on. PGXPWORLDDEPTH could not
-		 * affect it, which is exactly what testing showed. */
-		avg_q = (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? avg : ((avg >> 6) << 6);
+		/* Depth channel: keep the RAW average when PGXP is on — the 64-unit
+		 * quantization existed to force coplanar neighbours into shared depth
+		 * buckets, which the GL_ALWAYS world painter now makes unnecessary.
+		 * Off path keeps the historical quantized value. */
+		avg_q = g_PsxUsePgxp ? avg : ((avg >> 6) << 6);
 		// Calibrate with unquantised real max so character/item GL depths stay accurate.
 		mx = s0 > s1 ? s0 : s1;
 		if (s2 > mx) mx = s2;
@@ -1170,47 +1126,6 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
-
-	/* World-mesh position snap, DEPTH-RAMPED.
-	 *
-	 * The distant checkerboard and the moving crack were mixed-path seams:
-	 * precise and affine polys disagree about shared edges by a sub-pixel,
-	 * invisible up close, gap-dominant when quads shrink to a few pixels. A
-	 * full snap fixed the far field but returned PSX position-rounding to the
-	 * NEAR world, where PGXP's sub-pixel placement is its visible benefit.
-	 *
-	 * So the snap follows depth: below the start depth vertices keep full
-	 * precise xy; from there the xy blends toward the s16 grid, fully snapped
-	 * at twice the start. The factor comes from the poly's own sz_avg, and
-	 * neighbouring world polys sit at near-identical depths, so shared
-	 * vertices land within hundredths of a pixel of each other -- a hard
-	 * threshold would just have manufactured a new seam ring at its boundary,
-	 * which is exactly what the span experiment demonstrated. W is never
-	 * touched, so perspective-correct texturing holds at every distance.
-	 * FLAT is armed solely by Gfx_MeshDraw: characters and items keep full
-	 * sub-pixel PGXP everywhere. */
-	if (kind == SZ_KIND_FLAT && g_PsxUsePgxp && g_PsxPgxpSnapStartSz > 0)
-	{
-		float t = (sz_avg - (float)g_PsxPgxpSnapStartSz) / (float)g_PsxPgxpSnapStartSz;
-
-		if (t > 0.0f)
-		{
-			int nv = isQuad ? 4 : 3;
-			int vi;
-
-			if (t > 1.0f)
-				t = 1.0f;
-
-			for (vi = 0; vi < nv; vi++)
-			{
-				if (vertex[vi].ppw > 0.0f)
-				{
-					vertex[vi].ppx += (vertex[vi].x - vertex[vi].ppx) * t;
-					vertex[vi].ppy += (vertex[vi].y - vertex[vi].ppy) * t;
-				}
-			}
-		}
-	}
 
 	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
 	 * per-poly average cannot order a large foreshortened face against
@@ -1872,8 +1787,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * the screen edge (the grazing-angle case); consistent affine matches PSX.
 		 * EXCEPT when the near clipper will split this straddling poly — it needs the
 		 * in-front vertices' precise projections kept intact. */
-		if ((g_PsxPgxpForceAffine ||
-		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
+		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 3))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = 0.0f;
 	}
@@ -1939,8 +1853,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
-		if ((g_PsxPgxpForceAffine ||
-		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
+		if ((vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
 		     vertex[2].ppw <= 0.0f || vertex[3].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 4))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = vertex[3].ppw = 0.0f;
