@@ -1076,7 +1076,13 @@ static unsigned char PsyX_LookupGteAlpha(const void* prim)
 	for (int i = 0; i < 16; i++) {
 		int s = (slot + i) & SZ_TABLE_MASK;
 		if (g_szTable[s].key == key)
-			return g_szTable[s].alpha;
+			/* Gen-validate ALWAYS (unlike the depths lookup's PGXP-gated
+			 * check): arm and consume are same-frame, so a match from an
+			 * earlier gen is a reused packet address, not this prim. Without
+			 * this, a decal's fade alpha from gameplay attached itself to
+			 * whatever landed on that address later -- the load screen drew
+			 * Harry semi-transparent, ghosting over the uncleared background. */
+			return (g_szTable[s].gen == s_pgxpGen) ? g_szTable[s].alpha : 255;
 		if (g_szTable[s].key == 0) break;
 	}
 	return 255;
