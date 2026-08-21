@@ -790,6 +790,35 @@ extern "C" { int g_PsxPgxpWorldDepth = 1; }
  * does per poly. Isolates the precise-vertex projection from everything else
  * that keys on g_PsxUsePgxp. */
 extern "C" { int g_PsxPgxpForceAffine = 0; }
+/* Minimum screen span (px) below which a poly keeps the affine path even with
+ * precise data available. Console PGXPMINSPAN. Two reasons, same place:
+ * perspective correction is invisible on a poly a few pixels across, and the
+ * far field is precisely where the shadow table's value validation goes blind --
+ * many vertices pack to the SAME s16 screen word there, so a lookup can hand a
+ * poly another vertex's W. A wrong W does not move the poly (clip position is
+ * scaled uniformly) but it wrecks the perspective-correct varyings; the fog
+ * amount is one, and a near-vertex W dominating a far quad floods it with that
+ * vertex's fog -- the pale checkerboard on distant roads. Skipping precision
+ * where it cannot help removes the whole exposure. */
+extern "C" { int g_PsxPgxpMinSpanPx = 8; }
+
+static inline int PgxpPolySpanTiny(const GrVertex* v, int n)
+{
+	float minX = v[0].x, maxX = v[0].x;
+	float minY = v[0].y, maxY = v[0].y;
+	int   i;
+
+	for (i = 1; i < n; i++)
+	{
+		if (v[i].x < minX) minX = v[i].x;
+		if (v[i].x > maxX) maxX = v[i].x;
+		if (v[i].y < minY) minY = v[i].y;
+		if (v[i].y > maxY) maxY = v[i].y;
+	}
+
+	return (maxX - minX) < (float)g_PsxPgxpMinSpanPx &&
+	       (maxY - minY) < (float)g_PsxPgxpMinSpanPx;
+}
 /* Writer-side far-push margin M in SZ units (console PGXPWALLBIAS): world
  * geometry is pushed slightly FARTHER so coplanar testers (props against a
  * wall/floor) win LEQUAL without any tester-side bias or tie-rank. */
@@ -1797,7 +1826,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * the screen edge (the grazing-angle case); consistent affine matches PSX.
 		 * EXCEPT when the near clipper will split this straddling poly — it needs the
 		 * in-front vertices' precise projections kept intact. */
-		if ((g_PsxPgxpForceAffine ||
+		if ((g_PsxPgxpForceAffine || PgxpPolySpanTiny(vertex, 3) ||
 		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f || vertex[2].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 3))
 			vertex[0].ppw = vertex[1].ppw = vertex[2].ppw = 0.0f;
@@ -1864,7 +1893,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		PgxpFillVertex(&vertex[3], p3, p3[0], p3[1], ofsX, ofsY);
 		/* Per-poly consistency (see MakeVertexTri): any affine vertex -> whole poly
 		 * affine — unless the near clipper will split this straddling poly. */
-		if ((g_PsxPgxpForceAffine ||
+		if ((g_PsxPgxpForceAffine || PgxpPolySpanTiny(vertex, 4) ||
 		     vertex[0].ppw <= 0.0f || vertex[1].ppw <= 0.0f ||
 		     vertex[2].ppw <= 0.0f || vertex[3].ppw <= 0.0f) &&
 		    !PgxpNearClipEligible(vertex, 4))
