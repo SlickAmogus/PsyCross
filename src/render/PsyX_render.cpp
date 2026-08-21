@@ -712,6 +712,8 @@ int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
 
+extern "C" void GR_MarkTextureNearest(TextureID tex);
+
 extern "C" GLuint GR_ScreenFBO(void)
 {
 	return g_internalFBO;
@@ -2540,6 +2542,7 @@ void GR_GenerateCommonTextures()
 
 #if USE_OPENGL
 	glGenTextures(1, &g_whiteTexture);
+		GR_MarkTextureNearest(g_whiteTexture);
 	{
 		glBindTexture(GL_TEXTURE_2D, g_whiteTexture);
 
@@ -2719,6 +2722,7 @@ int GR_InitialisePSX()
 		// make a special texture
 		// it will be resized later
 		glGenTextures(1, &g_fbTexture);
+		GR_MarkTextureNearest(g_fbTexture);
 		{
 			glBindTexture(GL_TEXTURE_2D, g_fbTexture);
 
@@ -2750,6 +2754,7 @@ int GR_InitialisePSX()
 		
 		// offscreen texture render target
 		glGenTextures(1, &g_offscreenRTTexture);
+		GR_MarkTextureNearest(g_offscreenRTTexture);
 		{
 			glBindTexture(GL_TEXTURE_2D, g_offscreenRTTexture);
 
@@ -2780,6 +2785,8 @@ int GR_InitialisePSX()
 		int i;
 
 		glGenTextures(2, g_vramTexturesDouble);
+		GR_MarkTextureNearest(g_vramTexturesDouble[0]);
+		GR_MarkTextureNearest(g_vramTexturesDouble[1]);
 
 		for(i = 0; i < 2; i++)
 		{
@@ -3332,6 +3339,19 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	 * stray-lines report from the Chinese text, and it would hit Japanese the
 	 * same way. Native paletted art now stays nearest on menu frames, which is
 	 * also what it looks like on hardware. */
+	/* [BILINDIAG] which gate value each texture class actually receives. Text
+	 * still picking up neighbouring glyphs means something IS filtering 2D, and
+	 * reading the code has not found which path -- so record it. */
+	{
+		extern unsigned g_filtSeen32, g_filtSeenClut, g_filtGateSum, g_filtDraws;
+		int gateNow = g_PsxDitherSuppressed
+		                  ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
+		                  : ((texFormat == TF_32_BIT_RGBA || g_cfg_textureFilter > 0) ? 1 : 0);
+		if (texFormat == TF_32_BIT_RGBA) g_filtSeen32++; else g_filtSeenClut++;
+		g_filtGateSum += (unsigned)gateNow;
+		g_filtDraws++;
+	}
+
 	if (u_bilinearFilterLoc != -1)
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
@@ -5525,6 +5545,7 @@ void GR_SwapWindow()
 	 * marker it depends on is actually resolving. */
 	{
 		extern unsigned g_vsHits, g_vsMisses, g_prims3d, g_prims2d;
+		extern unsigned g_filtSeen32, g_filtSeenClut, g_filtGateSum, g_filtDraws;
 		static unsigned s_lastTick = 0;
 		static int      s_lines = 0;
 		unsigned now = SDL_GetTicks();
@@ -5534,11 +5555,14 @@ void GR_SwapWindow()
 			unsigned tot = g_vsHits + g_vsMisses;
 			s_lastTick = now;
 			s_lines++;
-			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d\n",
+			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d tex32=%u texClut=%u gateAvg=%u\n",
 			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
-			        g_prims3d, g_prims2d, g_PsxDitherSuppressed);
+			        g_prims3d, g_prims2d, g_PsxDitherSuppressed,
+			        g_filtSeen32, g_filtSeenClut,
+			        g_filtDraws ? (g_filtGateSum * 100u / g_filtDraws) : 0u);
 			g_vsHits = g_vsMisses = 0;
 			g_prims3d = g_prims2d = 0;
+			g_filtSeen32 = g_filtSeenClut = g_filtGateSum = g_filtDraws = 0;
 		}
 	}
 

@@ -562,6 +562,7 @@ unsigned g_vsHits = 0, g_vsMisses = 0;
 /* Primitives marked as world geometry vs left as 2D, so the gate can be judged
  * by what it actually classifies rather than by reasoning about it. */
 unsigned g_prims3d = 0, g_prims2d = 0;
+unsigned g_filtSeen32 = 0, g_filtSeenClut = 0, g_filtGateSum = 0, g_filtDraws = 0;
 
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
