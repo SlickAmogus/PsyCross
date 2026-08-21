@@ -880,11 +880,16 @@ extern "C" void PsyX_SetNextPrimSz(unsigned short s0, unsigned short s1, unsigne
 	else
 	{
 		uint32_t avg = ((unsigned)s0 + s1 + s2 + s3) >> 2;
-		/* Depth channel: keep the RAW average when PGXP is on — the 64-unit
-		 * quantization existed to force coplanar neighbours into shared depth
-		 * buckets, which the GL_ALWAYS world painter now makes unnecessary.
-		 * Off path keeps the historical quantized value. */
-		avg_q = g_PsxUsePgxp ? avg : ((avg >> 6) << 6);
+		/* Depth channel: keep the RAW average only while the WHOLE depth channel
+		 * is on. The 64-unit quantization exists to force coplanar street layers
+		 * (asphalt / markings / crosswalk) into shared depth buckets so their
+		 * LEQUAL ties resolve by painter order, consistently. Un-quantizing was
+		 * keyed on g_PsxUsePgxp alone, NOT on g_PsxPgxpWorldDepth -- so with the
+		 * depth channel off, near-coplanar quads got raw averages that differ by
+		 * a few units, and which layer won flipped per quad at distance: the
+		 * checkerboard on far roads with PGXP on. PGXPWORLDDEPTH could not
+		 * affect it, which is exactly what testing showed. */
+		avg_q = (g_PsxUsePgxp && g_PsxPgxpWorldDepth) ? avg : ((avg >> 6) << 6);
 		// Calibrate with unquantised real max so character/item GL depths stay accurate.
 		mx = s0 > s1 ? s0 : s1;
 		if (s2 > mx) mx = s2;
