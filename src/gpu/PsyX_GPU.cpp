@@ -801,6 +801,11 @@ extern "C" { int g_PsxPgxpForceAffine = 0; }
  * vertex's fog -- the pale checkerboard on distant roads. Skipping precision
  * where it cannot help removes the whole exposure. */
 extern "C" { int g_PsxPgxpMinSpanPx = 0; }
+/* Where the world-mesh position snap begins, in SZ units (Q8: 256 = one world
+ * unit). Console PGXPSNAP takes WORLD units. Below this depth, world vertices
+ * keep full sub-pixel PGXP positions; from here the precise xy is blended
+ * toward the s16 grid, reaching a full snap at twice this depth. */
+extern "C" { int g_PsxPgxpSnapStartSz = 15 * 256; }
 
 static inline int PgxpPolySpanTiny(const GrVertex* v, int n)
 {
@@ -1154,47 +1159,6 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		else                             s_dbgParseHitNone++;
 	}
 
-	/* World-mesh position snap: the distant-road fix, without thresholds.
-	 *
-	 * The checkerboard and its "crack that moves with the setting" were both
-	 * SEAMS: a poly that fell to affine (a shadow-table miss at any vertex)
-	 * renders shared edges at the s16 coordinates while its precise neighbour
-	 * renders them at floats a sub-pixel away, and the gap shows the clear
-	 * colour. Near the camera that is a hairline; at distance the quads shrink
-	 * to a few pixels while the gap does not, so gaps dominate and tile into
-	 * the pale checkerboard. Any span threshold just relocates the mixed-path
-	 * boundary -- which is exactly what raising PGXPMINSPAN showed.
-	 *
-	 * On the STATIC WORLD, what PGXP visibly buys is perspective-correct
-	 * interpolation, and that comes from W -- not from the sub-pixel xy. So
-	 * FLAT prims keep their precise W and take their POSITIONS from the same
-	 * s16 coordinates the affine path uses: every world poly, precise or
-	 * fallen back, now places shared vertices identically, and a seam is
-	 * structurally impossible. Characters/items are untouched (not FLAT) and
-	 * keep full sub-pixel PGXP.
-	 *
-	 * PGXPMINSPAN survives as an optional extra guard (default 0 = off). */
-	if (kind == SZ_KIND_FLAT && g_PsxUsePgxp)
-	{
-		int nv = isQuad ? 4 : 3;
-		int vi;
-
-		for (vi = 0; vi < nv; vi++)
-		{
-			if (vertex[vi].ppw > 0.0f)
-			{
-				vertex[vi].ppx = vertex[vi].x;
-				vertex[vi].ppy = vertex[vi].y;
-			}
-		}
-
-		if (g_PsxPgxpMinSpanPx > 0 && PgxpPolySpanTiny(vertex, nv))
-		{
-			for (vi = 0; vi < nv; vi++)
-				vertex[vi].ppw = 0.0f;
-		}
-	}
-
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
 		sv0 = (float)sz[0]; sv1 = (float)sz[1];
@@ -1206,6 +1170,47 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
+
+	/* World-mesh position snap, DEPTH-RAMPED.
+	 *
+	 * The distant checkerboard and the moving crack were mixed-path seams:
+	 * precise and affine polys disagree about shared edges by a sub-pixel,
+	 * invisible up close, gap-dominant when quads shrink to a few pixels. A
+	 * full snap fixed the far field but returned PSX position-rounding to the
+	 * NEAR world, where PGXP's sub-pixel placement is its visible benefit.
+	 *
+	 * So the snap follows depth: below the start depth vertices keep full
+	 * precise xy; from there the xy blends toward the s16 grid, fully snapped
+	 * at twice the start. The factor comes from the poly's own sz_avg, and
+	 * neighbouring world polys sit at near-identical depths, so shared
+	 * vertices land within hundredths of a pixel of each other -- a hard
+	 * threshold would just have manufactured a new seam ring at its boundary,
+	 * which is exactly what the span experiment demonstrated. W is never
+	 * touched, so perspective-correct texturing holds at every distance.
+	 * FLAT is armed solely by Gfx_MeshDraw: characters and items keep full
+	 * sub-pixel PGXP everywhere. */
+	if (kind == SZ_KIND_FLAT && g_PsxUsePgxp && g_PsxPgxpSnapStartSz > 0)
+	{
+		float t = (sz_avg - (float)g_PsxPgxpSnapStartSz) / (float)g_PsxPgxpSnapStartSz;
+
+		if (t > 0.0f)
+		{
+			int nv = isQuad ? 4 : 3;
+			int vi;
+
+			if (t > 1.0f)
+				t = 1.0f;
+
+			for (vi = 0; vi < nv; vi++)
+			{
+				if (vertex[vi].ppw > 0.0f)
+				{
+					vertex[vi].ppx += (vertex[vi].x - vertex[vi].ppx) * t;
+					vertex[vi].ppy += (vertex[vi].y - vertex[vi].ppy) * t;
+				}
+			}
+		}
+	}
 
 	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
 	 * per-poly average cannot order a large foreshortened face against
