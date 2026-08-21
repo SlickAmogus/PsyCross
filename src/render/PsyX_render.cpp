@@ -1739,33 +1739,46 @@ int g_PsxFogToBlack = 0;
  * from contributing colour at all, and the fragment is only discarded when no
  * tap is opaque. */
 #define GPU_BILINEAR_SAMPLE_FUNC \
+	/* One tap, weighted by its own opacity. PSX CLUT entry 0 is transparent;
+	 * blending its colour like any other tap drags black into every edge, so
+	 * a transparent tap contributes nothing and only adds to coverage when
+	 * it is opaque. */\
 	"	vec4 TapWeighted(vec2 idx, float w, inout float cov) {\n"\
 	"		vec2 rg = samplePSX(idx);\n"\
 	"		float o = (rg.x + rg.y > 0.0) ? w : 0.0;\n"\
 	"		cov += o;\n"\
 	"		return lut(rg) * o;\n"\
 	"	}\n"\
-	"	vec4 BilinearTextureSample(vec2 P) {\n"\
-	/* Taps bracket the sample point: a texel's colour belongs at its
-	 * CENTRE, so the four contributors to P are the texels whose centres
-	 * surround it. */\
+	/* Bilinear as premultiplied colour plus coverage, WITHOUT discarding.
+	 * Anisotropy layers many of these, and a discard inside that loop would
+	 * throw the whole fragment away the moment one tap landed on a
+	 * transparent texel -- which is what reduced characters to silhouettes.
+	 * The discard belongs at the end, once total coverage is known. */\
+	"	vec4 BilinearCov(vec2 P, inout float cov) {\n"\
 	"		vec2 tapP = P - 0.5;\n"\
 	"		vec2 f = fract(tapP);\n"\
 	"		vec2 p = floor(tapP);\n"\
-	"		float cov = 0.0;\n"\
 	"		vec4 c = TapWeighted(p, (1.0 - f.x) * (1.0 - f.y), cov);\n"\
 	"		c += TapWeighted(p + vec2(1.0, 0.0), f.x * (1.0 - f.y), cov);\n"\
 	"		c += TapWeighted(p + vec2(0.0, 1.0), (1.0 - f.x) * f.y, cov);\n"\
 	"		c += TapWeighted(p + vec2(1.0, 1.0), f.x * f.y, cov);\n"\
+	"		return c;\n"\
+	"	}\n"\
+	"	vec4 BilinearTextureSample(vec2 P) {\n"\
+	"		float cov = 0.0;\n"\
+	"		vec4 c = BilinearCov(P, cov);\n"\
 	"		if (cov <= 0.0) { discard; }\n"\
 	"		return c / cov;\n"\
 	"	}\n"\
-	/* Anisotropic for CLUT textures. Hardware anisotropy is unavailable for
-	 * the same reason as hardware bilinear, so the footprint is walked by
-	 * hand: several bilinear taps spread along the major axis of the
-	 * texture-coordinate derivative. That is the axis a surface seen at a
-	 * grazing angle is stretched along -- distant floors and walls -- and
-	 * averaging across it is what removes their shimmer. */\
+	/* Anisotropic for CLUT textures: several bilinear taps along the major
+	 * axis of the texture-coordinate derivative, the axis a surface seen at a
+	 * grazing angle is stretched along.
+	 * 
+	 * The step is CLAMPED. PSX texture pages sit side by side in VRAM with no
+	 * gutter, so a tap that walks past the page edge reads the neighbouring
+	 * page and returns unrelated colours -- the stray bright fringes on a
+	 * character. Bounding the total offset to a few texels keeps the footprint
+	 * inside the page for the small textures this game uses. */\
 	"	vec4 AnisoTextureSample(vec2 P) {\n"\
 	"		vec2 dPdx = dFdx(P);\n"\
 	"		vec2 dPdy = dFdy(P);\n"\
@@ -1775,18 +1788,20 @@ int g_PsxFogToBlack = 0;
 	"		float mn = min(lx, ly);\n"\
 	"		float ratio = (mn > 0.0001) ? (max(lx, ly) / mn) : 1.0;\n"\
 	"		float taps = clamp(floor(ratio), 1.0, u_anisoTaps);\n"\
-	"		if (taps <= 1.0) { return BilinearTextureSample(P); }\n"\
+	"		float span = length(major) * (taps - 1.0);\n"\
+	"		if (taps <= 1.0 || span <= 0.0) { return BilinearTextureSample(P); }\n"\
+	"		if (span > 4.0) { major *= 4.0 / span; }\n"\
 	"		vec4 acc = vec4(0.0);\n"\
-	"		float n = 0.0;\n"\
-	/* GLSL ES needs a constant loop bound, so the maximum is fixed at 16
-	 * and the unused iterations are skipped. */\
+	"		float cov = 0.0;\n"\
+	/* GLSL ES needs a constant loop bound; unused iterations are skipped.
+	 * GLSL ES needs a constant loop bound; unused iterations are skipped. */\
 	"		for (int i = 0; i < 16; i++) {\n"\
 	"			if (float(i) >= taps) break;\n"\
 	"			float t = (float(i) + 0.5) / taps - 0.5;\n"\
-	"			acc += BilinearTextureSample(P + major * t);\n"\
-	"			n += 1.0;\n"\
+	"			acc += BilinearCov(P + major * t, cov);\n"\
 	"		}\n"\
-	"		return acc / n;\n"\
+	"		if (cov <= 0.0) { discard; }\n"\
+	"		return acc / cov;\n"\
 	"	}\n"
 
 #define GPU_NEAREST_SAMPLE_FUNC \
