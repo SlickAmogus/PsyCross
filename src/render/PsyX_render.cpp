@@ -80,6 +80,14 @@ float g_PsxPixelAspect = 1.0f;
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
 float g_PsxWorldVScale = 0.872f;
+/* Vertical FOV scale for the 3D world DURING CUTSCENES, separate from gameplay.
+ * The 0.872 gameplay crop is a fixed-gameplay-camera correction; cutscene
+ * cameras have their own framing and DuckStation shows them at full vertical
+ * FOV, so cropping them to 0.872 zoomed the shot and pushed characters' heads
+ * off the top (reported vs emulator). 1.0 = full vertical (matches DuckStation);
+ * the 2D UI pass already renders full-vertical independently, so subtitles and
+ * letterbox bars are unaffected. Console `cutfov <n>`. */
+float g_PsxCutsceneVScale = 1.0f;
 /* Vertical view shift (amount, PSX screen-Y units) for FIXED-ANGLE camera shots, which
  * frame the top of the scene clipped vs PSX (e.g. a medkit off the top). The GAME applies
  * it (MainLoop, game_main.c) by shifting the GTE projection center down (SetGeomOffset)
@@ -3776,7 +3784,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * ortho so it isn't scaled/clipped off the bottom. The FIX_ANG framing shift
 				 * (g_PsxWorldVShift) is applied at the GTE projection center by the game, not
 				 * here — an ortho-window shift reveals rows overlay prims never cover. */
-				const float vscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldVScale;
+				const float vscale = g_PsxUIOrthoPass ? 1.0f
+				                   : (g_PsxCutsceneActive ? g_PsxCutsceneVScale : g_PsxWorldVScale);
 				orthoTop = 0.0f;
 				orthoBot = psxH * vscale;
 			}
