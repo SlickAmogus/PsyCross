@@ -47,6 +47,11 @@ u_short PsyX_Pad_UpdateKeyboardInput();
 void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
 static int PsyX_Pad_MergeAllControllers(LPPADRAW pad);
 
+/* The controller rumble follows: slot 0 by default, then whichever pad was last
+ * actually used (button or stick). Rumble goes ONLY to this one, so a second
+ * idle controller never buzzes. */
+static int g_activeControllerSlot = 0;
+
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
 {
@@ -241,13 +246,16 @@ void PsyX_Pad_InternalPadUpdates()
 				// Player 1: any connected controller drives it (single-player).
 				anyAttached = PsyX_Pad_MergeAllControllers(pad);
 
-				// P1 rumble reaches every attached pad so it works regardless of
-				// which one is being used.
+				// P1 rumble goes to the ACTIVE pad only (last one used), so an
+				// idle second controller never buzzes.
 				if (g_actBufTable[i] && g_actBufLen[i] > 0)
 				{
-					for (int j = 0; j < MAX_CONTROLLERS; j++)
-						if (g_controllers[j].gc && SDL_GameControllerGetAttached(g_controllers[j].gc))
-							PsyX_Pad_Vibrate(0, j, g_actBufTable[i], g_actBufLen[i]);
+					int a = g_activeControllerSlot;
+					if (a < 0 || a >= MAX_CONTROLLERS ||
+					    !g_controllers[a].gc || !SDL_GameControllerGetAttached(g_controllers[a].gc))
+						a = 0;
+					if (g_controllers[a].gc && SDL_GameControllerGetAttached(g_controllers[a].gc))
+						PsyX_Pad_Vibrate(0, a, g_actBufTable[i], g_actBufLen[i]);
 				}
 			}
 			else
@@ -499,6 +507,13 @@ static int PsyX_Pad_MergeAllControllers(LPPADRAW pad)
 		if (abs(ly) > abs(bestLY)) bestLY = ly;
 		if (abs(rx) > abs(bestRX)) bestRX = rx;
 		if (abs(ry) > abs(bestRY)) bestRY = ry;
+
+		/* Follow the pad that is actually being used, so rumble targets it. A
+		 * pressed button (ret != all-released) or a stick well off centre marks
+		 * this pad active; an idle pad leaves the current choice alone. */
+		if (ret != 0xFFFF ||
+		    abs(lx) > 12000 || abs(ly) > 12000 || abs(rx) > 12000 || abs(ry) > 12000)
+			g_activeControllerSlot = i;
 	}
 
 	if (!any)
