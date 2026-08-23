@@ -757,7 +757,11 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 		return s_resolveFBO;
 	}
 
-	return g_internalFBO;
+	/* Same fallback as GR_ScreenFBO: with no internal target this means "read
+	 * the screen", which is not framebuffer 0 on iOS. Reading 0 there is not an
+	 * error the caller sees -- the blit just produces nothing, which is how the
+	 * pause/map freeze capture came back as a flat grey field. */
+	return g_internalFBO ? g_internalFBO : (GLuint)PSYX_DEFAULT_FBO;
 }
 
 /* Where the internal target lands inside the real window.
@@ -1371,6 +1375,14 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 	g_presentWidth  = realW;
 	g_presentHeight = realH;
 
+	/* Never on iOS. The internal target exists so borderless can render at a
+	 * chosen resolution and stretch to the desktop; a phone has no window mode
+	 * and no resolution to choose, and g_windowWidth/Height there are the
+	 * panel's real drawable, published back into the config at startup. Letting
+	 * a hand-edited config.cfg set fullscreen = 2 would point the scene at a
+	 * 640x480 target and stretch it, for no gain -- and the row that would let
+	 * anyone pick that is already compiled out of the iOS options menu. */
+#if !defined(PSYX_IOS)
 	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
 	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
 	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
@@ -1380,6 +1392,7 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 
 		return;
 	}
+#endif
 
 	GR_DestroyInternalTarget();
 	g_windowWidth  = realW;
