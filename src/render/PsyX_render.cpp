@@ -12,10 +12,17 @@
 
 #include "PsyX/PsyX_render.h"
 #include "PsyX/PsyX_globals.h"
+#include "PsyX/PsyX_backend.h"
 #include "PsyX/util/timer.h"
+
+#if defined(_WIN32) && defined(RENDERER_OGL)
+/* For the HWND that the ANGLE/EGL surface is created against. */
+#   include <SDL_syswm.h>
+#endif
 
 #include <assert.h>
 #include <string.h>
+#include <stdlib.h>
 
 #ifdef _WIN32
 
@@ -80,6 +87,10 @@ float g_PsxWorldVScale = 0.872f;
  * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
  * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
 float g_PsxWorldVShift = 20.0f;
+/* Same units, but for authored (cutscene / letterboxed) shots, which run at the
+ * clean 0 baseline rather than inheriting the gameplay shift. Console `cutshift`.
+ * Default 0 = today's framing exactly. */
+float g_PsxCutsceneVShift = 0.0f;
 int   g_PsxFixedCamActive = 0;
 /* Set by the game while a cutscene is active. Cutscenes frame themselves with letterbox
  * bars, so the gameplay vertical crop (g_PsxWorldVScale) is skipped while this is set —
@@ -148,33 +159,32 @@ extern "C" { float g_cfg_renderScale = 1.0f; }
  * regardless of what is on screen. */
 extern "C" { int g_cfg_lowEnd = 0; }
 
-static GLuint    g_scaleFBO = 0;
-static TextureID g_scaleTex = (TextureID)-1;
-static GLuint    g_scaleDepth = 0;
-static int       g_scaleW = 0, g_scaleH = 0;
-static int       g_scaleActive = 0;
+/* render_scale: compose the scene into a smaller target and stretch it at
+ * present. That is the same thing borderless already does with the internal
+ * target, so this drives THAT rather than keeping a second FBO of its own --
+ * every bind in this file asks GR_ScreenFBO for the answer, and two owners
+ * would have fought over it. */
+int  GR_SetInternalResolution(int w, int h);
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+extern GLuint g_internalFBO;
 
-/* The framebuffer the frame is being composed into: the scaled offscreen target
- * when scaling, otherwise the window. Anything that resolves, captures or
- * re-presents "the backbuffer" must ask this rather than assume 0.
- *
- * PSYX_DEFAULT_FBO rather than a literal 0: on iOS SDL composes into its own
- * framebuffer object and 0 is not the screen. Compile-time 0 everywhere else. */
-GLuint GR_ActiveFramebuffer(void)
-{
-	return g_scaleActive ? g_scaleFBO : (GLuint)PSYX_DEFAULT_FBO;
-}
-
-/* Recompute the render size from the surface and the scale setting. */
 void GR_ApplyRenderScale(void)
 {
 	float s = g_cfg_renderScale;
 	int   w, h;
 
+	if (g_surfaceWidth <= 0 || g_surfaceHeight <= 0)
+		return;
+
 	if (s <= 0.0f || s > 1.0f)
 		s = 1.0f;
 
-	if (g_surfaceWidth <= 0 || g_surfaceHeight <= 0)
+	/* Present size first: this is also where borderless decides whether it wants
+	 * the internal target for its own chosen resolution. If it took it, leave it
+	 * alone -- the player asked for that resolution explicitly. */
+	GR_ApplyPresentSize(g_surfaceWidth, g_surfaceHeight);
+
+	if (s >= 0.999f || g_internalFBO != 0)
 		return;
 
 	/* Even dimensions keep the halved PSX buffer maths and the 2:1 blits from
@@ -184,14 +194,11 @@ void GR_ApplyRenderScale(void)
 	if (w < 256) w = 256;
 	if (h < 192) h = 192;
 
-	if (s >= 0.999f)
+	if (GR_SetInternalResolution(w, h))
 	{
-		w = g_surfaceWidth;
-		h = g_surfaceHeight;
+		g_windowWidth  = w;
+		g_windowHeight = h;
 	}
-
-	g_windowWidth  = w;
-	g_windowHeight = h;
 }
 
 int g_dbg_wireframeMode = 0;
@@ -229,6 +236,19 @@ int g_cfg_pgxpZBuffer = 1;
  * (config key: use_pgxp). */
 int g_PsxUsePgxp = 0;
 int g_cfg_bilinearFiltering = 0;
+
+/* Does anything need the per-vertex view-space capture this frame?
+ *
+ * The capture is what stamps a_normal.y = 1.0 on vertices the GTE projected,
+ * and that marker is the renderer's only trustworthy "this is world geometry"
+ * signal. The flashlight cone and PGXP already required it; bilinear now does
+ * too, because without it every vertex reads as 2D and the 3D world silently
+ * stays point-sampled. Kept as one predicate so the five capture sites in
+ * PsyX_GPU/PsyX_GTE cannot drift apart. */
+extern "C" int GR_NeedViewSpaceData(void)
+{
+	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_bilinearFiltering) ? 1 : 0;
+}
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
 int g_cfg_menuFilter = 0;
@@ -372,6 +392,10 @@ extern "C" { extern unsigned g_PsyX_VramUploads; extern unsigned g_PsyX_DrawCall
 
 /* PC port: runtime gate for framebuffer→VRAM feedback. See PsyX_render.h. */
 int g_PsxSkipFramebufferStore = 0;
+/* PC port: force the GL error sweep on for any backend (it is automatic on
+ * GLES/ANGLE, where silent failures are the norm). */
+extern "C" { int g_dbg_glDiag = 0; }
+void GR_DiagGLError(const char* where);
 
 /* PC port: framebuffer feedback is LOADING-SCREEN ONLY for now. The generic
  * store also drives the per-map dream/ghosting overlays (map6 otherworld,
@@ -533,7 +557,15 @@ void PBO_Download(GrPBO* pbo)
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
 
 #if defined(RENDERER_OGL)
-		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		/* glGetTexImage pulls the whole bound texture; ES 3.0 has no such call,
+		 * so there we read the equivalent region out of the bound framebuffer
+		 * instead. Callers always have both bound to the same image, which is
+		 * what makes the two interchangeable (and is the path Android already
+		 * ships). The trailing 0 is an offset into the bound pack buffer. */
+		if (g_grCaps.getTexImage)
+			glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		else
+			glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);
 #else
 		glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);   /* When a GL_PIXEL_PACK_BUFFER is bound, the last 0 is used as offset into the buffer to read into. */
 #endif
@@ -544,7 +576,14 @@ void PBO_Download(GrPBO* pbo)
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo->pbos[pbo->dx]);
 
 #if defined(RENDERER_OGL)
-		ptr = (unsigned char*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		/* ES 3.0 kept only the ranged map. Same semantics for a full-buffer
+		 * read, so the asynchronous double-buffered readback is preserved
+		 * rather than degraded to a synchronous glReadPixels-to-CPU. */
+		if (g_grCaps.mapBuffer)
+			ptr = (unsigned char*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+		else
+			ptr = (unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, pbo->nbytes, GL_MAP_READ_BIT);
+
 		if (NULL != ptr)
 		{
 			memcpy(pbo->pixels, ptr, pbo->nbytes);
@@ -554,7 +593,10 @@ void PBO_Download(GrPBO* pbo)
 			eprintwarn("Failed to map the buffer\n");
 
 		/* Trigger the next read. */
-		glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		if (g_grCaps.getTexImage)
+			glGetTexImage(GL_TEXTURE_2D, 0, pbo->fmt, GL_UNSIGNED_BYTE, 0);
+		else
+			glReadPixels(0, 0, pbo->width, pbo->height, pbo->fmt, GL_UNSIGNED_BYTE, 0);
 #else
 		glReadPixels(0, 0, pbo->width, pbo->height, GL_RGBA, GL_UNSIGNED_BYTE, pbo->pixels);
 #endif
@@ -583,6 +625,207 @@ GLuint		g_glVertexBuffer[2];
 int			g_curVertexBuffer = 0;
 
 GLuint		g_glBlitFramebuffer;
+
+/* Internal render target: borderless renders the scene at the CHOSEN resolution
+ * and stretches it to the desktop, instead of ignoring the resolution and
+ * running at desktop size.
+ *
+ * Everything in this renderer that means "the screen" binds framebuffer 0, so
+ * the whole scene is redirected simply by handing those sites GR_ScreenFBO()
+ * instead. It returns 0 whenever the target is inactive, which is every mode
+ * except borderless-with-a-different-resolution -- so the stock path is
+ * bit-identical and a failed allocation degrades to it automatically.
+ *
+ * g_windowWidth/Height stay the RENDER size (all viewport, scissor and aspect
+ * maths already key off them and need no changes); g_presentWidth/Height are
+ * the real window, used only by the final blit. */
+GLuint g_internalFBO      = 0;
+static GLuint s_internalColorTex = 0;
+static GLuint s_internalColorRbo = 0;
+static int    s_internalSamples = 0;
+static GLuint s_internalDepthRbo = 0;
+static int    s_internalW = 0, s_internalH = 0;
+int g_presentWidth = 0, g_presentHeight = 0;
+
+/* What the launcher asked for, and which display mode. The window itself cannot
+ * be trusted for this: a borderless window is created at desktop size and SDL
+ * then fires a resize event with the desktop size, which is exactly how the
+ * chosen resolution used to get lost. */
+int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
+
+static GLuint s_resolveFBO = 0, s_resolveTex = 0;
+static int    s_suppressWindowMsaa = 0;
+
+extern "C" GLuint GR_ScreenFBO(void)
+{
+	return g_internalFBO;
+}
+
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+
+/* The scene target as a READ source.
+ *
+ * Identical to GR_ScreenFBO() unless the scene target is multisampled, in which
+ * case reading it directly is illegal -- so it is resolved 1:1 into the mirror
+ * and the mirror is returned. Every read of the screen goes through here, which
+ * is what makes a multisample scene target survive the freeze capture and the
+ * framebuffer-feedback paths. */
+extern "C" GLuint GR_ScreenReadFBO(void)
+{
+	if (s_internalSamples > 0 && s_resolveFBO != 0)
+	{
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+		                  0, 0, s_internalW, s_internalH,
+		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		return s_resolveFBO;
+	}
+
+	return g_internalFBO;
+}
+
+/* Where the internal target lands inside the real window.
+ *
+ * Stretch to fill by default. When pillarboxing is on, preserve the render
+ * aspect instead and centre it -- so a 4:3 render scaled to a 16:9 desktop gets
+ * bars rather than being distorted, in borderless exactly as it would in
+ * exclusive fullscreen. Shared with PsyX_MapWindowToViewport so the pointer
+ * cannot disagree with what is on screen. */
+static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
+{
+	int x = 0, y = 0, w = g_presentWidth, h = g_presentHeight;
+	const bool wantPillarbox =
+		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+
+	if (wantPillarbox && s_internalW > 0 && s_internalH > 0 && h > 0)
+	{
+		const float srcAspect = (float)s_internalW / (float)s_internalH;
+		const float dstAspect = (float)w / (float)h;
+
+		if (dstAspect > srcAspect)
+		{
+			w = (int)(h * srcAspect + 0.5f);
+			x = (g_presentWidth - w) / 2;
+		}
+		else if (dstAspect < srcAspect)
+		{
+			h = (int)(w / srcAspect + 0.5f);
+			y = (g_presentHeight - h) / 2;
+		}
+	}
+
+	*outX = x; *outY = y; *outW = w; *outH = h;
+}
+
+void GR_DestroyInternalTarget(void)
+{
+	if (s_internalColorTex) { glDeleteTextures(1, &s_internalColorTex); s_internalColorTex = 0; }
+	if (s_internalColorRbo) { glDeleteRenderbuffers(1, &s_internalColorRbo); s_internalColorRbo = 0; }
+	if (s_resolveTex)       { glDeleteTextures(1, &s_resolveTex); s_resolveTex = 0; }
+	if (s_resolveFBO)       { glDeleteFramebuffers(1, &s_resolveFBO); s_resolveFBO = 0; }
+	s_internalSamples = 0;
+	if (s_internalDepthRbo) { glDeleteRenderbuffers(1, &s_internalDepthRbo); s_internalDepthRbo = 0; }
+	if (g_internalFBO)      { glDeleteFramebuffers(1, &g_internalFBO); g_internalFBO = 0; }
+	s_internalW = s_internalH = 0;
+}
+
+/* Returns 1 when the scene should render into the internal target at w x h. */
+int GR_SetInternalResolution(int w, int h)
+{
+	GLenum st;
+
+	if (w <= 0 || h <= 0)
+	{
+		GR_DestroyInternalTarget();
+		return 0;
+	}
+
+	if (g_internalFBO != 0 && s_internalW == w && s_internalH == h)
+		return 1;
+
+	GR_DestroyInternalTarget();
+
+	/* Multisample the scene target when MSAA is on, so borderless keeps its
+	 * antialiasing, and resolve into a single-sample MIRROR that every read goes
+	 * through (GR_ScreenReadFBO). Reading a multisample framebuffer is illegal,
+	 * and the freeze capture and framebuffer-feedback paths do read the scene
+	 * target -- that is what black-screened the first attempt.
+	 *
+	 * Desktop GL only. There the read-back helper uses glGetTexImage on its own
+	 * texture, so no read ever touches the scene target; on GLES it falls back to
+	 * glReadPixels from the bound framebuffer, which would be the multisample
+	 * target. Rather than guess at that path on ANGLE, GLES keeps the
+	 * single-sample target and the existing "MSAA off in borderless" notice. */
+	s_internalSamples = (g_cfg_msaaSamples > 0 && !g_grIsGLES) ? g_cfg_msaaSamples : 0;
+
+	if (s_internalSamples > 0)
+	{
+		glGenRenderbuffers(1, &s_internalColorRbo);
+		glBindRenderbuffer(GL_RENDERBUFFER, s_internalColorRbo);
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_RGBA8, w, h);
+		glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	}
+
+	glGenTextures(1, &s_internalColorTex);
+	glBindTexture(GL_TEXTURE_2D, s_internalColorTex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenRenderbuffers(1, &s_internalDepthRbo);
+	glBindRenderbuffer(GL_RENDERBUFFER, s_internalDepthRbo);
+	if (s_internalSamples > 0)
+		glRenderbufferStorageMultisample(GL_RENDERBUFFER, s_internalSamples, GL_DEPTH24_STENCIL8, w, h);
+	else
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+	/* The scene target. Multisample colour when AA is on; the texture created
+	 * above then becomes the resolve mirror instead of the scene's own colour. */
+	glGenFramebuffers(1, &g_internalFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	if (s_internalSamples > 0)
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, s_internalColorRbo);
+	else
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
+
+	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	if (st != GL_FRAMEBUFFER_COMPLETE)
+	{
+		eprintwarn("internal render target %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
+		GR_DestroyInternalTarget();
+		return 0;
+	}
+
+	if (s_internalSamples > 0)
+	{
+		glGenFramebuffers(1, &s_resolveFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, s_resolveFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
+		st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+		if (st != GL_FRAMEBUFFER_COMPLETE)
+		{
+			eprintwarn("internal resolve mirror %dx%d incomplete (0x%04X); rendering at window size\n", w, h, (unsigned)st);
+			GR_DestroyInternalTarget();
+			return 0;
+		}
+	}
+
+	s_internalW = w;
+	s_internalH = h;
+	eprintf("*internal render target: %dx%d, stretched to the window\n", w, h);
+	return 1;
+}
 GrPBO		g_glFramebufferPBO;
 
 GLuint		g_glVRAMFramebuffer;
@@ -592,10 +835,73 @@ GrPBO		g_glOffscreenPBO;
 
 #endif
 
+/* Resolve g_cfg_renderBackend into something this machine can actually provide,
+ * and prepare the environment for it. Runs BEFORE the window exists, because
+ * ANGLE reads ANGLE_DEFAULT_PLATFORM when libEGL creates its display and SDL
+ * decides GL-vs-ES from the attributes set before SDL_CreateWindow.
+ *
+ * Anything unavailable degrades to native GL rather than failing: a config
+ * asking for Vulkan on a box with no ANGLE must still boot the game. */
+static void GR_ResolveBackend(void)
+{
+#if defined(RENDERER_OGL)
+	int requested = g_cfg_renderBackend;
+
+	if (requested == PSYX_BACKEND_AUTO)
+	{
+		/* Deliberately conservative: native GL is the path with years of
+		 * testing behind it, so "auto" does NOT quietly move players onto a
+		 * translator. It only exists so a future build can flip the default. */
+		requested = PSYX_BACKEND_GL;
+	}
+
+	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
+	{
+		eprintwarn("Render backend '%s' needs ANGLE (libEGL.dll + libGLESv2.dll) next to the game; falling back to native OpenGL\n",
+			PsyX_Backend_GetName(requested));
+		requested = PSYX_BACKEND_GL;
+	}
+
+	g_grActiveBackend = requested;
+	g_grIsGLES = (requested == PSYX_BACKEND_GLES || PsyX_Backend_IsTranslated(requested)) ? 1 : 0;
+
+	/* Translated backends do NOT ask SDL for a GL context at all — PsyCross
+	 * builds the EGL display itself in GR_InitialiseGLContext so it can pass
+	 * ANGLE the platform attributes that pick D3D11 vs Vulkan. Only a plain
+	 * 'gles' request goes through SDL, where the native driver's ES context is
+	 * a perfectly good answer. */
+	if (!PsyX_Backend_IsTranslated(requested) && g_grIsGLES)
+	{
+		/* Must be set before SDL_CreateWindow: SDL picks WGL vs EGL from the
+		 * profile mask while choosing the window's pixel format, not later when
+		 * the context is created. */
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	}
+
+	if (g_grActiveBackend != PSYX_BACKEND_GL)
+		eprintf("*Render backend: %s\n", PsyX_Backend_GetDescription(g_grActiveBackend));
+#else
+	/* Fixed-target builds (Android/iOS/RPi/web) have exactly one context type. */
+	g_grActiveBackend = PSYX_BACKEND_GLES;
+	g_grIsGLES = 1;
+#endif
+}
+
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+
+#if defined(RENDERER_OGL)
+	/* A window created with SDL_WINDOW_OPENGL gets an SDL-chosen pixel format
+	 * for an SDL-owned GL context. On the translated backends the context comes
+	 * from our own EGL display instead, and ANGLE wants a plain window to make
+	 * its swapchain against, so the flag is dropped there. */
+	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
+		windowFlags &= ~SDL_WINDOW_OPENGL;
+#endif
 
 #if defined(__ANDROID__)
 	windowFlags |= SDL_WINDOW_FULLSCREEN;
@@ -690,28 +996,113 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 
 #elif defined(RENDERER_OGL)
 
-	int major_version = 3;
-	int minor_version = 3;
-	int profile = SDL_GL_CONTEXT_PROFILE_CORE;
-
-	// find best OpenGL version
-	do
+	/* Translated backends: build the EGL display ourselves against SDL's window
+	 * so ANGLE can be told which device to use. Everything after this point —
+	 * the whole GR_* renderer — is unaware of the difference. */
+	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
 	{
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major_version);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor_version);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+		void* nativeWindow = NULL;
+#if defined(_WIN32)
+		SDL_SysWMinfo wmInfo;
+		SDL_VERSION(&wmInfo.version);
+		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
+			nativeWindow = (void*)wmInfo.info.win.window;
+#endif
 
-		if (SDL_GL_CreateContext(g_window))
-			break;
-	
-		minor_version--;
-		
-	} while (minor_version >= 0);
+		if (!PsyX_Angle_Create(nativeWindow, g_grActiveBackend, g_cfg_msaaSamples))
+		{
+			eprintwarn("Backend '%s' could not be initialised through ANGLE; falling back to native OpenGL\n",
+				PsyX_Backend_GetName(g_grActiveBackend));
 
-	if (minor_version == -1)
+			SDL_DestroyWindow(g_window);
+			g_window = NULL;
+
+			g_grIsGLES = 0;
+			g_grActiveBackend = PSYX_BACKEND_GL;
+			SDL_GL_ResetAttributes();
+			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
+			if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
+			{
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
+			}
+
+			windowFlags |= SDL_WINDOW_OPENGL;
+			g_window = SDL_CreateWindow(windowName, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, g_windowWidth, g_windowHeight, windowFlags);
+			if (g_window == NULL)
+			{
+				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
+				return 0;
+			}
+			SDL_ShowWindow(g_window);
+			SDL_RaiseWindow(g_window);
+		}
+	}
+
+	/* An explicit 'gles' request still goes through SDL: the profile attributes
+	 * were set in GR_ResolveBackend, before SDL_CreateWindow, because that is
+	 * where SDL decides between WGL and EGL. */
+	if (g_grIsGLES && !PsyX_Angle_Active())
 	{
-		eprinterr("Failed to initialise - OpenGL 3.x is not supported. Please update video drivers.\n");
-		return 0;
+		if (!SDL_GL_CreateContext(g_window))
+		{
+			eprintwarn("Backend '%s' could not create an OpenGL ES 3.0 context (%s); falling back to native OpenGL\n",
+				PsyX_Backend_GetName(g_grActiveBackend), SDL_GetError());
+
+			/* The window was created with an ES pixel format, so it cannot be
+			 * reused for a desktop GL context — tear it down and start over. */
+			SDL_DestroyWindow(g_window);
+			g_window = NULL;
+
+			g_grIsGLES = 0;
+			g_grActiveBackend = PSYX_BACKEND_GL;
+			SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "0");
+			SDL_GL_ResetAttributes();
+			SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
+			if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
+			{
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+				SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
+			}
+
+			g_window = SDL_CreateWindow(windowName, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, g_windowWidth, g_windowHeight, windowFlags);
+			if (g_window == NULL)
+			{
+				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
+				return 0;
+			}
+			SDL_ShowWindow(g_window);
+			SDL_RaiseWindow(g_window);
+		}
+	}
+
+	if (!g_grIsGLES)
+	{
+		int major_version = 3;
+		int minor_version = 3;
+		int profile = SDL_GL_CONTEXT_PROFILE_CORE;
+
+		// find best OpenGL version
+		do
+		{
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, major_version);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minor_version);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, profile);
+
+			if (SDL_GL_CreateContext(g_window))
+				break;
+
+			minor_version--;
+
+		} while (minor_version >= 0);
+
+		if (minor_version == -1)
+		{
+			eprinterr("Failed to initialise - OpenGL 3.x is not supported. Please update video drivers.\n");
+			return 0;
+		}
 	}
 #endif
 
@@ -725,13 +1116,117 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 extern "C" unsigned int g_PsyX_DefaultFBO = 0;
 #endif
 
+/* Desktop GL and ES 3.0 share most entry points but not all, and under ANGLE
+ * the desktop-only ones simply fail to resolve. glad leaves those pointers NULL,
+ * so probing them is both the cheapest and the most honest capability test —
+ * it asks the loader what it actually got rather than trusting a version string. */
+static void GR_ProbeCapabilities(void)
+{
+#ifdef USE_GLAD
+	g_grCaps.polygonMode      = (glad_glPolygonMode != NULL);
+	g_grCaps.getTexImage      = (glad_glGetTexImage != NULL);
+	g_grCaps.mapBuffer        = (glad_glMapBuffer != NULL);
+	g_grCaps.drawBuffer       = (glad_glDrawBuffer != NULL);
+	g_grCaps.clearDepthDouble = (glad_glClearDepth != NULL);
+	g_grCaps.debugGroups      = (glad_glPushDebugGroup != NULL && glad_glPopDebugGroup != NULL);
+#else
+	g_grCaps.polygonMode      = !g_grIsGLES;
+	g_grCaps.getTexImage      = !g_grIsGLES;
+	g_grCaps.mapBuffer        = !g_grIsGLES;
+	g_grCaps.drawBuffer       = !g_grIsGLES;
+	g_grCaps.clearDepthDouble = !g_grIsGLES;
+	g_grCaps.debugGroups      = 0;
+#endif
+
+	/* ES 3.1 promoted glGetTexLevelParameteriv; ES 3.0 does not have it. */
+	g_grCaps.texLevelParam = !g_grIsGLES;
+
+#ifdef USE_GLAD
+	/* Every branch keyed off these flags picks a fallback that must itself be
+	 * resolved. Depth clear is the one with no third option, so verify rather
+	 * than trust: a NULL on both sides means the loader pass above did not do
+	 * what it claims, and a silent jump to 0 in the first frame is a miserable
+	 * way to find that out. */
+	if (!g_grCaps.clearDepthDouble && glad_glClearDepthf == NULL)
+		eprinterr("Neither glClearDepth nor glClearDepthf resolved - the GL loader is incomplete\n");
+#endif
+
+	if (g_grIsGLES)
+	{
+		eprintf("*GL caps: polygonMode=%d getTexImage=%d mapBuffer=%d drawBuffer=%d clearDepthD=%d texLevelParam=%d noperspective=%d\n",
+			g_grCaps.polygonMode, g_grCaps.getTexImage, g_grCaps.mapBuffer,
+			g_grCaps.drawBuffer, g_grCaps.clearDepthDouble, g_grCaps.texLevelParam,
+			g_grCaps.noperspective);
+	}
+
+	/* 'noperspective' is core in desktop GLSL 1.30+. GLES has it only through
+	 * NV_shader_noperspective_interpolation, which ANGLE does expose on D3D11
+	 * (HLSL has the qualifier natively). Without it, affine texture mapping
+	 * silently becomes perspective-correct on PGXP-projected geometry. */
+	if (!g_grIsGLES)
+	{
+		g_grCaps.noperspective = 1;
+	}
+	else
+	{
+		g_grCaps.noperspective = 0;
+		const char* exts = (const char*)glGetString(GL_EXTENSIONS);
+		if (exts && strstr(exts, "GL_NV_shader_noperspective_interpolation"))
+			g_grCaps.noperspective = 1;
+#ifdef USE_GLAD
+		else if (glad_glGetStringi)
+		{
+			/* Core-profile / ES3 drivers return NULL for the monolithic string. */
+			GLint n = 0;
+			glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+			for (GLint i = 0; i < n; i++)
+			{
+				const char* e = (const char*)glGetStringi(GL_EXTENSIONS, i);
+				if (e && strcmp(e, "GL_NV_shader_noperspective_interpolation") == 0)
+				{
+					g_grCaps.noperspective = 1;
+					break;
+				}
+			}
+		}
+#endif
+	}
+}
+
 int GR_InitialiseGLExt()
 {
 #ifdef USE_GLAD
-	GLenum err = gladLoadGL();
+	/* SDL_GL_GetProcAddress, not gladLoadGL(): glad's built-in loader goes
+	 * straight to opengl32.dll, which resolves nothing when the live context
+	 * came from ANGLE's libGLESv2. SDL's loader routes to whichever library
+	 * actually backs the context, so this is correct for both and strictly more
+	 * correct than the old path even for plain desktop GL. */
+	/* When PsyCross owns the EGL context, SDL knows nothing about it and its
+	 * loader returns NULL for everything — the entry points have to come from
+	 * ANGLE's own modules. */
+	GLADloadproc loader = PsyX_Angle_Active()
+		? (GLADloadproc)PsyX_Angle_GetProcAddress
+		: (GLADloadproc)SDL_GL_GetProcAddress;
+
+	GLenum err = gladLoadGLLoader(loader);
 
 	if (err == 0)
 		return 0;
+
+	/* This glad is generated as gl=3.1 + gles2=2.0, and the two loaders fill
+	 * disjoint-but-overlapping halves of the same pointer table. The desktop
+	 * loader above already resolved everything ES 3.0 shares with GL 3.1 (VAOs,
+	 * glMapBufferRange, glDrawBuffers, glBlitFramebuffer...), because those are
+	 * spelled identically in both APIs. What it cannot resolve are the entry
+	 * points that exist ONLY in ES — glClearDepthf and glDepthRangef, the float
+	 * spellings that desktop GL did not get until 4.1 — so they stay NULL and
+	 * calling one is an immediate jump to address 0.
+	 *
+	 * Running the ES2 loader afterwards fills exactly those. It is not a
+	 * replacement for the desktop pass: the ES2 set has none of the ES 3.0
+	 * functions this renderer needs. Both, in this order. */
+	if (g_grIsGLES)
+		gladLoadGLES2Loader(loader);
 #endif
 
 #if defined(PSYX_IOS)
@@ -756,7 +1251,52 @@ int GR_InitialiseGLExt()
 	const char* glslVersionStr = (const char*)glGetString(GL_SHADING_LANGUAGE_VERSION);
 	eprintf("*GLSL version: %s\n", glslVersionStr);
 
+	/* ANGLE reports the device it settled on inside GL_RENDERER, e.g.
+	 * "ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0)". Worth
+	 * logging plainly, because it is the only way to confirm from a user's log
+	 * that the requested backend is the one really in use. */
+	if (g_grIsGLES && rend && strstr(rend, "ANGLE") == NULL)
+		eprintwarn("Backend '%s' expected ANGLE but got '%s'\n", PsyX_Backend_GetName(g_grActiveBackend), rend);
+
+	GR_ProbeCapabilities();
+
+	/* GL is up, so the internal target can be built now. A borderless window was
+	 * created at desktop size, so this is where the chosen resolution is turned
+	 * back into the RENDER size instead of being lost. */
+	{
+		int realW = 0, realH = 0;
+		SDL_GetWindowSize(g_window, &realW, &realH);
+		GR_ApplyPresentSize(realW, realH);
+	}
+
 	return 1;
+}
+
+/* The single decision point for "what size do we render, what size do we
+ * present". Called after window creation, on every SDL resize, and whenever the
+ * resolution is changed at runtime -- the resize event is what used to silently
+ * overwrite the chosen resolution with the desktop size in borderless. */
+extern "C" void GR_ApplyPresentSize(int realW, int realH)
+{
+	if (realW <= 0 || realH <= 0)
+		return;
+
+	g_presentWidth  = realW;
+	g_presentHeight = realH;
+
+	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
+	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
+	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
+	{
+		g_windowWidth  = g_cfgRenderWidth;
+		g_windowHeight = g_cfgRenderHeight;
+
+		return;
+	}
+
+	GR_DestroyInternalTarget();
+	g_windowWidth  = realW;
+	g_windowHeight = realH;
 }
 
 int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
@@ -765,9 +1305,74 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	g_surfaceHeight = height;
 	GR_ApplyRenderScale();
 
+	/* Remember the request before SDL gets a chance to replace it. */
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
+
+	/* The window must NOT be multisampled if the scene is going to render into
+	 * an internal target, because the present is a glBlitFramebuffer into the
+	 * default framebuffer -- and blitting a single-sample source into a
+	 * MULTISAMPLE destination is INVALID_OPERATION. The blit silently does
+	 * nothing and the screen stays black, which is exactly what MSAA + borderless
+	 * did. Decide it here, before the pixel format is chosen. */
+	{
+		SDL_DisplayMode dm;
+
+		s_suppressWindowMsaa = 0;
+
+		if (fullscreen == 2 && width > 0 && height > 0 && g_cfg_msaaSamples > 0 &&
+		    SDL_GetDesktopDisplayMode(0, &dm) == 0 &&
+		    (width != dm.w || height != dm.h))
+		{
+			/* The WINDOW must stay single-sample either way: the present is a
+			 * blit into the default framebuffer, and a single-sample source into
+			 * a multisample destination is INVALID_OPERATION. Antialiasing moves
+			 * onto the internal target instead, which is multisampled and
+			 * resolved before every read and before the present -- so MSAA is
+			 * kept, just not on the window. Not available on GLES, where the
+			 * read-back helper would glReadPixels the scene target; there it
+			 * really is off (see GR_SetInternalResolution). */
+			s_suppressWindowMsaa = 1;
+
+			if (g_grIsGLES)
+			{
+				eprintwarn("MSAA disabled: borderless at %dx%d renders through an internal target, and this "
+				           "backend reads that target back directly, which a multisample target does not allow.\n",
+				           width, height);
+			}
+		}
+	}
+
 	// Due to debugging in fullscreen
 	SDL_SetHint(SDL_HINT_ALLOW_TOPMOST, "0");
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+	/* Before any GL attribute that depends on the context type, and before the
+	 * window: picks GL vs ES and points ANGLE at D3D11/Vulkan if asked. */
+	GR_ResolveBackend();
+
+	/* MSAA is not survivable on the ES backends. Confirmed by bisect:
+	 * renderer=gles renders a completely black frame with MSAA on and works
+	 * with it off, on a driver that reports a valid ES 3.2 context, compiles
+	 * every shader, uploads every texture and submits the whole world each
+	 * frame. Desktop GL tolerates the multisample framebuffer blits this
+	 * renderer performs; ES enforces the spec and the frame never reaches the
+	 * screen. FMV survives because it does not share that path, which is
+	 * exactly how the report described it.
+	 *
+	 * Dropped here rather than left to fail: a translated/ES backend is what
+	 * someone selects BECAUSE their GL driver is misbehaving, so handing them a
+	 * black screen is the worst possible answer. Antialiasing is the thing
+	 * worth losing. Native GL is untouched. */
+	if (g_grIsGLES && g_cfg_msaaSamples > 0)
+	{
+		eprintwarn("MSAA %dx is not supported on the '%s' backend (its framebuffer blits are \n"
+			"illegal on ES); disabling it for this run. Use the OpenGL (native) renderer \n"
+			"if you want antialiasing.\n",
+			g_cfg_msaaSamples, PsyX_Backend_GetName(g_grActiveBackend));
+		g_cfg_msaaSamples = 0;
+	}
 
 #if USE_OPENGL
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 1);
@@ -776,7 +1381,7 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	 * set before the window/context is created (GR_InitialiseGLContext). The
 	 * driver picks a multisample pixel format; if it can't, window creation is
 	 * retried without MSAA inside GR_InitialiseGLContext. */
-	if (g_cfg_msaaSamples > 0)
+	if (g_cfg_msaaSamples > 0 && !s_suppressWindowMsaa)
 	{
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
 		SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, g_cfg_msaaSamples);
@@ -821,12 +1426,19 @@ void GR_Shutdown()
 	GR_DestroyTexture(g_fbTexture);
 	GR_DestroyTexture(g_offscreenRTTexture);
 #endif
+
+	/* After the GL objects above: destroying the EGL context first would make
+	 * every one of those deletes a call with nothing current. */
+	PsyX_Angle_Destroy();
 }
 
 void GR_UpdateSwapIntervalState(int swapInterval)
 {
 #if defined(RENDERER_OGL)
-	SDL_GL_SetSwapInterval(swapInterval);
+	if (PsyX_Angle_Active())
+		PsyX_Angle_SetSwapInterval(swapInterval);
+	else
+		SDL_GL_SetSwapInterval(swapInterval);
 #endif
 }
 
@@ -838,7 +1450,11 @@ void GR_BeginScene()
 #ifdef RENDERER_OGLES
 	glClearDepthf(1.0f);
 #else
-	glClearDepth(1.0f);
+	/* glClearDepth (double) is desktop-only; ES 3.0 has the float form. */
+	if (g_grCaps.clearDepthDouble)
+		glClearDepth(1.0f);
+	else
+		glClearDepthf(1.0f);
 #endif
 	glClear(GL_DEPTH_BUFFER_BIT);
 	glClear(GL_STENCIL_BUFFER_BIT);
@@ -860,6 +1476,8 @@ void GR_BeginScene()
 
 void GR_EndScene()
 {
+	GR_DiagGLError("scene draw");
+
 	framebuffer_need_update = 1;
 	
 	if (g_dbg_wireframeMode)
@@ -966,7 +1584,11 @@ GLint u_shadowFadeDistLoc;
 /* Flashlight shadow map (see g_PsyX_UseFlashlightShadows). Depth-only FBO rendered
  * from the light POV each frame; g_shadowLightMatrix maps view space -> light clip.
  * Column-major, identity until the first shadow pass computes it. */
-#define PSYX_SHADOW_MAP_SIZE 1024
+/* Allocated size of the flashlight shadow map. Runtime so it can be raised
+ * without a rebuild; GR_EnsureShadowTarget reallocates when it changes. */
+int g_PsyX_ShadowMapSize = 1024;
+static int s_shadowTexSize = 0;
+#define PSYX_SHADOW_MAP_SIZE g_PsyX_ShadowMapSize
 static GLuint g_shadowFBO = 0;
 static GLuint g_shadowDepthTex = 0;
 static ShaderID g_shadowDepthShader = (ShaderID)-1;
@@ -1122,8 +1744,17 @@ int g_PsxFogToBlack = 0;
 	"	float c_textureSize = 1.0;\n"\
 	"	float c_onePixel = 1.0;\n"\
 	"	vec4 BilinearTextureSample(vec2 P) {\n"\
-	"		vec2 frac = fract(P);\n"\
-	"		vec2 pixel = floor(P);\n"\
+	/* Sample around P - 0.5, not P. A texel's colour belongs at its CENTRE,
+	 * so the four taps for a point P are the texels whose centres bracket it.
+	 * Blending texel N with N+1 weighted by fract(P) instead does two visible
+	 * things: it shifts the whole image half a texel toward +X/+Y -- the
+	 * glyphs sliding down and right when filtering is switched on -- and
+	 * wherever the UVs land on integer texel coordinates fract(P) is 0, so it
+	 * returns texel N exactly and is indistinguishable from nearest. That is
+	 * why bilinear appeared to do nothing to the 3D world. */\
+	"		vec2 tapP = P - 0.5;\n"\
+	"		vec2 frac = fract(tapP);\n"\
+	"		vec2 pixel = floor(tapP);\n"\
 	"		vec2 C11 = samplePSX(pixel);\n"\
 	"		vec2 C21 = samplePSX(pixel + vec2(c_onePixel, 0.0));\n"\
 	"		vec2 C12 = samplePSX(pixel + vec2(0.0, c_onePixel));\n"\
@@ -1205,6 +1836,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec3 a_pgxp;\n"\
 	"	attribute vec3 a_viewpos;\n"\
 	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
+	"	attribute float a_geom3d; // 1 = GTE-projected primitive (world geometry)\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1239,6 +1871,13 @@ int g_PsxFogToBlack = 0;
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
 	"		v_fade = a_normal.z;\n"\
+	/* a_normal.y is 1.0 only for a vertex that carried a view-space FIFO
+	 * entry, i.e. one the GTE actually projected -- a true "this is world
+	 * geometry" marker. v_is3d cannot answer that: it reads a_pgxp.z, which
+	 * says "was PGXP-projected", so with PGXP off it is 1.0 for the 2D UI too
+	 * and with PGXP on it is 0.0 for world prims that took the affine path.
+	 * That is why bilinear filtered menu text and missed the world. */\
+	"		v_geom3d = a_geom3d;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -1301,7 +1940,13 @@ int g_PsxFogToBlack = 0;
 	"			vec3 flP = v_viewpos;\n"\
 	"			if (flP.z > 0.0) {\n"\
 	"				fragColor.rgb *= (u_flStyle > 0) ? 0.49 : 0.15;\n"\
-	"				vec3 flDir = normalize(u_flDir);\n"\
+	/* normalize() of a zero vector is 0/0 = NaN, and a NaN here propagates through
+	 * dot/smoothstep into the += below, wiping the cone while the dim above has
+	 * already landed -- a dark scene with no beam. Desktop drivers commonly flush
+	 * that to zero; ANGLE -> Vulkan does not, which is why the same build lights
+	 * correctly on one backend and not the other. Guard the degenerate case. */\
+	"				vec3 flDirRaw = u_flDir;\n"\
+	"				vec3 flDir = (dot(flDirRaw, flDirRaw) > 1e-12) ? normalize(flDirRaw) : vec3(0.0, 0.0, 1.0);\n"\
 	"				vec3 flOrigin = (u_flStyle > 0) ? (u_flLightPos - flDir * 39.0) : u_flLightPos;\n"\
 	"				vec3 L = flOrigin - flP;\n"\
 	"				float d = length(L);\n"\
@@ -1397,7 +2042,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
-	"		if((bilinearFilter == 1 && v_is3d > 0.5) || bilinearFilter >= 2)\n"\
+	"		if((bilinearFilter == 1 && v_geom3d > 0.5) || bilinearFilter >= 2)\n"\
 	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
@@ -1414,6 +2059,7 @@ const char* gte_shader_4 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1430,6 +2076,7 @@ const char* gte_shader_8 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1446,6 +2093,7 @@ const char* gte_shader_16 =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1462,6 +2110,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_is3d;\n"
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
+	"varying float v_geom3d;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -1497,7 +2146,7 @@ const char* gte_shader_32_rgba =
 	 * level, or a minified HD atlas would still blur in through the mip chain. A
 	 * native-res replacement already lands on the texel centre (u_hiresHalf == 0.5),
 	 * so it comes out bit-identical either way. */
-	"		if (bilinearFilter == 0 || (bilinearFilter == 1 && v_is3d < 0.5)) {\n"\
+	"		if (bilinearFilter == 0 || (bilinearFilter == 1 && v_geom3d < 0.5)) {\n"\
 	"			vec2 hiresSize = vec2(textureSize(s_texture, 0));\n"\
 	"			fragColor = textureLod(s_texture, (floor(tc * hiresSize) + 0.5) / hiresSize, 0.0);\n"\
 	"		} else {\n"\
@@ -1596,7 +2245,11 @@ ShaderID GR_Shader_Compile(const char* source)
 		"#define texture2D   texture\n"
 		"out vec4 fragColor;\n";
 #else
-	const char* GLSL_HEADER_VERT =
+	/* The desktop build can be running either a desktop GL context or an ES 3.0
+	 * one (ANGLE), so the #version line is a runtime choice. Everything below it
+	 * is identical — the shader body is already written in the shared dialect
+	 * that these defines paper over. */
+	static const char* const GLSL_HEADER_VERT_GL =
 		"#version 140\n"
 		"precision lowp  int;\n"
 		"precision highp float;\n"
@@ -1605,13 +2258,67 @@ ShaderID GR_Shader_Compile(const char* source)
 		"#define attribute in\n"
 		"#define texture2D texture\n";
 
-	const char* GLSL_HEADER_FRAG =
+	static const char* const GLSL_HEADER_FRAG_GL =
 		"#version 140\n"
 		"precision lowp  int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
 		"out vec4 fragColor;\n";
+
+	/* GLSL ES 3.00 requires the #extension line to precede any other statement,
+	 * so noperspective support is baked into the header rather than the trailing
+	 * defines block. Requested only when the probe found the extension. */
+	static const char* const GLSL_HEADER_VERT_ES3 =
+		"#version 300 es\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define VERTEX\n"
+		"#define varying   out\n"
+		"#define attribute in\n"
+		"#define texture2D texture\n";
+
+	static const char* const GLSL_HEADER_VERT_ES3_NP =
+		"#version 300 es\n"
+		"#extension GL_NV_shader_noperspective_interpolation : require\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define VERTEX\n"
+		"#define varying   out\n"
+		"#define attribute in\n"
+		"#define texture2D texture\n";
+
+	static const char* const GLSL_HEADER_FRAG_ES3 =
+		"#version 300 es\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define varying     in\n"
+		"#define texture2D   texture\n"
+		"out vec4 fragColor;\n";
+
+	static const char* const GLSL_HEADER_FRAG_ES3_NP =
+		"#version 300 es\n"
+		"#extension GL_NV_shader_noperspective_interpolation : require\n"
+		"precision lowp  int;\n"
+		"precision highp float;\n"
+		"#define varying     in\n"
+		"#define texture2D   texture\n"
+		"out vec4 fragColor;\n";
+
+	const char* GLSL_HEADER_VERT;
+	const char* GLSL_HEADER_FRAG;
+
+	if (g_grIsGLES)
+	{
+		const int np = (g_grCaps.noperspective && g_cfg_affineTextures);
+		GLSL_HEADER_VERT = np ? GLSL_HEADER_VERT_ES3_NP : GLSL_HEADER_VERT_ES3;
+		GLSL_HEADER_FRAG = np ? GLSL_HEADER_FRAG_ES3_NP : GLSL_HEADER_FRAG_ES3;
+	}
+	else
+	{
+		GLSL_HEADER_VERT = GLSL_HEADER_VERT_GL;
+		GLSL_HEADER_FRAG = GLSL_HEADER_FRAG_GL;
+	}
 #endif
 
 	char extra_vs_defines[1024];
@@ -1635,69 +2342,32 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 	#define SH_TC_CENTROID "centroid "
 #endif
-
-/* `noperspective` is desktop GLSL only. GLSL ES has just smooth/flat/centroid
- * in every version through 3.2, so emitting it on an ES target fails shader
- * COMPILATION at runtime -- the build stays green and the game comes up black.
- * NV_shader_noperspective_interpolation restores it, but no Mali-T720-class
- * part (the Arcade1Up MT8163 target) exposes it, so this is the common path on
- * Android, not an edge case.
- *
- * Dropping the qualifier costs the PSX's affine texture warping: UVs become
- * perspective-correct, so textures look "too clean" on steeply angled surfaces
- * instead of swimming the way the hardware did. Everything still renders. The
- * real fix is to premultiply the varying by w in the vertex shader and undo it
- * in the fragment shader, which reproduces affine interpolation on any GLES
- * device -- deliberately not attempted blind here, since it is shader maths
- * that has to be verified by looking at a rendered frame. */
-#if defined(ES2_SHADERS) || defined(ES3_SHADERS)
-	#define SH_TC_NOPERSPECTIVE ""
-#else
-	#define SH_TC_NOPERSPECTIVE "noperspective "
-#endif
-	/* v_page_clut is NOT a colour or a coordinate: .xy is the VRAM texture-page
-	 * origin and .zw is the CLUT (palette) address, both exact texel addresses
-	 * and both constant across a primitive. Desktop declares them
-	 * `noperspective`, which for a constant is exact. GLES has no
-	 * `noperspective`, and dropping the qualifier leaves the default `smooth` —
-	 * perspective-correct, i.e. divided through an interpolated 1/w. A 2D prim
-	 * has constant w so the value survives, which is why the menus, logos and
-	 * FMVs were fine; a 3D world triangle has varying w, so the palette address
-	 * drifts across the face and every texel resolves against the wrong CLUT
-	 * row. That is the flat-coloured world.
+	/* `noperspective` is core in desktop GLSL but reaches GLES only through
+	 * NV_shader_noperspective_interpolation, so whether it can be emitted is a
+	 * property of the live context, not of the build. Emitting it unguarded on
+	 * an ES context fails shader compilation outright rather than merely losing
+	 * the affine look — which is why this is probed, not assumed.
 	 *
-	 * `flat` is the correct qualifier for a per-primitive constant and ES3 has
-	 * it. v_texcoord genuinely does need interpolating, so only the page/CLUT
-	 * pair changes. */
-#if defined(ES3_SHADERS)
-	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING flat out\n");
-	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING flat in\n");
-#else
-	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
-	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
-#endif
-
+	 * Losing it costs less than it appears: the legacy path leaves
+	 * gl_Position.w == 1, where perspective-correct interpolation IS screen-
+	 * linear. It only changes anything on PGXP-projected geometry, whose whole
+	 * purpose is to be perspective-correct in the first place. */
+	const char* tcNoPerspective = "";
 	if (g_cfg_affineTextures)
 	{
-#if defined(ES2_SHADERS) || defined(ES3_SHADERS)
-		/* Say so once rather than let `affine_textures = 1` look like it took
-		 * effect. Shaders compile here per program, so gate the notice. */
-		static bool s_affineUnavailableLogged = false;
-		if (!s_affineUnavailableLogged)
-		{
-			s_affineUnavailableLogged = true;
-			eprintwarn("affine_textures is on, but GLSL ES has no `noperspective` "
-			           "qualifier - texture mapping stays perspective-correct "
-			           "(no PSX UV warping) on this renderer.\n");
-		}
+#if defined(RENDERER_OGLES)
+		tcNoPerspective = "";
+#else
+		tcNoPerspective = g_grCaps.noperspective ? "noperspective " : "";
 #endif
-		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_NOPERSPECTIVE SH_TC_CENTROID "varying\n");
 	}
-	else
+
 	{
-		strcat(extra_vs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
-		strcat(extra_fs_defines, "#define AFFINE_VARYING " SH_TC_CENTROID "varying\n");
+		char affineDef[128];
+		snprintf(affineDef, sizeof(affineDef), "#define AFFINE_VARYING %s%svarying\n",
+			tcNoPerspective, SH_TC_CENTROID);
+		strcat(extra_vs_defines, affineDef);
+		strcat(extra_fs_defines, affineDef);
 	}
 
 	const char* vs_list[] = { GLSL_HEADER_VERT, extra_vs_defines, source };
@@ -1737,6 +2407,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_extra, "a_extra");
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
+	glBindAttribLocation(program, a_geom3d, "a_geom3d");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -1867,6 +2538,24 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->flInnerCosLoc = glGetUniformLocation(sh->shader, "u_flInnerCos");
 	sh->flOuterCosLoc = glGetUniformLocation(sh->shader, "u_flOuterCos");
 	sh->flRangeLoc = glGetUniformLocation(sh->shader, "u_flRange");
+
+	/* A uniform that resolves to -1 was dropped by the compiler, which on a
+	 * translated backend (ANGLE -> D3D11/Vulkan) is how the per-pixel flashlight
+	 * silently does nothing: the uniforms are set, but into a program that has no
+	 * such uniform. Report the resolution once per shader so one log from an
+	 * affected machine settles whether the branch survived compilation. */
+	{
+		static int s_flLocLogs = 0;
+
+		if (s_flLocLogs < 8)
+		{
+			s_flLocLogs++;
+			eprintf("*[FLLOC] gles=%d on=%d style=%d pos=%d dir=%d col=%d inner=%d outer=%d range=%d shadowOn=%d\n",
+			        g_grIsGLES, sh->flashlightOnLoc, sh->flStyleLoc, sh->flLightPosLoc,
+			        sh->flDirLoc, sh->flColorLoc, sh->flInnerCosLoc, sh->flOuterCosLoc,
+			        sh->flRangeLoc, sh->shadowOnLoc);
+		}
+	}
 	sh->shadowOnLoc = glGetUniformLocation(sh->shader, "u_shadowOn");
 	sh->shadowMatrixLoc = glGetUniformLocation(sh->shader, "u_shadowMatrix");
 	sh->shadowBiasLoc = glGetUniformLocation(sh->shader, "u_shadowBias");
@@ -1970,7 +2659,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -2001,7 +2690,7 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -2051,7 +2740,7 @@ int GR_InitialisePSX()
 				           VRAM_WIDTH, VRAM_HEIGHT);
 			}
 
-			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 	}
 
@@ -2404,6 +3093,29 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		glUniform1i(u_flStyleLoc, g_PsyX_FlashlightStyle ? 1 : 0);
 	if (u_flLightPosLoc != -1)
 		glUniform3fv(u_flLightPosLoc, 1, g_PsyX_FlashlightPos);
+
+	/* The cone collapses if any of these is degenerate -- a zero direction most of
+	 * all. Reported on change so a backend that lights wrongly can be compared
+	 * against one that does not, without a per-frame flood. */
+	{
+		static float s_lastDir[3] = { 9e9f, 9e9f, 9e9f };
+		static int   s_flValLogs  = 0;
+
+		if (g_PsyX_FlashlightActive && s_flValLogs < 24 &&
+		    (g_PsyX_FlashlightDir[0] != s_lastDir[0] ||
+		     g_PsyX_FlashlightDir[1] != s_lastDir[1] ||
+		     g_PsyX_FlashlightDir[2] != s_lastDir[2]))
+		{
+			s_lastDir[0] = g_PsyX_FlashlightDir[0];
+			s_lastDir[1] = g_PsyX_FlashlightDir[1];
+			s_lastDir[2] = g_PsyX_FlashlightDir[2];
+			s_flValLogs++;
+			eprintf("*[FLVAL] pos=(%.1f,%.1f,%.1f) dir=(%.3f,%.3f,%.3f) range=%.1f style=%d\n",
+			        g_PsyX_FlashlightPos[0], g_PsyX_FlashlightPos[1], g_PsyX_FlashlightPos[2],
+			        g_PsyX_FlashlightDir[0], g_PsyX_FlashlightDir[1], g_PsyX_FlashlightDir[2],
+			        g_PsyX_FlashlightRange, g_PsyX_FlashlightStyle);
+		}
+	}
 	if (u_flDirLoc != -1)
 		glUniform3fv(u_flDirLoc, 1, g_PsyX_FlashlightDir);
 	/* FPS mode swaps in its own (tighter/dimmer) cone size + brightness. */
@@ -2439,9 +3151,40 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	/* Flashlight shadow map: same gate as the depth pre-pass in DrawAllSplits, so the
 	 * shader only samples the shadow texture on frames one was actually rendered. */
 	{
+		/* Deliberately does NOT require g_PsyX_ShadowsAllowed, unlike the depth
+		 * pre-pass. That flag exists because RENDERING the light-POV pass on a
+		 * menu / room-fade / transition frame corrupts unrelated drawing --
+		 * SAMPLING an already-built map does nothing of the sort. Requiring it
+		 * here made every shadow vanish the moment the game paused or opened the
+		 * map, then reappear on unpause. The world is frozen during those
+		 * frames, so the map from the last gameplay frame is still exactly
+		 * right; the pre-pass simply stops refreshing it. The cone's own gate
+		 * (u_flashlightOn) still turns everything off where the flashlight
+		 * itself is inactive. */
 		int shadowOn = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
 		                g_PsyX_FlashlightActive && g_shadowDepthTex != 0 &&
-		                g_PsyX_ShadowsAllowed && !g_PsxPresentLastFrame) ? 1 : 0;
+		                !g_PsxPresentLastFrame) ? 1 : 0;
+		/* shadowOn is a BINARY whole-scene lighting term: when it drops, every
+		 * shadowed surface becomes lit and the frame pops brighter. A single
+		 * frame of that reads exactly like the dim-gate flicker already fixed on
+		 * the game side. Report each flip with its terms so one run names which
+		 * one is unstable, rather than guessing between them. */
+		{
+			static int s_prevShadowOn = -1;
+			static int s_shadowLogs   = 0;
+
+			if (shadowOn != s_prevShadowOn && s_shadowLogs < 40)
+			{
+				s_shadowLogs++;
+				eprintf("[SHADOWDIAG] shadowOn=%d useShadows=%d perPixel=%d flActive=%d tex=%d allowed=%d freeze=%d\n",
+				        shadowOn, g_PsyX_UseFlashlightShadows, g_PsyX_UsePerPixelFlashlight,
+				        g_PsyX_FlashlightActive, (g_shadowDepthTex != 0),
+				        g_PsyX_ShadowsAllowed, g_PsxPresentLastFrame);
+			}
+
+			s_prevShadowOn = shadowOn;
+		}
+
 		if (u_shadowOnLoc != -1)
 			glUniform1i(u_shadowOnLoc, shadowOn);
 		if (shadowOn)
@@ -3085,7 +3828,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		 * only the writes are suppressed. */
 		if (g_PsxSkipFramebufferStore)
 		{
-			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
 		else if (g_PreviousOffscreen.w > 0 && g_PreviousOffscreen.h > 0 &&
 		         g_PreviousOffscreen.w <= 64 && g_PreviousOffscreen.h <= 64)
@@ -3105,7 +3848,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 
 			glBindFramebuffer(GL_FRAMEBUFFER, g_glOffscreenFramebuffer);
 			glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, s_scratchRGBA);
-			glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 			GR_CopyRGBAFramebufferToVRAM(s_scratchRGBA,
 				g_PreviousOffscreen.x, g_PreviousOffscreen.y, sw, sh, 0, 1);
@@ -3145,12 +3888,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 								GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 			// done, unbind
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 		}
 #endif
 
-		glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		// copy rendering results to VRAM texture
 		{
 			// reat the texture
@@ -3381,7 +4124,7 @@ static void GR_EnsurePostTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_postFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_postTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 }
 
 /* Draw a full-screen triangle sampling `tex` into the currently bound default
@@ -3390,19 +4133,8 @@ static void GR_EnsurePostTarget(int w, int h)
  * cached GL state so the next frame's prims re-establish it. */
 static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 {
-	/* Draw into whatever target the frame is being composed into, at that
-	 * target's size. Hard-binding 0 sent the freeze-frame and the post-process
-	 * to the window while the frame itself went to the scaled buffer, and sized
-	 * the final upscale to the RENDER resolution -- which put the whole picture
-	 * at quarter size in the corner of the window. With scaling off both are
-	 * the window at its own size, exactly as before. */
-	glBindFramebuffer(GL_FRAMEBUFFER, GR_ActiveFramebuffer());
-	if (g_scaleActive)
-		glViewport(0, 0, g_windowWidth, g_windowHeight);
-	else
-		glViewport(0, 0,
-			(g_surfaceWidth  > 0) ? g_surfaceWidth  : g_windowWidth,
-			(g_surfaceHeight > 0) ? g_surfaceHeight : g_windowHeight);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
+	glViewport(0, 0, g_windowWidth, g_windowHeight);
 
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_BLEND);
@@ -3473,11 +4205,11 @@ void GR_PostProcess(void)
 
 	/* Resolve/copy backbuffer -> single-sample source texture (same size, so
 	 * this is a legal multisample resolve when MSAA is on). */
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ActiveFramebuffer());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ActiveFramebuffer());
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ActiveFramebuffer());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	g_postFrame++;
 	GR_DrawFullscreenTexture(g_postTex, g_cfg_postProcess);
@@ -3569,51 +4301,104 @@ static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
 
 static void GR_EnsureShadowTarget(void)
 {
+	/* Clamp once, so a bad config value cannot ask the driver for something
+	 * absurd. 4096 is comfortably within ES 3.0's guaranteed max texture size. */
+	if (g_PsyX_ShadowMapSize < 256)   g_PsyX_ShadowMapSize = 256;
+	if (g_PsyX_ShadowMapSize > 4096)  g_PsyX_ShadowMapSize = 4096;
+
+	/* Resolution changed at runtime: drop the old target and build a new one. */
+	if (g_shadowFBO != 0 && s_shadowTexSize != g_PsyX_ShadowMapSize)
+	{
+		glDeleteFramebuffers(1, &g_shadowFBO);
+		glDeleteTextures(1, &g_shadowDepthTex);
+		g_shadowFBO      = 0;
+		g_shadowDepthTex = 0;
+	}
+
 	if (g_shadowFBO != 0)
 		return;
 
+	s_shadowTexSize = g_PsyX_ShadowMapSize;
+
 	glGenTextures(1, &g_shadowDepthTex);
 	glBindTexture(GL_TEXTURE_2D, g_shadowDepthTex);
+	/* ES pairs DEPTH_COMPONENT24 with UNSIGNED_INT only -- FLOAT is legal solely
+	 * with DEPTH_COMPONENT32F (ES 3.0 table 3.2). Desktop GL tolerates the
+	 * mismatch for a NULL upload, ANGLE raises INVALID_OPERATION and the texture
+	 * is never allocated: the FBO's depth attachment is incomplete, the pre-pass
+	 * writes nothing, and every receiver then samples as occluded. That zeroes
+	 * the cone while the whole-scene dim above it still lands, which is why only
+	 * the shadow flashlight modes went dark and Classic/Modern were fine. */
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE,
-	             0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	             0, GL_DEPTH_COMPONENT, g_grIsGLES ? GL_UNSIGNED_INT : GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-#if defined(RENDERER_OGLES)
-	/* Core GLES 3.0 has neither GL_CLAMP_TO_BORDER nor GL_TEXTURE_BORDER_COLOR
-	 * (they arrive in ES 3.2, or via EXT_texture_border_clamp). CLAMP_TO_EDGE is
-	 * the only portable wrap mode here, but it smears the edge texel outward
-	 * instead of returning the "fully lit" border, so geometry sampled outside
-	 * the light frustum picks up the frustum-edge depth and can streak. The
-	 * portable fix is a bounds check in the shadow shader (treat projected
-	 * coords outside [0,1] as unshadowed) rather than relying on the border
-	 * colour — see android_port/README.md. Shadow mapping is an opt-in graphics
-	 * option, so this does not affect a default boot. */
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-#else
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+#if !defined(RENDERER_OGLES)
+	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
+	 * neither, and on a GLES build the tokens are not even declared -- so this
+	 * is a compile-time split rather than the runtime g_grIsGLES test the
+	 * desktop build can afford. CLAMP_TO_EDGE is a safe stand-in either way: the
+	 * fragment shader already rejects receivers outside 0..1 in the light
+	 * frustum before it ever samples, so the border texels are never observed. */
+	if (!g_grIsGLES)
 	{
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
 		float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };  /* outside the light frustum = fully lit */
 		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
 	}
+	else
+	{
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+#else
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 #endif
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenFramebuffers(1, &g_shadowFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
+	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
+	 * the array form, which takes the same GL_NONE. On a GLES build the singular
+	 * is undeclared, not merely unresolved, so the runtime cap sits inside a
+	 * compile-time guard. */
 #if defined(RENDERER_OGLES)
-	/* GLES only has the plural form; glReadBuffer(GL_NONE) does exist in ES 3.0. */
 	{
-		const GLenum noBuffers = GL_NONE;
-		glDrawBuffers(1, &noBuffers);
+		const GLenum none = GL_NONE;
+		glDrawBuffers(1, &none);
 	}
 #else
-	glDrawBuffer(GL_NONE);
+	if (g_grCaps.drawBuffer)
+		glDrawBuffer(GL_NONE);
+	else
+	{
+		const GLenum none = GL_NONE;
+		glDrawBuffers(1, &none);
+	}
 #endif
 	glReadBuffer(GL_NONE);
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+
+	/* An incomplete shadow FBO does not fail loudly -- it just makes every
+	 * receiver read as shadowed. Say so once instead. */
+	{
+		GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+
+		if (st != GL_FRAMEBUFFER_COMPLETE)
+		{
+			eprinterr("shadow FBO incomplete: 0x%04X (flashlight shadows will read as fully occluded)
+", st);
+		}
+		else
+		{
+			eprintf("*shadow target ready: %dx%d depth24
+", PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
+		}
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	if (g_shadowDepthShader == (ShaderID)-1)
 	{
@@ -3747,99 +4532,6 @@ void GR_ShadowPassEnd(void) {}
 /* Bind (creating/resizing as needed) the scaled offscreen target for this
  * frame. No-op at scale 1.0, which leaves the original render-to-window path
  * byte for byte. */
-void GR_BeginRenderScale(void)
-{
-#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
-	if (g_windowWidth <= 0 || g_windowHeight <= 0)
-		return;
-
-	if (g_windowWidth == g_surfaceWidth && g_windowHeight == g_surfaceHeight)
-	{
-		/* Scale is 1.0 (or unset): render straight to the window as before. */
-		if (g_scaleActive)
-		{
-			g_scaleActive = 0;
-			glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		}
-		return;
-	}
-
-	if (g_scaleFBO == 0)
-	{
-		glGenFramebuffers(1, &g_scaleFBO);
-		glGenTextures(1, &g_scaleTex);
-		glGenRenderbuffers(1, &g_scaleDepth);
-	}
-
-	if (g_scaleW != g_windowWidth || g_scaleH != g_windowHeight)
-	{
-		g_scaleW = g_windowWidth;
-		g_scaleH = g_windowHeight;
-
-		glBindTexture(GL_TEXTURE_2D, g_scaleTex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_scaleW, g_scaleH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-		/* Linear on the way back up: the whole point is to hide the lower
-		 * resolution, and NEAREST would just look like a smaller screen. */
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glBindTexture(GL_TEXTURE_2D, 0);
-
-		/* Depth AND stencil: the renderer uses the stencil test, and a target
-		 * without one silently loses those effects. */
-		glBindRenderbuffer(GL_RENDERBUFFER, g_scaleDepth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, g_scaleW, g_scaleH);
-		glBindRenderbuffer(GL_RENDERBUFFER, 0);
-
-		glBindFramebuffer(GL_FRAMEBUFFER, g_scaleFBO);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_scaleTex, 0);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, g_scaleDepth);
-
-		{
-			GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-			if (st != GL_FRAMEBUFFER_COMPLETE)
-			{
-				eprinterr("[SCALE] target %dx%d incomplete (0x%04X) - render scale disabled\n",
-					g_scaleW, g_scaleH, (unsigned)st);
-				glBindFramebuffer(GL_FRAMEBUFFER, 0);
-				g_scaleActive  = 0;
-				g_scaleW = g_scaleH = 0;
-				g_windowWidth  = g_surfaceWidth;
-				g_windowHeight = g_surfaceHeight;
-				return;
-			}
-			eprintinfo("[SCALE] rendering %dx%d -> %dx%d (%.2f)\n",
-				g_scaleW, g_scaleH, g_surfaceWidth, g_surfaceHeight, (double)g_cfg_renderScale);
-		}
-	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, g_scaleFBO);
-	glViewport(0, 0, g_scaleW, g_scaleH);
-	g_scaleActive = 1;
-#endif
-}
-
-/* Upscale the finished frame onto the window. Called just before the swap. */
-void GR_EndRenderScale(void)
-{
-#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
-	if (!g_scaleActive)
-		return;
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	/* Cleared first: the draw below must size its viewport to the SURFACE, and
-	 * it decides that from this flag. */
-	g_scaleActive = 0;
-	glViewport(0, 0, g_surfaceWidth, g_surfaceHeight);
-
-	/* A shader draw, not a blit: the window may be multisample, and ES3 refuses
-	 * a blit into a multisample draw buffer (the same rule that made the paused
-	 * screen black). A textured triangle into it is always legal. */
-	GR_DrawFullscreenTexture(g_scaleTex, 0);
-#endif
-}
 
 /* See g_PsxPresentLastFrame above. Called from PsyX_EndScene after the
  * frame is fully composed in the backbuffer, before the swap. */
@@ -3914,7 +4606,7 @@ void GR_CaptureLastFrame(void)
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_freezeFrameFBO);
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ActiveFramebuffer());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
 	/* Clear the error state FIRST. This frame already carries a recurring
 	 * 0x0502 from elsewhere (see the GR_SwapWindow drain), and glGetError
@@ -3930,6 +4622,8 @@ void GR_CaptureLastFrame(void)
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	/* Report once whether the capture actually happened. g_freezeFrameValid used
 	 * to be set unconditionally, so a capture that failed still counted as good
 	 * and pause presented a black texture with no clue why -- which is exactly
@@ -4000,13 +4694,13 @@ void GR_PresentLastFrame(void)
 #endif
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_freezeFrameFBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ActiveFramebuffer());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 
 	glBlitFramebuffer(0, 0, g_freezeFrameW, g_freezeFrameH,
 		0, 0, g_windowWidth, g_windowHeight,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
 	g_freezePresentedThisFrame = 1;
 #endif
@@ -4241,7 +4935,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbPackFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_fbPackTex, 0);
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 }
 
 /* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
@@ -4279,7 +4973,7 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	glBindVertexArray(0);
 
 	glEnable(GL_STENCIL_TEST);
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 	glViewport(vp[0], vp[1], vp[2], vp[3]);
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture: recording the
@@ -4336,7 +5030,7 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(cc[0], cc[1], cc[2], cc[3]);
 
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
 	g_PreviousBlendMode    = -999;
@@ -4398,7 +5092,7 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	if (g_cfg_msaaSamples > 0)
 	{
 		GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 		glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH,
 			GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -4470,8 +5164,8 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		}
 	}
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
@@ -4555,7 +5249,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 		if (g_cfg_msaaSamples > 0)
 		{
 			GR_EnsurePostTarget(g_windowWidth, g_windowHeight);
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_postFBO);
 			glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight, 0, 0, g_postW, g_postH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 			storeReadFBO = g_postFBO;
@@ -4590,8 +5284,8 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 
 		
 		// done, unbind
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	}
 
 	g_fbStoreValid = 1;
@@ -4615,7 +5309,7 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 	}
 
 	// after drawing
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 	glFlush();
 #endif
 
@@ -4655,9 +5349,9 @@ static void GR_RestoreStoredFramebufferRegion(void)
 		x, y + h, x + w, y,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
+	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* A full vram[] re-upload also stamped TIM bytes over the scene scratch
 	 * rect — re-blit the stored frame there too (no TTL decrement here). */
@@ -4818,8 +5512,96 @@ void GR_DumpVRAM(const char* path)
 	fclose(f);
 }
 
+/* PC port: one-shot GL error sweep, for diagnosing a renderer that draws
+ * without complaining. Nothing in the frame path calls glGetError, so an
+ * illegal call — and ES is far stricter than desktop GL about framebuffer
+ * blits, formats and multisample resolves — fails silently and the frame just
+ * comes out black. Reported once per call site so a single log names the first
+ * thing that broke instead of a wall of repeats. */
+void GR_DiagGLError(const char* where)
+{
+	static const char* s_seen[16];
+	static int         s_seenCount = 0;
+	GLenum             err;
+
+	if (!g_grIsGLES && !g_dbg_glDiag)
+		return;
+
+	err = glGetError();
+	if (err == GL_NO_ERROR)
+		return;
+
+	for (int i = 0; i < s_seenCount; i++)
+	{
+		if (s_seen[i] == where)
+			return;
+	}
+	if (s_seenCount < 16)
+		s_seen[s_seenCount++] = where;
+
+	eprintwarn("[GLDIAG] GL error 0x%04X at %s (backend=%s)\n",
+		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
+}
+
 void GR_SwapWindow()
 {
+	GR_DiagGLError("end of frame");
+
+	/* [BILINDIAG] see VsFillVertex. Also reports the bilinear mode last pushed,
+	 * so one line says both what the shader was told and whether the geometry
+	 * marker it depends on is actually resolving. */
+	{
+		extern unsigned g_vsHits, g_vsMisses, g_prims3d, g_prims2d;
+		static unsigned s_lastTick = 0;
+		static int      s_lines = 0;
+		unsigned now = SDL_GetTicks();
+
+		if (g_cfg_bilinearFiltering && s_lines < 20 && (now - s_lastTick) >= 1000)
+		{
+			unsigned tot = g_vsHits + g_vsMisses;
+			s_lastTick = now;
+			s_lines++;
+			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d\n",
+			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
+			        g_prims3d, g_prims2d, g_PsxDitherSuppressed);
+			g_vsHits = g_vsMisses = 0;
+			g_prims3d = g_prims2d = 0;
+		}
+	}
+
+	/* Stretch the internal target onto the real window. This is the only bind of
+	 * framebuffer 0 that genuinely means "the window" -- every other one means
+	 * "the scene target" and goes through GR_ScreenFBO(). LINEAR so a lower
+	 * internal resolution scales up smoothly rather than blockily. */
+	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
+	{
+		int dx, dy, dw, dh;
+		GLuint src = GR_ScreenReadFBO();   /* resolves first when multisampled */
+
+		GR_PresentRect(&dx, &dy, &dw, &dh);
+
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glViewport(0, 0, g_presentWidth, g_presentHeight);
+
+		/* Scissor would clip both the clear and the blit to whatever the frame
+		 * last set, so it is off for the present. */
+		glDisable(GL_SCISSOR_TEST);
+
+		/* Only needed when the image does not fill the window, but harmless
+		 * otherwise and it keeps stale edges from ever showing through. */
+		if (dw != g_presentWidth || dh != g_presentHeight)
+		{
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+		}
+
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+		                  dx, dy, dx + dw, dy + dh,
+		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	}
+
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	/* Nothing in this renderer checks glGetError, so a state or format the
 	 * driver rejects just produces a wrong image and no message. Drain a BOUNDED
@@ -4851,7 +5633,10 @@ void GR_SwapWindow()
 	}
 
 
-	SDL_GL_SwapWindow(g_window);
+	if (PsyX_Angle_Active())
+		PsyX_Angle_Swap();
+	else
+		SDL_GL_SwapWindow(g_window);
 #endif
 
 	//glFinish();
@@ -5082,7 +5867,11 @@ void GR_SetViewPort(int x, int y, int width, int height)
 void GR_SetWireframe(int enable)
 {
 #if defined(RENDERER_OGL)
-	glPolygonMode(GL_FRONT_AND_BACK, enable ? GL_LINE : GL_FILL);
+	/* ES has no glPolygonMode at all, so the debug wireframe view is simply
+	 * unavailable on a translated backend. Emulating it would mean re-issuing
+	 * every draw as GL_LINES, which is not worth it for a debug toggle. */
+	if (g_grCaps.polygonMode)
+		glPolygonMode(GL_FRONT_AND_BACK, enable ? GL_LINE : GL_FILL);
 #endif
 }
 
@@ -5108,6 +5897,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_normal);
 	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
 	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
+	glEnableVertexAttribArray(a_geom3d);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;
@@ -5185,12 +5976,23 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	GR_BindVertexBuffer();
 
 #if USE_OPENGL
-	/* ORPHAN before writing. Overwriting a buffer the GPU may still be reading
-	 * makes the driver either stall until those draws retire or quietly shadow
-	 * the allocation; on a tiler (Mali) that shows up as submission time rather
-	 * than draw time, which is exactly where this frame's cost sits -- 168ms in
-	 * submit against 2.6ms of parse. Handing back the whole buffer first lets
-	 * the driver give fresh storage instead of waiting. */
+	/* ORPHAN the buffer before writing it.
+	 *
+	 * Overwriting storage the GPU may still be reading forces the driver to
+	 * either block until those draws retire or silently shadow the allocation.
+	 * GR_BindVertexBuffer alternates between two VBOs, which halves the odds but
+	 * does not remove them: with several DrawAllSplits per frame each buffer
+	 * comes back around while its previous contents can still be in flight.
+	 *
+	 * Passing NULL for the same size says "the old contents are dead" — the
+	 * driver hands back fresh storage immediately and the in-flight draws keep
+	 * reading the old block. Measured on a Mali-T720 (Arcade1Up cabinet), where
+	 * a tiler defers work to end-of-tile and the buffer is almost always still
+	 * busy: GL submission fell from 167.9 ms/frame to 7.3 ms, and an in-game
+	 * cutscene went from ~6.7 fps to ~53 fps. The win scales with how long the
+	 * GPU holds the buffer, so it is largest on tilers and shared-memory iGPUs
+	 * and smallest on a discrete desktop card — but it is never a pessimisation,
+	 * and the size is constant so drivers can recycle identical blocks. */
 	glBufferData(GL_ARRAY_BUFFER, MAX_VERTEX_BUFFER_SIZE * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
 	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
 #else

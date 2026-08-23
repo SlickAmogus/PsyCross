@@ -51,6 +51,10 @@ int strcasecmp(const char* _l, const char* _r)
 #endif // _WIN32
 
 SDL_Window* g_window = NULL;
+extern int  g_presentWidth, g_presentHeight;
+extern int  g_cfgRenderWidth, g_cfgRenderHeight, g_cfgFullscreenMode;
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+
 
 /* PC port: mouse confinement. Default on; the launcher/config can clear it. */
 int g_cfg_confineCursor = 1;
@@ -924,11 +928,12 @@ void PsyX_Sys_DoPollEvent()
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
-					/* This is the SURFACE size; the render size is derived from
-					 * it. Assigning g_windowWidth directly silently undid render
-					 * scaling -- Android fires a resize during startup, right
-					 * after init had computed the scaled size, so the setting
-					 * looked like it did nothing at all. */
+					/* This is the SURFACE size, and the render size is derived from it.
+					 * Assigning g_windowWidth directly is how both ports lost theirs:
+					 * Android fires a resize during startup right after init computed
+					 * the scaled size, and a fullscreen-desktop window reports the
+					 * DESKTOP size here right after creation. GR_ApplyRenderScale
+					 * re-derives both, and defers to borderless where that applies. */
 					{
 						extern int g_surfaceWidth, g_surfaceHeight;
 						extern void GR_ApplyRenderScale(void);
@@ -1066,12 +1071,6 @@ char PsyX_BeginScene()
 	// set — leaving stale "street sign" garbage from the prior frame
 	// visible for a split second. Forcing a clear every frame is the
 	// PC equivalent of glClear(GL_COLOR_BUFFER_BIT) at frame start.
-	/* Bind the scaled render target before anything is drawn or cleared, so the
-	 * whole frame lands in it. No-op at scale 1.0. */
-	{
-		extern void GR_BeginRenderScale(void);
-		GR_BeginRenderScale();
-	}
 
 	{
 		const RECT16 clipenv = activeDrawEnv.clip;
@@ -1164,12 +1163,6 @@ void PsyX_EndScene()
 		GR_PostProcess();
 	}
 
-	/* Upscale the scaled frame onto the window. After the post-process and the
-	 * freeze capture, both of which want the frame at its render size. */
-	{
-		extern void GR_EndRenderScale(void);
-		GR_EndRenderScale();
-	}
 
 	GR_SwapWindow();
 }
@@ -1344,7 +1337,7 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 		SDL_SetWindowSize(g_window, width, height);
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN);
 	}
-	else if (fullscreen == 2) /* borderless = desktop mode, resolution ignored */
+	else if (fullscreen == 2) /* borderless: desktop-sized window, scene rendered at the chosen size */
 	{
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	}
@@ -1355,6 +1348,25 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	}
 
 	SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
+
+	/* The window is now the PRESENT size. Borderless used to stop here, which is
+	 * why it ignored the chosen resolution and simply ran at desktop size.
+	 *
+	 * Instead, keep the desktop-sized window and render the scene into an
+	 * internal target at the chosen resolution, stretched to the window at
+	 * present. g_windowWidth/Height stay the RENDER size, so every viewport,
+	 * scissor and aspect calculation keeps working untouched.
+	 *
+	 * Skipped when the request matches the desktop (nothing to gain) or when
+	 * MSAA is on: the multisampling lives on the window's own buffer, so
+	 * redirecting the scene into a single-sampled target would silently throw
+	 * antialiasing away. If the target cannot be allocated the helper returns 0
+	 * and the stock desktop-resolution path runs exactly as before. */
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
+	GR_ApplyPresentSize(g_windowWidth, g_windowHeight);
+
 	GR_ResetDevice();
 	PsyX_UpdateMouseConfinement();
 }

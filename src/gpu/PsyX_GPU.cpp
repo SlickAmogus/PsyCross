@@ -12,6 +12,8 @@
 
 #include "psx/gtereg.h"
 
+extern "C" int GR_NeedViewSpaceData(void);
+
 #define GET_TPAGE_FORMAT(tpage) ((TexFormat)((tpage >> 7) & 0x3))
 #define GET_TPAGE_BLEND(tpage)  ((BlendMode)(((tpage >> 5) & 3) + 1))
 
@@ -183,7 +185,7 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	}
 	/* View-space propagates whenever PGXP is on too — the near-plane clipper
 	 * needs it (gate matches the vs FIFO / VShadow_Store in PsyX_GTE.cpp). */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) {
+	if (GR_NeedViewSpaceData()) {
 		const VsEntry* ve = Vs_Get(src, *(const unsigned*)src);
 		if (ve) Vs_Put(dst, ve->vx, ve->vy, ve->vz, ve->nocast, *(const unsigned*)dst,
 		               ve->ofx, ve->ofy, ve->h, ve->fade);
@@ -553,9 +555,21 @@ extern int g_PsyX_ForceItemDepth;
  * at the vertex's prim-field address (same address-keyed lookup as PGXP). A miss
  * leaves the memset-0 default, which the shader treats as "untracked" (vsz<=0,
  * not lit). Called when g_PsyX_UsePerPixelFlashlight or g_PsxUsePgxp (near clip). */
+/* [BILINDIAG] How often the view-space lookup actually resolves. a_normal.y --
+ * and therefore v_geom3d, the shader's "this is 3D geometry" test for bilinear
+ * -- is set ONLY on a hit, so a low hit rate means world geometry is silently
+ * being treated as 2D and left point-sampled. Counts only; reported once a
+ * second by the renderer. */
+unsigned g_vsHits = 0, g_vsMisses = 0;
+/* Primitives marked as world geometry vs left as 2D, so the gate can be judged
+ * by what it actually classifies rather than by reasoning about it. */
+unsigned g_prims3d = 0, g_prims2d = 0;
+
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
 	const VsEntry* e = Vs_Get(addr, *(const unsigned*)addr);
+
+	if (e) g_vsHits++; else g_vsMisses++;
 	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
 	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
 	 * memset-0 default = casts normally. ny doubles as the "view-space entry valid"
@@ -1741,11 +1755,26 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	 * view-space data these fill. Skipped for the isolated item model — it must
 	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
 	 * so losing near-clip eligibility is harmless). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
 		VsFillVertex(&vertex[2], p2);
+
+		/* Per-PRIMITIVE 3D marker. The lookup resolves ~84% of vertices, and
+		 * geom3d reaches the fragment stage as a varying -- so a prim with a
+		 * mix of resolved and unresolved vertices would interpolate across 0.5
+		 * and split one surface into filtered and unfiltered halves. One
+		 * resolved vertex is proof the whole primitive came from the GTE. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
+		{
+			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
+			g_prims3d++;
+		}
+		else
+		{
+			g_prims2d++;
+		}
 	}
 
 	if (g_PsxUsePgxp)
@@ -1796,12 +1825,25 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 	/* Before the PGXP block: near-clip eligibility reads the view-space data.
 	 * Skipped for the isolated item model so it stays out of the world's per-pixel
 	 * flashlight (see MakeVertexTriangle). */
-	if ((g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp) && !g_PsyX_ForceItemDepth)
+	if (GR_NeedViewSpaceData() && !g_PsyX_ForceItemDepth)
 	{
 		VsFillVertex(&vertex[0], p0);
 		VsFillVertex(&vertex[1], p1);
 		VsFillVertex(&vertex[2], p2);
 		VsFillVertex(&vertex[3], p3);
+
+		/* Per-primitive, same reasoning as MakeVertexTriangle. */
+		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f ||
+		    vertex[2].ny > 0.5f || vertex[3].ny > 0.5f)
+		{
+			vertex[0].geom3d = vertex[1].geom3d =
+			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
+			g_prims3d++;
+		}
+		else
+		{
+			g_prims2d++;
+		}
 	}
 
 	if (g_PsxUsePgxp)

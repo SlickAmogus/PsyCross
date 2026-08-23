@@ -225,6 +225,17 @@ typedef struct
 	 * shader reads it only under u_flashlightOn, and gates on vsz>0 so untracked
 	 * (zero) verts and 2D prims are never lit. */
 	float		vsx, vsy, vsz;
+
+	/* 1.0 when this vertex belongs to a primitive the GTE projected, i.e. world
+	 * geometry rather than a 2D screen prim. Set per PRIMITIVE, not per vertex:
+	 * the view-space lookup resolves ~84% of vertices, and because this reaches
+	 * the fragment stage as a varying, a prim with a mix of resolved and
+	 * unresolved vertices interpolates across 0.5 and splits a single surface
+	 * into filtered and unfiltered halves. Marking the whole prim from any one
+	 * resolved vertex removes that and lifts coverage to ~per-prim. Cannot reuse
+	 * a_normal.y, which the near clipper reads as "this vertex has valid
+	 * view-space data" and must stay per-vertex and truthful. */
+	float		geom3d;
 } GrVertex;
 
 typedef struct GrModernVertex
@@ -246,6 +257,7 @@ typedef enum
 	a_pgxp,
 	a_normal,
 	a_viewpos,
+	a_geom3d,
 } ShaderAttrib;
 
 typedef enum

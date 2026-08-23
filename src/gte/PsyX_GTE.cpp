@@ -7,6 +7,8 @@
 
 #include <math.h>
 
+extern "C" int GR_NeedViewSpaceData(void);
+
 
 
 GTERegisters gteRegs;
@@ -329,7 +331,7 @@ extern "C" void PGXP_StoreAddr(void* addr, int slot)
 	/* View-space shadow also feeds the PGXP near-plane clipper, so it must be
 	 * recorded whenever PGXP is on, not just for the per-pixel flashlight. Gate
 	 * matches the vs FIFO fill in GTE_RotTransPers below. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	if (GR_NeedViewSpaceData())
 		VShadow_Store(addr, s_vsFifoX[slot], s_vsFifoY[slot], s_vsFifoZ[slot],
 		              s_vsFifoOfx[slot], s_vsFifoOfy[slot], s_vsFifoH[slot]);
 }
@@ -853,7 +855,7 @@ int GTE_RotTransPers(int idx, int lm)
 	 * MAC1/MAC2/MAC3). Source data for the per-pixel flashlight AND the PGXP
 	 * near-plane clipper, so it runs when either is on. Mirrors the SXY FIFO
 	 * shift above so gte_stsxy* can resolve address->view-pos. Off = no cost. */
-	if (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp)
+	if (GR_NeedViewSpaceData())
 	{
 		s_vsFifoX[0] = s_vsFifoX[1]; s_vsFifoX[1] = s_vsFifoX[2]; s_vsFifoX[2] = (float)C2_MAC1;
 		s_vsFifoY[0] = s_vsFifoY[1]; s_vsFifoY[1] = s_vsFifoY[2]; s_vsFifoY[2] = (float)C2_MAC2;
