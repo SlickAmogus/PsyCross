@@ -279,6 +279,19 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 		magFilter = GL_LINEAR;
 		minFilter = GL_LINEAR;
 
+		/* ES 3.1 promoted glGetTexLevelParameteriv; ES 3.0 has no such entry
+		 * point, so like glDrawBuffer this is a missing SYMBOL and not just a
+		 * capability the probe can answer for. g_grCaps.texLevelParam is false
+		 * on every GLES context anyway, so the branch was already dead here --
+		 * it just has to be dead at compile time too.
+		 *
+		 * The upgrade is simply skipped rather than assumed: mipmaps exist
+		 * only for hi-res pack textures (hires_override.c generates them);
+		 * nothing builds them for base VRAM textures. Asking for
+		 * LINEAR_MIPMAP_LINEAR without them makes the texture INCOMPLETE and it
+		 * samples black, so with no way to tell the two apart here, Trilinear
+		 * and Anisotropic settle for bilinear on GLES. */
+#if !defined(RENDERER_OGLES)
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
 			GLint mipW = 0;
@@ -286,6 +299,7 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 			if (mipW > 0)
 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
 		}
+#endif
 	}
 
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
