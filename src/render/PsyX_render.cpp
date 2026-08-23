@@ -4599,6 +4599,15 @@ static void GR_EnsureShadowTarget(void)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
 	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
 	 * the array form, which takes the same GL_NONE. */
+	/* Unlike the enums shimmed in PsyX_render.h, this one is a FUNCTION: a GLES
+	 * build has no symbol to link against, so the capability test cannot be the
+	 * only guard. g_grCaps.drawBuffer is false on every GLES context anyway. */
+#if defined(RENDERER_OGLES)
+	{
+		const GLenum none = GL_NONE;
+		glDrawBuffers(1, &none);
+	}
+#else
 	if (g_grCaps.drawBuffer)
 		glDrawBuffer(GL_NONE);
 	else
@@ -4606,6 +4615,7 @@ static void GR_EnsureShadowTarget(void)
 		const GLenum none = GL_NONE;
 		glDrawBuffers(1, &none);
 	}
+#endif
 	glReadBuffer(GL_NONE);
 
 	/* An incomplete shadow FBO does not fail loudly -- it just makes every
