@@ -1027,6 +1027,46 @@ void SPUCore::DecodeAdpcmBlock(SPUVoiceState& v, int voiceIndex)
         m_referenceVoices[voiceIndex].resampler.PushSamples(v.blockSamples, kAdpcmBlockSamples);
 }
 
+// Stop every LOOPING voice, and only those. The software-renderer counterpart
+// of Pc_SpuStopLoopingVoices in PsyX_SPUAL.cpp -- see the long comment there
+// for why the game needs this at all: the PSX blanket SfxStop is disabled on PC
+// because it chops decaying samples mid-word, which left nothing to end an
+// ambient LOOP, and a loop is by definition the one voice that never finishes
+// on its own (the bridge wind survived a quickload and played forever).
+//
+// "Looping" is NOT just the sticky ENDX bit. reachedLoopEnd is set for BOTH
+// ADPCM end codes: code 3 (End+Repeat, a real loop) and code 1 (End+Mute, a
+// one-shot finishing). What separates them is the envelope -- code 1 forces the
+// voice into Release, so a finished one-shot is always releasing, while a
+// looping bed sits in Attack/Decay/Sustain. Testing the phase as well is what
+// keeps this from cutting the decay tails that motivated disabling the blanket
+// stop in the first place.
+void SPUCore::StopLoopingVoices()
+{
+    for (int i = 0; i < kNumVoices; i++)
+    {
+        SPUVoiceState& v = m_voices[i];
+
+        if (!v.reachedLoopEnd)
+            continue;
+        if (v.envPhase == EnvPhase::Off || v.envPhase == EnvPhase::Release)
+            continue;
+
+        // Silenced outright rather than key-off'd: a key-off only starts the
+        // release, and the ADPCM would keep looping underneath it for the whole
+        // release time. Looping voices are also exactly the ones with no decay
+        // tail to lose, which is the same reasoning the AL backend uses.
+        v.envPhase   = EnvPhase::Off;
+        v.envLevel   = 0;
+        v.envCounter = 0;
+
+        // Clear the pending jump too, so nothing re-arms the loop if the voice
+        // is examined again before the next Key On resets it.
+        v.blockLoopEnd            = false;
+        v.forceReleaseOnBlockEnd  = false;
+    }
+}
+
 void SPUCore::ShiftInNextRawSample(SPUVoiceState& v, int voiceIndex)
 {
     if (!v.blockValid || v.blockSamplePos >= kAdpcmBlockSamples)

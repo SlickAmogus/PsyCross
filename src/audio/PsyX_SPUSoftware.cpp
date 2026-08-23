@@ -560,4 +560,23 @@ u_int PsyX_SPUAL_GetQueuedXaFrames(void)
     return result;
 }
 
+#if defined(PSYX_NO_OPENAL)
+/* Normally supplied by PsyX_SPUAL.cpp, which PSYX_NO_OPENAL leaves out of the
+ * build entirely. The game calls this unconditionally (bodyprog_bgm_80087EA8.c)
+ * to end ambient LOOPS on a scene teardown, so on a target with no OpenAL at
+ * all it has to come from the software renderer instead -- and the bug it fixes
+ * (a looping bed surviving a quickload and playing forever) is not specific to
+ * the AL mixer.
+ *
+ * NOT part of the renamed dispatch set: this name is the same on both backends,
+ * so it is guarded rather than routed, exactly like g_PsyX_SfxOverride in
+ * PsyX_SPUDispatch.cpp. On a desktop build PsyX_SPUAL.cpp owns the definition. */
+void Pc_SpuStopLoopingVoices(void)
+{
+    SDL_LockMutex(g_spuMutex);
+    g_spu().StopLoopingVoices();
+    SDL_UnlockMutex(g_spuMutex);
+}
+#endif
+
 }
