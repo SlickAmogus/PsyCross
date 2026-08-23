@@ -64,6 +64,28 @@ extern unsigned int g_PsyX_DefaultFBO;
  * kind of symbol") in every TU that reaches this header before that one. */
 #   include <OpenGLES/ES3/gl.h>
 #   include <OpenGLES/ES3/glext.h>
+
+/* Also shimmed in PsyX/PsyX_render.h — see the note there. The renderer now
+ * picks between the desktop and GLES spellings at RUNTIME (g_grCaps), which
+ * needs the desktop tokens to at least EXIST for that half of each branch to
+ * compile; Apple ships real ES 3.0 headers, where they do not. Registry values,
+ * defined only so the branch parses — every one sits behind a capability flag
+ * that is false on any GLES context, so none is ever handed to the driver. */
+#   ifndef GL_TEXTURE_WIDTH
+#       define GL_TEXTURE_WIDTH             0x1000
+#   endif
+#   ifndef GL_TEXTURE_HEIGHT
+#       define GL_TEXTURE_HEIGHT            0x1001
+#   endif
+#   ifndef GL_TEXTURE_INTERNAL_FORMAT
+#       define GL_TEXTURE_INTERNAL_FORMAT   0x1003
+#   endif
+#   ifndef GL_TEXTURE_BORDER_COLOR
+#       define GL_TEXTURE_BORDER_COLOR      0x1004
+#   endif
+#   ifndef GL_CLAMP_TO_BORDER
+#       define GL_CLAMP_TO_BORDER           0x812D
+#   endif
 #else
 
 #ifdef __gl_h_
