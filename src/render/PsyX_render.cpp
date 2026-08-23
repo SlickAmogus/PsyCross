@@ -656,9 +656,12 @@ int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
 
+/* PSYX_DEFAULT_FBO, not a literal 0, when no internal target is active: on
+ * iOS SDL composes into its own framebuffer object and 0 is not the screen.
+ * Compile-time 0 everywhere else, so this is the value it always was. */
 extern "C" GLuint GR_ScreenFBO(void)
 {
-	return g_internalFBO;
+	return (g_internalFBO != 0) ? g_internalFBO : (GLuint)PSYX_DEFAULT_FBO;
 }
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
@@ -682,7 +685,7 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 		return s_resolveFBO;
 	}
 
-	return g_internalFBO;
+	return GR_ScreenFBO();
 }
 
 /* Where the internal target lands inside the real window.
