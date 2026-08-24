@@ -104,6 +104,14 @@ int   g_PsxFixedCamActive = 0;
  * bars, so the gameplay vertical crop (g_PsxWorldVScale) is skipped while this is set —
  * otherwise it scaled/clipped the bars + subtitles off the bottom of the frame. */
 int   g_PsxCutsceneActive = 0;
+/* Set by the game while the world item-pickup take screen is up. The item is the
+ * only live 3D (the world behind it is a frozen present), staged by its own
+ * authored camera like a cutscene -- so like cutscenes it renders at FULL
+ * vertical scale. Leaving the gameplay vfov crop (0.872 top-anchored) on drew
+ * every picked-up item 112*(1/0.872-1) ~= 16 PSX units below its PSX position
+ * under Hor+ (reported as "pickups ~20 too low"; invisible in pillarbox, which
+ * never crops). Horizontal Hor+ behaviour is unchanged. */
+int   g_PsxItemTakeActive = 0;
 /* Set by the game around the 2D-UI ordering-table draw (OrderingTable2: map-message
  * subtitles, screen fade, cutscene letterbox bars). When set, GR_SetOffscreenState
  * draws that pass at FULL vertical ortho (vscale 1.0) so it isn't clipped by the Hor+
@@ -3784,7 +3792,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * ortho so it isn't scaled/clipped off the bottom. The FIX_ANG framing shift
 				 * (g_PsxWorldVShift) is applied at the GTE projection center by the game, not
 				 * here — an ortho-window shift reveals rows overlay prims never cover. */
-				const float vscale = g_PsxUIOrthoPass ? 1.0f
+				const float vscale = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
 				                   : (g_PsxCutsceneActive ? g_PsxCutsceneVScale : g_PsxWorldVScale);
 				orthoTop = 0.0f;
 				orthoBot = psxH * vscale;
