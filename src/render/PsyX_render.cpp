@@ -341,12 +341,19 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 		magFilter = GL_LINEAR;
 		minFilter = GL_LINEAR;
 
+		/* ES 3.1 promoted glGetTexLevelParameteriv; ES 3.0 has no such entry
+		 * point, so like glDrawBuffer this is a missing SYMBOL and not just a
+		 * capability the probe can answer for. g_grCaps.texLevelParam is false
+		 * on every GLES context anyway, so the branch was already dead here --
+		 * it just has to be dead at compile time too.
+		 *
+		 * The upgrade is simply skipped rather than assumed: mipmaps exist
+		 * only for hi-res pack textures (hires_override.c generates them);
+		 * nothing builds them for base VRAM textures. Asking for
+		 * LINEAR_MIPMAP_LINEAR without them makes the texture INCOMPLETE and it
+		 * samples black, so with no way to tell the two apart here, Trilinear
+		 * and Anisotropic settle for bilinear on GLES. */
 #if !defined(RENDERER_OGLES)
-		/* Compile-time, not just the runtime cap: glGetTexLevelParameteriv and
-		 * GL_TEXTURE_WIDTH are ES 3.1, and the mobile targets build against ES
-		 * 3.0 headers where the token is not declared at all. Mipmapped
-		 * filtering is simply unavailable there rather than mis-detected --
-		 * nothing in this path uploads mip levels on those targets anyway. */
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
 			GLint mipW = 0;
@@ -801,7 +808,12 @@ extern "C" void GR_MarkTextureNearest(TextureID tex);
  * Compile-time 0 everywhere else, so this is the value it always was. */
 extern "C" GLuint GR_ScreenFBO(void)
 {
-	return (g_internalFBO != 0) ? g_internalFBO : (GLuint)PSYX_DEFAULT_FBO;
+	/* Zero is not "the screen" on every platform -- see PSYX_DEFAULT_FBO. iOS
+	 * renders into a framebuffer SDL builds around a CAEAGLLayer, whose name the
+	 * driver picks, so binding 0 there selects a framebuffer that does not
+	 * exist and every draw is silently discarded. Compile-time 0 elsewhere, so
+	 * the internal-target path is unchanged for every other target. */
+	return g_internalFBO ? g_internalFBO : (GLuint)PSYX_DEFAULT_FBO;
 }
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
@@ -825,7 +837,11 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 		return s_resolveFBO;
 	}
 
-	return GR_ScreenFBO();
+	/* Same fallback as GR_ScreenFBO: with no internal target this means "read
+	 * the screen", which is not framebuffer 0 on iOS. Reading 0 there is not an
+	 * error the caller sees -- the blit just produces nothing, which is how the
+	 * pause/map freeze capture came back as a flat grey field. */
+	return g_internalFBO ? g_internalFBO : (GLuint)PSYX_DEFAULT_FBO;
 }
 
 /* Where the internal target lands inside the real window.
@@ -939,7 +955,7 @@ int GR_SetInternalResolution(int w, int h)
 	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, s_internalDepthRbo);
 
 	st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 	if (st != GL_FRAMEBUFFER_COMPLETE)
 	{
@@ -954,7 +970,7 @@ int GR_SetInternalResolution(int w, int h)
 		glBindFramebuffer(GL_FRAMEBUFFER, s_resolveFBO);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_internalColorTex, 0);
 		st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 
 		if (st != GL_FRAMEBUFFER_COMPLETE)
 		{
@@ -1253,12 +1269,6 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 }
 #endif
 
-#if defined(PSYX_IOS)
-/* See PSYX_DEFAULT_FBO in PsyX_render.h. Resolved below, before anything has
- * had a chance to bind a framebuffer of its own. */
-extern "C" unsigned int g_PsyX_DefaultFBO = 0;
-#endif
-
 /* Desktop GL and ES 3.0 share most entry points but not all, and under ANGLE
  * the desktop-only ones simply fail to resolve. glad leaves those pointers NULL,
  * so probing them is both the cheapest and the most honest capability test —
@@ -1335,6 +1345,12 @@ static void GR_ProbeCapabilities(void)
 #endif
 	}
 }
+
+#if defined(PSYX_IOS)
+/* See PSYX_DEFAULT_FBO in PsyX_render.h. Resolved below, before anything has
+ * had a chance to bind a framebuffer of its own. */
+extern "C" unsigned int g_PsyX_DefaultFBO = 0;
+#endif
 
 int GR_InitialiseGLExt()
 {
@@ -1433,12 +1449,45 @@ int GR_InitialiseGLExt()
  * overwrite the chosen resolution with the desktop size in borderless. */
 extern "C" void GR_ApplyPresentSize(int realW, int realH)
 {
+#if defined(PSYX_IOS)
+	/* Every caller hands this WINDOW POINTS -- SDL_GetWindowSize at the end of
+	 * GR_InitialiseGLContext, and event.window.data1/2 from a resize. On a
+	 * desktop those are pixels and the distinction does not exist. On iOS with
+	 * ALLOW_HIGHDPI they are a THIRD of the drawable: 956x440 against a
+	 * 2868x1320 panel. Assigning them below put the viewport in one corner of
+	 * the screen (GL origin is bottom-left, hence bottom-left), and took the
+	 * aspect-corrected cull bounds with it.
+	 *
+	 * There is exactly one correct answer for this size on a phone, so it is
+	 * resolved here rather than at each caller -- a new caller cannot get it
+	 * wrong, and the rotation resize is corrected for free. */
+	if (g_window)
+	{
+		int drawableW = 0, drawableH = 0;
+
+		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
+		if (drawableW > 0 && drawableH > 0)
+		{
+			realW = drawableW;
+			realH = drawableH;
+		}
+	}
+#endif
+
 	if (realW <= 0 || realH <= 0)
 		return;
 
 	g_presentWidth  = realW;
 	g_presentHeight = realH;
 
+	/* Never on iOS. The internal target exists so borderless can render at a
+	 * chosen resolution and stretch to the desktop; a phone has no window mode
+	 * and no resolution to choose, and g_windowWidth/Height there are the
+	 * panel's real drawable, published back into the config at startup. Letting
+	 * a hand-edited config.cfg set fullscreen = 2 would point the scene at a
+	 * 640x480 target and stretch it, for no gain -- and the row that would let
+	 * anyone pick that is already compiled out of the iOS options menu. */
+#if !defined(PSYX_IOS)
 	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
 	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
 	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
@@ -1448,6 +1497,7 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 
 		return;
 	}
+#endif
 
 	GR_DestroyInternalTarget();
 	g_windowWidth  = realW;
@@ -2595,10 +2645,42 @@ ShaderID GR_Shader_Compile(const char* source)
 	{
 #if defined(RENDERER_OGLES)
 		tcNoPerspective = "";
+		/* Say so once rather than let `affine_textures = 1` look like it took
+		 * effect. Shaders compile here per program, so gate the notice. */
+		static bool s_affineUnavailableLogged = false;
+		if (!s_affineUnavailableLogged)
+		{
+			s_affineUnavailableLogged = true;
+			eprintwarn("affine_textures is on, but GLSL ES has no `noperspective` "
+			           "qualifier - texture mapping stays perspective-correct "
+			           "(no PSX UV warping) on this renderer.\n");
+		}
 #else
 		tcNoPerspective = g_grCaps.noperspective ? "noperspective " : "";
 #endif
 	}
+
+	/* v_page_clut is NOT a colour or a coordinate: .xy is the VRAM texture-page
+	 * origin and .zw is the CLUT (palette) address, both exact texel addresses
+	 * and both constant across a primitive. Desktop declares them
+	 * `noperspective`, which for a constant is exact. GLSL ES has no such
+	 * qualifier, and dropping it leaves the default `smooth` -- perspective-
+	 * correct, i.e. divided through an interpolated 1/w. A 2D prim has constant
+	 * w so the value survives, which is why the menus, logos and FMVs were fine;
+	 * a 3D world triangle has varying w, so the palette address drifts across
+	 * the face and every texel resolves against the wrong CLUT row. That is the
+	 * flat-coloured world.
+	 *
+	 * `flat` is the correct qualifier for a per-primitive constant and ES3 has
+	 * it. v_texcoord genuinely does need interpolating, so only the page/CLUT
+	 * pair changes. */
+#if defined(ES3_SHADERS)
+	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING flat out\n");
+	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING flat in\n");
+#else
+	strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
+	strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
+#endif
 
 	{
 		char affineDef[128];
@@ -4619,7 +4701,6 @@ static void GR_EnsureShadowTarget(void)
 	             0, GL_DEPTH_COMPONENT, g_grIsGLES ? GL_UNSIGNED_INT : GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-#if !defined(RENDERER_OGLES)
 	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
 	 * neither, and on a GLES build the tokens are not even declared -- so this
 	 * is a compile-time split rather than the runtime g_grIsGLES test the
@@ -4638,19 +4719,16 @@ static void GR_EnsureShadowTarget(void)
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	}
-#else
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-#endif
 	glBindTexture(GL_TEXTURE_2D, 0);
 
 	glGenFramebuffers(1, &g_shadowFBO);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_shadowFBO);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
 	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
-	 * the array form, which takes the same GL_NONE. On a GLES build the singular
-	 * is undeclared, not merely unresolved, so the runtime cap sits inside a
-	 * compile-time guard. */
+	 * the array form, which takes the same GL_NONE. */
+	/* Unlike the enums shimmed in PsyX_render.h, this one is a FUNCTION: a GLES
+	 * build has no symbol to link against, so the capability test cannot be the
+	 * only guard. g_grCaps.drawBuffer is false on every GLES context anyway. */
 #if defined(RENDERER_OGLES)
 	{
 		const GLenum none = GL_NONE;
@@ -4906,8 +4984,6 @@ void GR_CaptureLastFrame(void)
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 	/* Report once whether the capture actually happened. g_freezeFrameValid used
 	 * to be set unconditionally, so a capture that failed still counted as good
 	 * and pause presented a black texture with no clue why -- which is exactly
@@ -4950,8 +5026,8 @@ void GR_CaptureLastFrame(void)
 		}
 	}
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 #endif
 }
 
@@ -5843,7 +5919,7 @@ void GR_SwapWindow()
 		GR_PresentRect(&dx, &dy, &dw, &dh);
 
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
 		glViewport(0, 0, g_presentWidth, g_presentHeight);
 
 		/* Scissor would clip both the clear and the blit to whatever the frame
@@ -5893,7 +5969,6 @@ void GR_SwapWindow()
 			}
 		}
 	}
-
 
 	if (PsyX_Angle_Active())
 		PsyX_Angle_Swap();

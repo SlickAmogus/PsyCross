@@ -411,6 +411,10 @@ public:
     int GetReferenceLastBandlimitBucket(int voiceIndex) const;
     double GetEnhancedReverbEnergy() const;
 
+    // Silence every voice that is looping, and only those. See the definition
+    // for why "looping" is not simply the ENDX bit.
+    void StopLoopingVoices();
+
     // ---- Direct access for tests/tools -------------------------------------
     const SPUVoiceState& GetVoiceState(int voiceIndex) const { return m_voices[voiceIndex]; }
 

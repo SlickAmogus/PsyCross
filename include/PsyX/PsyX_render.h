@@ -85,6 +85,32 @@
 #   include <EGL/egl.h>
 #endif
 
+/* Desktop-GL / ES 3.2 enums that Apple's ES 3.0 headers do not declare.
+ *
+ * The renderer decides between the desktop and the GLES spelling at RUNTIME
+ * now (g_grCaps, so one binary can serve both native GL and ANGLE's ES). That
+ * works everywhere glad supplies a full enum table regardless of the live
+ * context — but on iOS the tokens are absent from the headers outright, so the
+ * desktop side of each branch will not COMPILE, never mind run.
+ *
+ * These are the canonical values from the GL registry, defined only so those
+ * branches parse. Every one of them sits behind a capability test that is
+ * false on GLES, so none is ever handed to the driver here. */
+/* Android compiles against the NDK's <GLES3/gl3.h>, which is ES 3.0 and lacks
+ * these for exactly the same reason Apple's framework does -- the guard names
+ * iOS only because iOS hit it first. */
+#if defined(PSYX_IOS) || defined(__ANDROID__)
+#   ifndef GL_TEXTURE_WIDTH
+#       define GL_TEXTURE_WIDTH         0x1000
+#   endif
+#   ifndef GL_TEXTURE_BORDER_COLOR
+#       define GL_TEXTURE_BORDER_COLOR  0x1004
+#   endif
+#   ifndef GL_CLAMP_TO_BORDER
+#       define GL_CLAMP_TO_BORDER       0x812D
+#   endif
+#endif
+
 #endif
 
   // setup renderer texture formats
