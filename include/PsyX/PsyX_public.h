@@ -75,6 +75,13 @@ extern int							g_cfg_menuFilter;
 extern int							g_cfg_disableDpadMovement;
 extern int							g_cfg_affineTextures;
 extern int							g_cfg_psxDither;
+/* Texture filtering mode: 0 off, 1 bilinear, 2 trilinear, 3 anisotropic.
+ * Applied per BIND (32-bit replacements, via GL state) and per FRAGMENT (PSX
+ * CLUT textures, in the shader, since interpolating palette indices is
+ * meaningless). g_cfg_bilinearFiltering remains as the derived "any filtering"
+ * flag for callers that only need a yes/no. */
+extern int							g_cfg_textureFilter;
+extern int							g_cfg_anisoLevel;
 extern int							g_cfg_pgxpTextureCorrection;
 
 /* PC port: MSAA sample count for the default framebuffer (0 = off, 2/4/8). Must

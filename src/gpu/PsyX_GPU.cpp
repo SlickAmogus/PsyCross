@@ -555,21 +555,9 @@ extern int g_PsyX_ForceItemDepth;
  * at the vertex's prim-field address (same address-keyed lookup as PGXP). A miss
  * leaves the memset-0 default, which the shader treats as "untracked" (vsz<=0,
  * not lit). Called when g_PsyX_UsePerPixelFlashlight or g_PsxUsePgxp (near clip). */
-/* [BILINDIAG] How often the view-space lookup actually resolves. a_normal.y --
- * and therefore v_geom3d, the shader's "this is 3D geometry" test for bilinear
- * -- is set ONLY on a hit, so a low hit rate means world geometry is silently
- * being treated as 2D and left point-sampled. Counts only; reported once a
- * second by the renderer. */
-unsigned g_vsHits = 0, g_vsMisses = 0;
-/* Primitives marked as world geometry vs left as 2D, so the gate can be judged
- * by what it actually classifies rather than by reasoning about it. */
-unsigned g_prims3d = 0, g_prims2d = 0;
-
 static inline void VsFillVertex(GrVertex* v, const void* addr)
 {
 	const VsEntry* e = Vs_Get(addr, *(const unsigned*)addr);
-
-	if (e) g_vsHits++; else g_vsMisses++;
 	/* nx doubles as the shadow-caster suppress flag (a_normal is otherwise unused —
 	 * the cone shader reconstructs its normal from derivatives). A miss leaves the
 	 * memset-0 default = casts normally. ny doubles as the "view-space entry valid"
@@ -771,7 +759,25 @@ enum { SPLIT_DEPTH_DISABLED = 0, SPLIT_DEPTH_WORLD = 2 };
  * depth channel (plan Step 3 skips the memset when PGXP is on; a reused packet
  * address from a previous frame must then read as a miss, exactly like the
  * s_shadow / s_affine tables already do). Inert while the memset still runs. */
-struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; };
+struct SZEntry { uintptr_t key; uint32_t sz[4]; unsigned gen; unsigned char kind; unsigned char alpha; };
+
+/* Per-prim ALPHA (0..255, default 255 = opaque semantics unchanged), armed like
+ * the SZ payload and carried in the same entry. BM_AVERAGE is real
+ * SRC_ALPHA blending on PC, so scaling a prim's alpha is a true transparency
+ * fade -- the one thing an average-blended DARK texture (the bullet decal)
+ * needs to dissolve into fog, since no vertex-colour arithmetic can lift a dark
+ * texture above the fog it darkens. */
+static int g_primAlphaNext = 255;
+/* Set per prim by ApplyGtePerVertexDepthImpl (which runs before the colour
+ * builders), consumed and reset by them. */
+static unsigned char s_primAlphaPending = 255;
+
+extern "C" void PsyX_SetNextPrimAlpha(int a)
+{
+	if (a < 0)   a = 0;
+	if (a > 255) a = 255;
+	g_primAlphaNext = a;
+}
 static SZEntry g_szTable[SZ_TABLE_SIZE];
 
 /* --- Depth channel Step 3 (docs: PGXP_PR51_Vetting.md; live only when PGXP is
@@ -977,12 +983,16 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 			g_szTable[s].sz[2] = s2; g_szTable[s].sz[3] = s3;
 			g_szTable[s].gen = s_pgxpGen;
 			g_szTable[s].kind = kind;
+			g_szTable[s].alpha = (unsigned char)g_primAlphaNext;
+			g_primAlphaNext = 255;
 			return;
 		}
 	}
 	// Probe exhausted — overwrite initial slot
 	if (g_PsxUsePgxp) s_dbgSzExhaust++;
 	g_szTable[slot].key = key;
+	g_szTable[slot].alpha = (unsigned char)g_primAlphaNext;
+	g_primAlphaNext = 255;
 	g_szTable[slot].sz[0] = s0; g_szTable[slot].sz[1] = s1;
 	g_szTable[slot].sz[2] = s2; g_szTable[slot].sz[3] = s3;
 	g_szTable[slot].gen = s_pgxpGen;
@@ -1061,6 +1071,25 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curNoFlashlight = false;
 }
 
+static unsigned char PsyX_LookupGteAlpha(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	int slot = (int)((key >> 2) & SZ_TABLE_MASK);
+	for (int i = 0; i < 16; i++) {
+		int s = (slot + i) & SZ_TABLE_MASK;
+		if (g_szTable[s].key == key)
+			/* Gen-validate ALWAYS (unlike the depths lookup's PGXP-gated
+			 * check): arm and consume are same-frame, so a match from an
+			 * earlier gen is a reused packet address, not this prim. Without
+			 * this, a decal's fade alpha from gameplay attached itself to
+			 * whatever landed on that address later -- the load screen drew
+			 * Harry semi-transparent, ghosting over the uncleared background. */
+			return (g_szTable[s].gen == s_pgxpGen) ? g_szTable[s].alpha : 255;
+		if (g_szTable[s].key == 0) break;
+	}
+	return 255;
+}
+
 static bool PsyX_LookupGteDepths(const void* prim, uint32_t* sz, unsigned char* kindOut = nullptr)
 {
 	uintptr_t key = (uintptr_t)prim;
@@ -1115,6 +1144,13 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 		else if (kind == SZ_KIND_EXACT) s_dbgParseHitExact++;
 		else                             s_dbgParseHitNone++;
 	}
+
+	/* Per-prim alpha: 255 for everything that never armed it. NOT written to
+	 * the vertices here -- the parse calls the COLOUR builders after this
+	 * function, and every one of them writes a = 255, which silently stomped
+	 * the first version of this. Stashed instead; the colour builders consume
+	 * it (s_primAlphaPending) and reset it to 255. */
+	s_primAlphaPending = PsyX_LookupGteAlpha(polyTag);
 
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
@@ -1767,14 +1803,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 		 * and split one surface into filtered and unfiltered halves. One
 		 * resolved vertex is proof the whole primitive came from the GTE. */
 		if (vertex[0].ny > 0.5f || vertex[1].ny > 0.5f || vertex[2].ny > 0.5f)
-		{
 			vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
-			g_prims3d++;
-		}
-		else
-		{
-			g_prims2d++;
-		}
 	}
 
 	if (g_PsxUsePgxp)
@@ -1838,11 +1867,6 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 		{
 			vertex[0].geom3d = vertex[1].geom3d =
 			vertex[2].geom3d = vertex[3].geom3d = 1.0f;
-			g_prims3d++;
-		}
-		else
-		{
-			g_prims2d++;
 		}
 	}
 
@@ -1887,6 +1911,29 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
 	ScreenCoordsToEmulator(vertex, 4);
+}
+
+
+/* Stamp the polygon's UV bounding box on every vertex (see GrVertex.ulo). */
+static inline void SetUvLimits(GrVertex* vertex, int count)
+{
+	unsigned char ulo = vertex[0].u, uhi = vertex[0].u;
+	unsigned char vlo = vertex[0].v, vhi = vertex[0].v;
+	int i;
+
+	for (i = 1; i < count; i++)
+	{
+		if (vertex[i].u < ulo) ulo = vertex[i].u;
+		if (vertex[i].u > uhi) uhi = vertex[i].u;
+		if (vertex[i].v < vlo) vlo = vertex[i].v;
+		if (vertex[i].v > vhi) vhi = vertex[i].v;
+	}
+
+	for (i = 0; i < count; i++)
+	{
+		vertex[i].ulo = ulo; vertex[i].vlo = vlo;
+		vertex[i].uhi = uhi; vertex[i].vhi = vhi;
+	}
 }
 
 void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, unsigned char* uv3, short page, short clut, unsigned char dither)
@@ -1942,6 +1989,8 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 4);
 }
 
 void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, short page, short clut, unsigned char dither)
@@ -1989,6 +2038,8 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 		vertex[3].tcx = -1;
 		vertex[3].tcy = -1;
 	}*/
+
+	SetUvLimits(vertex, 3);
 }
 
 void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clut, short w, short h)
@@ -2032,20 +2083,25 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
 
-	if (g_cfg_bilinearFiltering)
-	{
-		vertex[0].tcx = -1;
-		vertex[0].tcy = -1;
+	/* An upstream half-texel UV nudge used to sit here, applied to every RECT
+	 * whenever filtering was enabled: tcx/tcy reach the vertex shader as
+	 * a_extra.xy and it adds a_extra.xy * 0.5 to the texture coordinate.
+	 *
+	 * RECTs are how 2D sprites and TEXT GLYPHS are drawn, and font atlases pack
+	 * their cells edge to edge with no gutter -- so half a texel over lands
+	 * inside the neighbouring glyph and draws a slice of it beside the letter,
+	 * with the whole 2D layer shifted down and right. That is the reported
+	 * corruption, and it appeared for every mode except Off and Dithering
+	 * because those are the only two that leave this flag clear.
+	 *
+	 * It also could not have been doing any good: the gate reports 0 on menu
+	 * frames, so those glyphs are point-sampled anyway and were paying the
+	 * offset for filtering they never received. The two sibling call sites in
+	 * MakeTexcoordQuad/Triangle were already commented out for what looks like
+	 * the same reason; this one was missed. The sampler now brackets its taps
+	 * around P - 0.5 itself, so nothing needs compensating here. */
 
-		vertex[1].tcx = -1;
-		vertex[1].tcy = -1;
-
-		vertex[2].tcx = -1;
-		vertex[2].tcy = -1;
-
-		vertex[3].tcx = -1;
-		vertex[3].tcy = -1;
-	}
+	SetUvLimits(vertex, 4);
 }
 
 void MakeTexcoordLineZero(GrVertex* vertex, unsigned char dither)
@@ -2142,13 +2198,16 @@ void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 
 void MakeColourNoShade(GrVertex* vertex, int n)
 {
+	const unsigned char a = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
 	--n;
 	while (n >= 0)
 	{
 		vertex[n].r = 128;
 		vertex[n].g = 128;
 		vertex[n].b = 128;
-		vertex[n].a = 255;
+		vertex[n].a = a;
 		vertex[n]._p0 = 0;
 		--n;
 	}
@@ -2156,8 +2215,15 @@ void MakeColourNoShade(GrVertex* vertex, int n)
 
 void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2167,32 +2233,39 @@ void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col1[0];
 	vertex[2].g = col1[1];
 	vertex[2].b = col1[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col0[0];
 	vertex[3].g = col0[1];
 	vertex[3].b = col0[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 
 void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 3);
 		return;
 	}
@@ -2204,26 +2277,33 @@ void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, 
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 }
 
 void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
 {
+	const unsigned char _pa = s_primAlphaPending;
+
+	s_primAlphaPending = 255;
+
 	if (!shadeTexOn)
 	{
+		/* Hand the taken alpha back: NoShade takes the stash itself, and the
+		 * take at this function's head already cleared it. */
+		s_primAlphaPending = _pa;
 		MakeColourNoShade(vertex, 4);
 		return;
 	}
@@ -2236,25 +2316,25 @@ void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsi
 	vertex[0].r = col0[0];
 	vertex[0].g = col0[1];
 	vertex[0].b = col0[2];
-	vertex[0].a = 255;
+	vertex[0].a = _pa;
 	vertex[0]._p0 = 0;
 
 	vertex[1].r = col1[0];
 	vertex[1].g = col1[1];
 	vertex[1].b = col1[2];
-	vertex[1].a = 255;
+	vertex[1].a = _pa;
 	vertex[1]._p0 = 0;
 
 	vertex[2].r = col2[0];
 	vertex[2].g = col2[1];
 	vertex[2].b = col2[2];
-	vertex[2].a = 255;
+	vertex[2].a = _pa;
 	vertex[2]._p0 = 0;
 
 	vertex[3].r = col3[0];
 	vertex[3].g = col3[1];
 	vertex[3].b = col3[2];
-	vertex[3].a = 255;
+	vertex[3].a = _pa;
 	vertex[3]._p0 = 0;
 }
 

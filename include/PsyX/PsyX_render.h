@@ -236,6 +236,15 @@ typedef struct
 	 * a_normal.y, which the near clipper reads as "this vertex has valid
 	 * view-space data" and must stay per-vertex and truthful. */
 	float		geom3d;
+
+	/* Per-POLYGON UV bounds (min u,v / max u,v), identical on every vertex of
+	 * the prim. The manual bilinear/aniso taps clamp to them so a tap at the
+	 * edge of a polygon's texture region cannot read the neighbouring region of
+	 * the page -- the bright seam down a character's UV boundary (Harry's
+	 * pants), and the same class as the gutterless font bleed. All-zero means
+	 * "no bounds known" and the shader skips the clamp, so prim paths that
+	 * never set them keep the old behaviour. DuckStation's approach. */
+	u_char		ulo, vlo, uhi, vhi;
 } GrVertex;
 
 typedef struct GrModernVertex
@@ -258,6 +267,7 @@ typedef enum
 	a_normal,
 	a_viewpos,
 	a_geom3d,
+	a_uvlim,
 } ShaderAttrib;
 
 typedef enum

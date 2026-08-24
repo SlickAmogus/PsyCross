@@ -80,6 +80,14 @@ float g_PsxPixelAspect = 1.0f;
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
 float g_PsxWorldVScale = 0.872f;
+/* Vertical FOV scale for the 3D world DURING CUTSCENES, separate from gameplay.
+ * The 0.872 gameplay crop is a fixed-gameplay-camera correction; cutscene
+ * cameras have their own framing and DuckStation shows them at full vertical
+ * FOV, so cropping them to 0.872 zoomed the shot and pushed characters' heads
+ * off the top (reported vs emulator). 1.0 = full vertical (matches DuckStation);
+ * the 2D UI pass already renders full-vertical independently, so subtitles and
+ * letterbox bars are unaffected. Console `cutfov <n>`. */
+float g_PsxCutsceneVScale = 1.0f;
 /* Vertical view shift (amount, PSX screen-Y units) for FIXED-ANGLE camera shots, which
  * frame the top of the scene clipped vs PSX (e.g. a medkit off the top). The GAME applies
  * it (MainLoop, game_main.c) by shifting the GTE projection center down (SetGeomOffset)
@@ -237,6 +245,129 @@ int g_cfg_pgxpZBuffer = 1;
 int g_PsxUsePgxp = 0;
 int g_cfg_bilinearFiltering = 0;
 
+/* Texture filtering, rebuilt as one mode instead of a single on/off flag whose
+ * effect was baked into textures at creation time.
+ *   0 off, 1 bilinear, 2 trilinear, 3 anisotropic
+ * Trilinear and anisotropic need mip levels or a walked footprint, so what each
+ * mode can deliver differs by texture class -- see GR_ApplyTextureFilter for the
+ * hardware path (32-bit replacements) and the shader samplers for PSX CLUT
+ * textures, where filtering has to be done by hand. */
+int g_cfg_textureFilter = 0;
+int g_cfg_anisoLevel    = 8;    /* user cap on taps / GL max anisotropy */
+static float s_glMaxAniso = 0.0f;  /* 0 = extension absent */
+
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+
+/* Apply the current filtering mode to the texture that is bound RIGHT NOW.
+ *
+ * This used to be decided in GR_CreateRGBATexture, i.e. baked in when the
+ * texture was created -- so changing the setting at runtime only affected
+ * textures made afterwards, and everything already loaded kept whatever the
+ * setting happened to be at boot. That is why the option behaved
+ * inconsistently no matter which way it was toggled. Deciding it at bind time
+ * makes the setting mean the same thing for every texture, always.
+ *
+ * Only the 32-bit replacement class can use hardware filtering: a PSX CLUT
+ * texture holds palette indices, and interpolating an index yields a colour
+ * that is in no neighbouring texel, so those are filtered in the shader instead.
+ *
+ * Trilinear needs mip levels. Rather than assume, level 1 is queried and the
+ * mode falls back to plain linear when there is no mip chain -- asking for
+ * MIPMAP_LINEAR on a texture without mips renders it undefined. The query is
+ * desktop-only, so GLES takes the same safe fallback. */
+/* Textures that must never be filtered, whatever the mode.
+ *
+ * Font atlases paint their glyph cells edge to edge with NO gutter, so a linear
+ * tap at a cell boundary reaches into the neighbouring glyph and draws its first
+ * column as a full-height bar beside the letter. hires_override.c already
+ * point-samples them at upload for exactly that reason -- but a filter applied
+ * per BIND overwrites that decision every frame, which put the ghost text back
+ * the moment any filtering mode was selected. Marked textures keep the sampling
+ * their loader chose. */
+#define GR_NEAREST_SET_SIZE 256
+static TextureID s_nearestTex[GR_NEAREST_SET_SIZE];
+static int       s_nearestCount = 0;
+
+extern "C" void GR_MarkTextureNearest(TextureID tex)
+{
+	int i;
+
+	if (tex == 0)
+		return;
+
+	for (i = 0; i < s_nearestCount; i++)
+	{
+		if (s_nearestTex[i] == tex)
+			return;
+	}
+
+	if (s_nearestCount < GR_NEAREST_SET_SIZE)
+		s_nearestTex[s_nearestCount++] = tex;
+}
+
+static int GR_TextureIsNearest(TextureID tex)
+{
+	int i;
+
+	for (i = 0; i < s_nearestCount; i++)
+	{
+		if (s_nearestTex[i] == tex)
+			return 1;
+	}
+
+	return 0;
+}
+
+static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
+{
+	GLint minFilter, magFilter;
+
+	if (texFormat != TF_32_BIT_RGBA)
+		return;
+
+	/* Its loader asked for point sampling and meant it. */
+	if (GR_TextureIsNearest(tex))
+		return;
+
+	if (g_cfg_textureFilter <= 0)
+	{
+		minFilter = magFilter = GL_NEAREST;
+	}
+	else
+	{
+		magFilter = GL_LINEAR;
+		minFilter = GL_LINEAR;
+
+		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
+		{
+			GLint mipW = 0;
+			glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
+			if (mipW > 0)
+				minFilter = GL_LINEAR_MIPMAP_LINEAR;
+		}
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magFilter);
+
+	if (s_glMaxAniso > 1.0f)
+	{
+		float want = 1.0f;
+
+		if (g_cfg_textureFilter >= 3)
+		{
+			want = (float)g_cfg_anisoLevel;
+			if (want > s_glMaxAniso) want = s_glMaxAniso;
+			if (want < 1.0f)         want = 1.0f;
+		}
+
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, want);
+	}
+}
+
 /* Does anything need the per-vertex view-space capture this frame?
  *
  * The capture is what stamps a_normal.y = 1.0 on vertices the GTE projected,
@@ -247,7 +378,7 @@ int g_cfg_bilinearFiltering = 0;
  * PsyX_GPU/PsyX_GTE cannot drift apart. */
 extern "C" int GR_NeedViewSpaceData(void)
 {
-	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_bilinearFiltering) ? 1 : 0;
+	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_textureFilter > 0) ? 1 : 0;
 }
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
@@ -655,6 +786,8 @@ int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
+
+extern "C" void GR_MarkTextureNearest(TextureID tex);
 
 /* PSYX_DEFAULT_FBO, not a literal 0, when no internal target is active: on
  * iOS SDL composes into its own framebuffer object and 0 is not the screen.
@@ -1263,6 +1396,18 @@ int GR_InitialiseGLExt()
 
 	GR_ProbeCapabilities();
 
+	/* Anisotropy is an extension on both desktop GL and ES; 0 means absent and
+	 * the hardware path simply never asks for it. */
+	{
+		const char* exts = (const char*)glGetString(GL_EXTENSIONS);
+		s_glMaxAniso = 0.0f;
+		if (exts && strstr(exts, "texture_filter_anisotropic"))
+		{
+			glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &s_glMaxAniso);
+			eprintf("*Anisotropic filtering available, max %.0fx\n", s_glMaxAniso);
+		}
+	}
+
 	/* GL is up, so the internal target can be built now. A borderless window was
 	 * created at desktop size, so this is where the chosen resolution is turned
 	 * back into the RENDER size instead of being lost. */
@@ -1509,6 +1654,7 @@ typedef struct
 	GLint projectionLoc;
 	GLint projection3DLoc;
 	GLint bilinearFilterLoc;
+	GLint anisoTapsLoc;
 	GLint ditherForceLoc;
 	GLint pixelScaleLoc;
 	GLint texelSizeLoc;
@@ -1552,6 +1698,7 @@ GTEShader g_modern_shader_4, g_modern_shader_8, g_modern_shader_16, g_modern_sha
 GLint u_projectionLoc;
 GLint u_projection3DLoc;
 GLint u_bilinearFilterLoc;
+GLint u_anisoTapsLoc;
 GLint u_ditherForceLoc;
 GLint u_pixelScaleLoc;
 GLint u_texelSizeLoc;
@@ -1743,31 +1890,100 @@ int g_PsxFogToBlack = 0;
 	"	}\n"
 
 
+/* Filtered sampling of PSX CLUT textures.
+ *
+ * Hardware filtering cannot be used here: the VRAM texture holds palette
+ * INDICES, so the GPU would interpolate index values and look up a colour that
+ * is not in either neighbour. Every tap has to be resolved through lut() first
+ * and combined afterwards, which is what these do.
+ *
+ * Coverage-weighted, which the previous version was not. PSX CLUT entry 0 is
+ * transparent, and blending its colour in like any other tap dragged black into
+ * every edge; the old code then thresholded the interpolated coverage at 0.5 and
+ * discarded, turning soft edges into hard ones. Together that made filtered text
+ * and sprites look WORSE than unfiltered -- dark-fringed and jagged. Weighting
+ * each tap by its own opacity and dividing by the total keeps transparent texels
+ * from contributing colour at all, and the fragment is only discarded when no
+ * tap is opaque. */
 #define GPU_BILINEAR_SAMPLE_FUNC \
-	"	float c_textureSize = 1.0;\n"\
-	"	float c_onePixel = 1.0;\n"\
-	"	vec4 BilinearTextureSample(vec2 P) {\n"\
-	/* Sample around P - 0.5, not P. A texel's colour belongs at its CENTRE,
-	 * so the four taps for a point P are the texels whose centres bracket it.
-	 * Blending texel N with N+1 weighted by fract(P) instead does two visible
-	 * things: it shifts the whole image half a texel toward +X/+Y -- the
-	 * glyphs sliding down and right when filtering is switched on -- and
-	 * wherever the UVs land on integer texel coordinates fract(P) is 0, so it
-	 * returns texel N exactly and is indistinguishable from nearest. That is
-	 * why bilinear appeared to do nothing to the 3D world. */\
+	/* Declared HERE, not with the other uniforms further down the shader:
+	 * GLSL requires a declaration before use, and these sampler functions are
+	 * emitted BEFORE that uniform block. Declaring it late cost a fragment
+	 * shader that failed to compile outright ("u_anisoTaps : undeclared
+	 * identifier"), which is what garbled characters -- the whole program was
+	 * dead, not just the filtering. */\
+	"	uniform float u_anisoTaps; // >1 = anisotropic tap budget\n"\
+	/* One tap, weighted by its own opacity. PSX CLUT entry 0 is transparent;
+	 * blending its colour like any other tap drags black into every edge, so
+	 * a transparent tap contributes nothing and only adds to coverage when
+	 * it is opaque. */\
+	"	vec4 TapWeighted(vec2 idx, float w, inout float cov) {\n"\
+	/* Clamp the tap to the POLYGON'S own UV bounds. PSX pages pack unrelated
+	 * regions edge to edge, so a tap that steps one texel past a UV seam reads
+	 * another body part's texels -- the bright line down a character's pants
+	 * seam under bilinear/aniso. Bounds are the prim's vertex-UV bbox, stamped
+	 * CPU-side; all-zero means a path that never sets them, which keeps the
+	 * unclamped behaviour. DuckStation resolves this identically. */\
+	"		if (v_uvlim.z > 0.0 || v_uvlim.w > 0.0)\n"\
+	"			idx = clamp(idx, v_uvlim.xy, v_uvlim.zw);\n"\
+	"		vec2 rg = samplePSX(idx);\n"\
+	"		float o = (rg.x + rg.y > 0.0) ? w : 0.0;\n"\
+	"		cov += o;\n"\
+	"		return lut(rg) * o;\n"\
+	"	}\n"\
+	/* Bilinear as premultiplied colour plus coverage, WITHOUT discarding.
+	 * Anisotropy layers many of these, and a discard inside that loop would
+	 * throw the whole fragment away the moment one tap landed on a
+	 * transparent texel -- which is what reduced characters to silhouettes.
+	 * The discard belongs at the end, once total coverage is known. */\
+	"	vec4 BilinearCov(vec2 P, inout float cov) {\n"\
 	"		vec2 tapP = P - 0.5;\n"\
-	"		vec2 frac = fract(tapP);\n"\
-	"		vec2 pixel = floor(tapP);\n"\
-	"		vec2 C11 = samplePSX(pixel);\n"\
-	"		vec2 C21 = samplePSX(pixel + vec2(c_onePixel, 0.0));\n"\
-	"		vec2 C12 = samplePSX(pixel + vec2(0.0, c_onePixel));\n"\
-	"		vec2 C22 = samplePSX(pixel + vec2(c_onePixel, c_onePixel));\n"\
-	"		float ax1 = mix(float(C11.x + C11.y > 0.0), float(C21.x + C21.y > 0.0), frac.x);\n"\
-	"		float ax2 = mix(float(C12.x + C12.y > 0.0), float(C22.x + C22.y > 0.0), frac.x);\n"\
-	"		if(mix(ax1, ax2, frac.y) < 0.5) { discard; }\n"\
-	"		vec4 x1 = mix(lut(C11), lut(C21), frac.x);\n"\
-	"		vec4 x2 = mix(lut(C12), lut(C22), frac.x);\n"\
-	"		return mix(x1, x2, frac.y);\n"\
+	"		vec2 f = fract(tapP);\n"\
+	"		vec2 p = floor(tapP);\n"\
+	"		vec4 c = TapWeighted(p, (1.0 - f.x) * (1.0 - f.y), cov);\n"\
+	"		c += TapWeighted(p + vec2(1.0, 0.0), f.x * (1.0 - f.y), cov);\n"\
+	"		c += TapWeighted(p + vec2(0.0, 1.0), (1.0 - f.x) * f.y, cov);\n"\
+	"		c += TapWeighted(p + vec2(1.0, 1.0), f.x * f.y, cov);\n"\
+	"		return c;\n"\
+	"	}\n"\
+	"	vec4 BilinearTextureSample(vec2 P) {\n"\
+	"		float cov = 0.0;\n"\
+	"		vec4 c = BilinearCov(P, cov);\n"\
+	"		if (cov <= 0.0) { discard; }\n"\
+	"		return c / cov;\n"\
+	"	}\n"\
+	/* Anisotropic for CLUT textures: several bilinear taps along the major
+	 * axis of the texture-coordinate derivative, the axis a surface seen at a
+	 * grazing angle is stretched along.
+	 * 
+	 * The step is CLAMPED. PSX texture pages sit side by side in VRAM with no
+	 * gutter, so a tap that walks past the page edge reads the neighbouring
+	 * page and returns unrelated colours -- the stray bright fringes on a
+	 * character. Bounding the total offset to a few texels keeps the footprint
+	 * inside the page for the small textures this game uses. */\
+	"	vec4 AnisoTextureSample(vec2 P) {\n"\
+	"		vec2 dPdx = dFdx(P);\n"\
+	"		vec2 dPdy = dFdy(P);\n"\
+	"		float lx = length(dPdx);\n"\
+	"		float ly = length(dPdy);\n"\
+	"		vec2 major = (lx >= ly) ? dPdx : dPdy;\n"\
+	"		float mn = min(lx, ly);\n"\
+	"		float ratio = (mn > 0.0001) ? (max(lx, ly) / mn) : 1.0;\n"\
+	"		float taps = clamp(floor(ratio), 1.0, u_anisoTaps);\n"\
+	"		float span = length(major) * (taps - 1.0);\n"\
+	"		if (taps <= 1.0 || span <= 0.0) { return BilinearTextureSample(P); }\n"\
+	"		if (span > 4.0) { major *= 4.0 / span; }\n"\
+	"		vec4 acc = vec4(0.0);\n"\
+	"		float cov = 0.0;\n"\
+	/* GLSL ES needs a constant loop bound; unused iterations are skipped.
+	 * GLSL ES needs a constant loop bound; unused iterations are skipped. */\
+	"		for (int i = 0; i < 16; i++) {\n"\
+	"			if (float(i) >= taps) break;\n"\
+	"			float t = (float(i) + 0.5) / taps - 0.5;\n"\
+	"			acc += BilinearCov(P + major * t, cov);\n"\
+	"		}\n"\
+	"		if (cov <= 0.0) { discard; }\n"\
+	"		return acc / cov;\n"\
 	"	}\n"
 
 #define GPU_NEAREST_SAMPLE_FUNC \
@@ -1840,6 +2056,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec3 a_viewpos;\n"\
 	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
 	"	attribute float a_geom3d; // 1 = GTE-projected primitive (world geometry)\n"\
+	"	attribute vec4 a_uvlim; // per-poly UV bounds (texels), all-zero = none\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -1881,6 +2098,7 @@ int g_PsxFogToBlack = 0;
 	 * and with PGXP on it is 0.0 for world prims that took the affine path.
 	 * That is why bilinear filtered menu text and missed the world. */\
 	"		v_geom3d = a_geom3d;\n"\
+	"		v_uvlim = a_uvlim;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
 	 * for whichever clip W this vertex uses, then reconstruct it in the fragment
@@ -2045,8 +2263,12 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
+	/* bilinearFilter is the GATE (0 = off, 1 = 3D geometry only, 2 = this whole
+	 * frame); u_anisoTaps chooses HOW to filter once it passes. Keeping the two
+	 * separate is why anisotropic needs no new gate logic. */\
 	"		if((bilinearFilter == 1 && v_geom3d > 0.5) || bilinearFilter >= 2)\n"\
-	"			fragColor = BilinearTextureSample(v_texcoord.xy);\n"\
+	"			fragColor = (u_anisoTaps > 1.0) ? AnisoTextureSample(v_texcoord.xy)\n"\
+	"			                                : BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
 	GPU_LIT_TAIL\
@@ -2063,6 +2285,7 @@ const char* gte_shader_4 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2080,6 +2303,7 @@ const char* gte_shader_8 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2097,6 +2321,7 @@ const char* gte_shader_16 =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2114,6 +2339,7 @@ const char* gte_shader_32_rgba =
 	"varying vec3 v_viewpos;\n"
 	"varying float v_fade;\n"
 	"varying float v_geom3d;\n"
+	"varying vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -2161,6 +2387,12 @@ const char* gte_shader_32_rgba =
 	 * edges blending on semi-transparent prims while opaque cutouts
 	 * (foliage/UI) stay clean. */
 	"		if (fragColor.a < 0.5) discard;\n"\
+	/* Per-prim alpha fade (v_color.a, default 1.0 -- see
+	 * PsyX_SetNextPrimAlpha). BM_AVERAGE is genuine SRC_ALPHA blending on
+	 * PC, so scaling the surviving texels' alpha is a true transparency
+	 * fade: the fog-faded bullet decals dissolve instead of darkening.
+	 * Applied after the discard so the cutout shape is unchanged. */\
+	"		fragColor.a *= v_color.a;\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
@@ -2329,10 +2561,6 @@ ShaderID GR_Shader_Compile(const char* source)
 	extra_vs_defines[0] = 0;
 	extra_fs_defines[0] = 0;
 
-	if (g_cfg_bilinearFiltering)
-	{
-		strcat(extra_fs_defines, "#define BILINEAR_FILTER\n");
-	}
 
 	/* Affine (non-perspective-correct) texture mapping — matches PSX GPU behaviour.
 	 * Uses noperspective interpolation qualifier (GLSL 1.30+, desktop only).
@@ -2411,6 +2639,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_normal, "a_normal");
 	glBindAttribLocation(program, a_viewpos, "a_viewpos");
 	glBindAttribLocation(program, a_geom3d, "a_geom3d");
+	glBindAttribLocation(program, a_uvlim, "a_uvlim");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -2462,6 +2691,7 @@ void GR_GenerateCommonTextures()
 
 #if USE_OPENGL
 	glGenTextures(1, &g_whiteTexture);
+		GR_MarkTextureNearest(g_whiteTexture);
 	{
 		glBindTexture(GL_TEXTURE_2D, g_whiteTexture);
 
@@ -2499,8 +2729,11 @@ TextureID GR_CreateRGBATexture(int width, int height, u_char* data /*= nullptr*/
 	glGenTextures(1, &newTexture);
 
 	glBindTexture(GL_TEXTURE_2D, newTexture);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, g_cfg_bilinearFiltering ? GL_LINEAR : GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, g_cfg_bilinearFiltering ? GL_LINEAR : GL_NEAREST);
+	/* Neutral default only. The real filter is chosen per BIND by
+	 * GR_ApplyTextureFilter -- deciding it here is what made the setting
+	 * unchangeable at runtime for every texture that already existed. */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	
 	// another WebGL stuff. Texture will be black without clamp to edge
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2519,6 +2752,7 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 #if USE_OPENGL
 	
 	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
+	sh->anisoTapsLoc = glGetUniformLocation(sh->shader, "u_anisoTaps");
 	sh->ditherForceLoc = glGetUniformLocation(sh->shader, "u_ditherForce");
 	sh->pixelScaleLoc = glGetUniformLocation(sh->shader, "u_pixelScale");
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
@@ -2642,6 +2876,7 @@ int GR_InitialisePSX()
 		// make a special texture
 		// it will be resized later
 		glGenTextures(1, &g_fbTexture);
+		GR_MarkTextureNearest(g_fbTexture);
 		{
 			glBindTexture(GL_TEXTURE_2D, g_fbTexture);
 
@@ -2673,6 +2908,7 @@ int GR_InitialisePSX()
 		
 		// offscreen texture render target
 		glGenTextures(1, &g_offscreenRTTexture);
+		GR_MarkTextureNearest(g_offscreenRTTexture);
 		{
 			glBindTexture(GL_TEXTURE_2D, g_offscreenRTTexture);
 
@@ -2703,6 +2939,8 @@ int GR_InitialisePSX()
 		int i;
 
 		glGenTextures(2, g_vramTexturesDouble);
+		GR_MarkTextureNearest(g_vramTexturesDouble[0]);
+		GR_MarkTextureNearest(g_vramTexturesDouble[1]);
 
 		for(i = 0; i < 2; i++)
 		{
@@ -2906,6 +3144,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	case TF_4_BIT:
 		GR_SetShader(shader->shader);
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
 		u_pixelScaleLoc = shader->pixelScaleLoc;
 		u_projectionLoc = shader->projectionLoc;
@@ -2941,6 +3180,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	case TF_8_BIT:
 		GR_SetShader(shader->shader);
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
 		u_pixelScaleLoc = shader->pixelScaleLoc;
 		u_projectionLoc = shader->projectionLoc;
@@ -2976,6 +3216,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	case TF_16_BIT:
 		GR_SetShader(shader->shader);
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
 		u_pixelScaleLoc = shader->pixelScaleLoc;
 		u_projectionLoc = shader->projectionLoc;
@@ -3016,6 +3257,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		 * variants get their own location (or -1 if absent, which the guarded
 		 * glUniform1i below tolerates). */
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
+		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
 		u_pixelScaleLoc = -1;
 		u_projectionLoc = shader->projectionLoc;
@@ -3270,7 +3512,25 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		glUniform1i(u_bilinearFilterLoc,
 		            g_PsxDitherSuppressed
 		                ? ((g_cfg_menuFilter && texFormat == TF_32_BIT_RGBA) ? 2 : 0)
-		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_bilinearFiltering) ? 1 : 0));
+		                : ((texFormat == TF_32_BIT_RGBA || g_cfg_textureFilter > 0) ? 1 : 0));
+
+	/* How to filter, once the gate above says whether to. Anisotropic is walked
+	 * by hand for CLUT textures (see AnisoTextureSample); 1.0 means plain
+	 * bilinear. The hardware path ignores this -- it got its anisotropy from
+	 * GR_ApplyTextureFilter at bind time. */
+	if (u_anisoTapsLoc != -1)
+	{
+		float taps = 1.0f;
+
+		if (g_cfg_textureFilter >= 3 && texFormat != TF_32_BIT_RGBA)
+		{
+			taps = (float)g_cfg_anisoLevel;
+			if (taps > 16.0f) taps = 16.0f;   /* matches the shader's loop bound */
+			if (taps < 1.0f)  taps = 1.0f;
+		}
+
+		glUniform1f(u_anisoTapsLoc, taps);
+	}
 
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;
@@ -3282,6 +3542,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
+	GR_ApplyTextureFilter(texture, texFormat);
 #endif
 
 	g_lastBoundTexture = texture;
@@ -3656,7 +3917,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * ortho so it isn't scaled/clipped off the bottom. The FIX_ANG framing shift
 				 * (g_PsxWorldVShift) is applied at the GTE projection center by the game, not
 				 * here — an ortho-window shift reveals rows overlay prims never cover. */
-				const float vscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldVScale;
+				const float vscale = g_PsxUIOrthoPass ? 1.0f
+				                   : (g_PsxCutsceneActive ? g_PsxCutsceneVScale : g_PsxWorldVScale);
 				orthoTop = 0.0f;
 				orthoBot = psxH * vscale;
 			}
@@ -4305,9 +4567,23 @@ static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
 static void GR_EnsureShadowTarget(void)
 {
 	/* Clamp once, so a bad config value cannot ask the driver for something
-	 * absurd. 4096 is comfortably within ES 3.0's guaranteed max texture size. */
+	 * absurd. 8192 is above ES 3.0's guaranteed minimum (4096), so sizes past
+	 * that are additionally capped to the driver's real limit -- a GPU that
+	 * can't do it gets the biggest map it can instead of an incomplete FBO. */
 	if (g_PsyX_ShadowMapSize < 256)   g_PsyX_ShadowMapSize = 256;
-	if (g_PsyX_ShadowMapSize > 4096)  g_PsyX_ShadowMapSize = 4096;
+	if (g_PsyX_ShadowMapSize > 8192)  g_PsyX_ShadowMapSize = 8192;
+	if (g_PsyX_ShadowMapSize > 4096)
+	{
+		static GLint s_maxTexSize = 0;
+		if (s_maxTexSize == 0)
+			glGetIntegerv(GL_MAX_TEXTURE_SIZE, &s_maxTexSize);
+		if (s_maxTexSize > 0 && g_PsyX_ShadowMapSize > s_maxTexSize)
+		{
+			eprintf("*shadow map %d exceeds GL_MAX_TEXTURE_SIZE %d, clamping\n",
+			        g_PsyX_ShadowMapSize, (int)s_maxTexSize);
+			g_PsyX_ShadowMapSize = s_maxTexSize;
+		}
+	}
 
 	/* Resolution changed at runtime: drop the old target and build a new one. */
 	if (g_shadowFBO != 0 && s_shadowTexSize != g_PsyX_ShadowMapSize)
@@ -5548,28 +5824,6 @@ void GR_SwapWindow()
 {
 	GR_DiagGLError("end of frame");
 
-	/* [BILINDIAG] see VsFillVertex. Also reports the bilinear mode last pushed,
-	 * so one line says both what the shader was told and whether the geometry
-	 * marker it depends on is actually resolving. */
-	{
-		extern unsigned g_vsHits, g_vsMisses, g_prims3d, g_prims2d;
-		static unsigned s_lastTick = 0;
-		static int      s_lines = 0;
-		unsigned now = SDL_GetTicks();
-
-		if (g_cfg_bilinearFiltering && s_lines < 20 && (now - s_lastTick) >= 1000)
-		{
-			unsigned tot = g_vsHits + g_vsMisses;
-			s_lastTick = now;
-			s_lines++;
-			eprintf("*[BILINDIAG] viewspace hits=%u misses=%u (%u%% resolved) prims3d=%u prims2d=%u suppressed=%d\n",
-			        g_vsHits, g_vsMisses, tot ? (g_vsHits * 100u / tot) : 0u,
-			        g_prims3d, g_prims2d, g_PsxDitherSuppressed);
-			g_vsHits = g_vsMisses = 0;
-			g_prims3d = g_prims2d = 0;
-		}
-	}
-
 	/* Stretch the internal target onto the real window. This is the only bind of
 	 * framebuffer 0 that genuinely means "the window" -- every other one means
 	 * "the scene target" and goes through GR_ScreenFBO(). LINEAR so a lower
@@ -5900,6 +6154,8 @@ void GR_BindVertexBuffer()
 	glEnableVertexAttribArray(a_viewpos);
 	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
 	glEnableVertexAttribArray(a_geom3d);
+	glVertexAttribPointer(a_uvlim, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ulo);
+	glEnableVertexAttribArray(a_uvlim);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;

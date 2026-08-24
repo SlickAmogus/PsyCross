@@ -220,6 +220,12 @@ typedef struct
 	ushort   hasEnvelope;  // adsr programmed
 	ushort   looping;      // AL_LOOPING was set for the current sample
 
+	// Replacement samples (pc_sfx_override.c) upload at the FILE's rate, so
+	// the pitch the voice was keyed with becomes the 1.0 baseline: AL_PITCH
+	// writes divide by this instead of 4096 while the override buffer plays.
+	// 0 = native sample, normal 4096 semantics.
+	int      overridePitchBase;
+
 	// Spatial routing (PC surround). azimuth claimed from the key-on stash
 	// at each start-address write, so voice reuse can't inherit stale state.
 	ushort   isWide;       // libsd wide-stereo (negated right volume) latch
@@ -822,37 +828,37 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 		{
 			// A replacement plays at the rate it was AUTHORED at, whatever that is.
 			//
-			// The voice multiplies whatever we upload by attr.pitch/4096 (see the
-			// AL_PITCH write in the attribute path), so uploading at 44100 like the
-			// native decode path made the final rate 44100*pitch/4096 — the rate the
-			// ORIGINAL sample happened to play at. A replacement then had to be
-			// authored at exactly that rate or it came out slow and low, like tape
-			// speed, which is unguessable without the launcher's Audio tool and worst
-			// on the map banks (several are authored very low).
+			// The voice multiplies whatever we upload by attr.pitch/4096 (the
+			// AL_PITCH write in the attribute path), so uploading at a fixed 44100
+			// like the native decode path made the final rate 44100*pitch/4096 —
+			// the rate the ORIGINAL sample happened to play at. A replacement then
+			// had to be authored at exactly that rate or it came out slow and low,
+			// like tape speed, which is unguessable without the launcher's Audio
+			// tool and worst on the map banks (several are authored very low).
 			//
-			// Dividing the pitch back out makes the final rate the file's own, so a
-			// 44100 WAV sounds like a 44100 WAV. Files already authored at the
-			// original's rate are unaffected: for those this lands on the same number
-			// it used before.
+			// So: upload at the file's own rate and latch the pitch this key-on
+			// carries as the voice's 1.0 baseline — AL_PITCH writes divide by the
+			// latch instead of 4096 while this buffer is playing. The first attempt
+			// scaled the BUFFER rate by 4096/pitch instead, but that overflows any
+			// sane rate band for the low-pitch bank samples (a 44.1k file over an
+			// ~8k sample wants a 226kHz buffer) — precisely the sounds this exists
+			// to fix. The latch keeps the buffer at its real rate always.
 			//
-			// Pitch the game applies LATER still scales from here, so a modulated
-			// sound (elevator hum, ambience) keeps its modulation. What this does
-			// give up is pitch variation applied at trigger time — a sample the game
-			// plays at two different pitches, or with a random offset, now starts at
-			// its authored pitch both times. That is the trade the contract asks for:
-			// the replacement sounds like the file.
-			int rate = 44100;
-			if (modRate > 0 && voice->attr.pitch > 0)
-			{
-				double r = (double)modRate * 4096.0 / (double)voice->attr.pitch;
-				// AL rejects nonsense rates; keep it in a sane band and fall back
-				// to the old behaviour rather than dropping the sound.
-				if (r >= 1000.0 && r <= 192000.0)
-					rate = (int)(r + 0.5);
-			}
+			// Pitch the game applies LATER still scales RELATIVE to the latch, so
+			// a modulated sound (elevator hum, ambience) keeps its modulation. What
+			// this gives up is pitch variation applied at trigger time — a sample
+			// the game keys at two different pitches now starts at its authored
+			// pitch both times. That is the trade the contract asks for: the
+			// replacement sounds like the file.
+			int rate = (modRate > 0) ? modRate : 44100;
+			voice->overridePitchBase = (modRate > 0 && voice->attr.pitch > 0) ? voice->attr.pitch : 0;
 			alSourcei(alSource, AL_BUFFER, 0);
 			alBufferData(alBuffer, AL_FORMAT_MONO16, modPcm, modCount * sizeof(short), rate);
 			alSourcei(alSource, AL_BUFFER, alBuffer);
+			// The attribute path already ran for this key-on and divided by the
+			// PREVIOUS occupant's base; re-assert with the fresh latch.
+			if (voice->attr.pitch > 0)
+				alSourcef(alSource, AL_PITCH, (float)voice->attr.pitch / (voice->overridePitchBase > 0 ? (float)voice->overridePitchBase : 4096.0f));
 			return;
 		}
 	}
@@ -861,6 +867,15 @@ static void UpdateVoiceSample(SPUALVoice* voice)
 
 	if (count == 0)
 		return;
+
+	// Voice reuse: a native sample after a replacement must not inherit its
+	// pitch baseline, and the attribute path may have divided by it already.
+	if (voice->overridePitchBase > 0)
+	{
+		voice->overridePitchBase = 0;
+		if (voice->attr.pitch > 0)
+			alSourcef(alSource, AL_PITCH, (float)voice->attr.pitch / 4096.0f);
+	}
 
 	alSourcei(alSource, AL_BUFFER, 0);
 	alBufferData(alBuffer, AL_FORMAT_MONO16, waveBuffer, count * sizeof(short), 44100);
@@ -1342,7 +1357,8 @@ void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* psxAttrib)
 
 			voice->attr.pitch = psxAttrib->pitch;
 
-			const float pitch = (float)(voice->attr.pitch) / 4096.0f;
+			const float pitchBase = (voice->overridePitchBase > 0) ? (float)voice->overridePitchBase : 4096.0f;
+			const float pitch = (float)(voice->attr.pitch) / pitchBase;
 			alSourcef(alSource, AL_PITCH, pitch);
 		}
 		
