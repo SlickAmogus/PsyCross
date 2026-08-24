@@ -4968,12 +4968,13 @@ void GR_PresentLastFrame(void)
 	 * is reusing something already proven rather than adding a new one. Desktop
 	 * keeps the blit: it is cheaper, and a plain window buffer has none of this
 	 * trouble. */
-	if (g_postShader != (ShaderID)-1 &&
 #if defined(RENDERER_OGLES)
-	    1)
+	const int drawRatherThanBlit = 1;
 #else
-	    g_cfg_msaaSamples > 0)
+	const int drawRatherThanBlit = (g_cfg_msaaSamples > 0);
 #endif
+
+	if (g_postShader != (ShaderID)-1 && drawRatherThanBlit)
 	{
 		GR_DrawFullscreenTexture(g_freezeFrameTex, 0);
 		g_freezePresentedThisFrame = 1;
@@ -4986,8 +4987,7 @@ void GR_PresentLastFrame(void)
 			if (!s_presentLogged)
 			{
 				s_presentLogged = 1;
-				eprintinfo("[FREEZE] present %dx%d via fullscreen draw
-",
+				eprintinfo("[FREEZE] present %dx%d via fullscreen draw\n",
 				           g_freezeFrameW, g_freezeFrameH);
 			}
 		}
