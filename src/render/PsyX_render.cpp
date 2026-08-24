@@ -341,6 +341,12 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 		magFilter = GL_LINEAR;
 		minFilter = GL_LINEAR;
 
+#if !defined(RENDERER_OGLES)
+		/* Compile-time, not just the runtime cap: glGetTexLevelParameteriv and
+		 * GL_TEXTURE_WIDTH are ES 3.1, and the mobile targets build against ES
+		 * 3.0 headers where the token is not declared at all. Mipmapped
+		 * filtering is simply unavailable there rather than mis-detected --
+		 * nothing in this path uploads mip levels on those targets anyway. */
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
 			GLint mipW = 0;
@@ -348,6 +354,7 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 			if (mipW > 0)
 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
 		}
+#endif
 	}
 
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
