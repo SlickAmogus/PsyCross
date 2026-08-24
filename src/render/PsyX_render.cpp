@@ -4391,13 +4391,11 @@ static void GR_EnsureShadowTarget(void)
 
 		if (st != GL_FRAMEBUFFER_COMPLETE)
 		{
-			eprinterr("shadow FBO incomplete: 0x%04X (flashlight shadows will read as fully occluded)
-", st);
+			eprinterr("shadow FBO incomplete: 0x%04X (flashlight shadows will read as fully occluded)\n", st);
 		}
 		else
 		{
-			eprintf("*shadow target ready: %dx%d depth24
-", PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
+			eprintf("*shadow target ready: %dx%d depth24\n", PSYX_SHADOW_MAP_SIZE, PSYX_SHADOW_MAP_SIZE);
 		}
 	}
 
