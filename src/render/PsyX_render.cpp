@@ -4434,9 +4434,23 @@ static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
 static void GR_EnsureShadowTarget(void)
 {
 	/* Clamp once, so a bad config value cannot ask the driver for something
-	 * absurd. 4096 is comfortably within ES 3.0's guaranteed max texture size. */
+	 * absurd. 8192 is above ES 3.0's guaranteed minimum (4096), so sizes past
+	 * that are additionally capped to the driver's real limit -- a GPU that
+	 * can't do it gets the biggest map it can instead of an incomplete FBO. */
 	if (g_PsyX_ShadowMapSize < 256)   g_PsyX_ShadowMapSize = 256;
-	if (g_PsyX_ShadowMapSize > 4096)  g_PsyX_ShadowMapSize = 4096;
+	if (g_PsyX_ShadowMapSize > 8192)  g_PsyX_ShadowMapSize = 8192;
+	if (g_PsyX_ShadowMapSize > 4096)
+	{
+		static GLint s_maxTexSize = 0;
+		if (s_maxTexSize == 0)
+			glGetIntegerv(GL_MAX_TEXTURE_SIZE, &s_maxTexSize);
+		if (s_maxTexSize > 0 && g_PsyX_ShadowMapSize > s_maxTexSize)
+		{
+			eprintf("*shadow map %d exceeds GL_MAX_TEXTURE_SIZE %d, clamping\n",
+			        g_PsyX_ShadowMapSize, (int)s_maxTexSize);
+			g_PsyX_ShadowMapSize = s_maxTexSize;
+		}
+	}
 
 	/* Resolution changed at runtime: drop the old target and build a new one. */
 	if (g_shadowFBO != 0 && s_shadowTexSize != g_PsyX_ShadowMapSize)
