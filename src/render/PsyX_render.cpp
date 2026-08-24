@@ -1383,6 +1383,31 @@ int GR_InitialiseGLExt()
  * overwrite the chosen resolution with the desktop size in borderless. */
 extern "C" void GR_ApplyPresentSize(int realW, int realH)
 {
+#if defined(PSYX_IOS)
+	/* Every caller hands this WINDOW POINTS -- SDL_GetWindowSize at the end of
+	 * GR_InitialiseGLContext, and event.window.data1/2 from a resize. On a
+	 * desktop those are pixels and the distinction does not exist. On iOS with
+	 * ALLOW_HIGHDPI they are a THIRD of the drawable: 956x440 against a
+	 * 2868x1320 panel. Assigning them below put the viewport in one corner of
+	 * the screen (GL origin is bottom-left, hence bottom-left), and took the
+	 * aspect-corrected cull bounds with it.
+	 *
+	 * There is exactly one correct answer for this size on a phone, so it is
+	 * resolved here rather than at each caller -- a new caller cannot get it
+	 * wrong, and the rotation resize is corrected for free. */
+	if (g_window)
+	{
+		int drawableW = 0, drawableH = 0;
+
+		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
+		if (drawableW > 0 && drawableH > 0)
+		{
+			realW = drawableW;
+			realH = drawableH;
+		}
+	}
+#endif
+
 	if (realW <= 0 || realH <= 0)
 		return;
 
