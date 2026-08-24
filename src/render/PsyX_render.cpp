@@ -4953,11 +4953,44 @@ void GR_PresentLastFrame(void)
 	/* MSAA: the default framebuffer is multisample, and a single-sample ->
 	 * multisample glBlitFramebuffer is illegal. Draw the captured frame as a
 	 * full-screen textured triangle instead (writing into the multisample FBO
-	 * is fine). */
-	if (g_cfg_msaaSamples > 0 && g_postShader != (ShaderID)-1)
+	 * is fine).
+	 *
+	 * On a GLES target this is the ONLY path, MSAA or not. The blit below
+	 * targets whatever "the screen" is, and on iOS that is a framebuffer SDL
+	 * builds around a CAEAGLLayer rather than a plain window buffer -- the same
+	 * object that already cost this port a session when binding 0 silently
+	 * discarded every draw. Blitting INTO it wedged the first pause hard enough
+	 * that PsyX_BeginScene never reached its own PsyX_Log_Flush, so the log
+	 * stopped mid-frame with no error to point at.
+	 *
+	 * A shader draw into the currently-bound framebuffer asks nothing special of
+	 * the driver and is the path the MSAA case has been using all along, so this
+	 * is reusing something already proven rather than adding a new one. Desktop
+	 * keeps the blit: it is cheaper, and a plain window buffer has none of this
+	 * trouble. */
+	if (g_postShader != (ShaderID)-1 &&
+#if defined(RENDERER_OGLES)
+	    1)
+#else
+	    g_cfg_msaaSamples > 0)
+#endif
 	{
 		GR_DrawFullscreenTexture(g_freezeFrameTex, 0);
 		g_freezePresentedThisFrame = 1;
+
+		/* One line, once: this path had never executed on a phone before the
+		 * capture started succeeding, and a silent hang here is expensive to
+		 * diagnose remotely. */
+		{
+			static int s_presentLogged = 0;
+			if (!s_presentLogged)
+			{
+				s_presentLogged = 1;
+				eprintinfo("[FREEZE] present %dx%d via fullscreen draw
+",
+				           g_freezeFrameW, g_freezeFrameH);
+			}
+		}
 		return;
 	}
 #endif
