@@ -3815,9 +3815,10 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			fbOrthoL = 0.0f;
 			fbOrthoR = psxW;
 			/* hfov for the 4:3 3D branches below: scale the horizontal extent
-			 * around the centre exactly like the Hor+ branch does, so the knob can
-			 * be tested in pillarbox / 4:3 too. 1.0 = untouched; never the UI pass. */
-			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			 * around the centre exactly like the Hor+ branch does. Applies to every
+			 * 3D mode (not only Hor+) so the shape-true pair hfov=1/vfov holds in
+			 * pillarbox / true-4:3 windows too. 1.0 = untouched; never the UI pass. */
+			const float hs43   = (!g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
