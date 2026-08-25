@@ -503,7 +503,7 @@ static GLuint g_freezeFrameTex = 0;
 static GLuint g_freezeFrameFBO = 0;
 static int    g_freezeFrameW = 0;
 static int    g_freezeFrameH = 0;
-static int    g_freezeFrameValid = 0;
+int           g_freezeFrameValid = 0; /* exposed: game-side grey-flash probe reads it */
 static int    g_freezePresentedThisFrame = 0;
 int framebuffer_need_update = 0;
 
