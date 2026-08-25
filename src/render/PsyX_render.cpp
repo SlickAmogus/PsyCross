@@ -94,7 +94,7 @@ float g_PsxCutsceneVScale = 0.0f;
  * while g_PsxFixedCamActive is set — NOT by shifting the ortho window here: the ortho
  * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
  * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
-float g_PsxWorldVShift = 20.0f;
+float g_PsxWorldVShift = 11.0f; /* was 20; 11 matches DuckStation better (user A/B, 2026-08-25) */
 /* Same units, but for authored (cutscene / letterboxed) shots, which run at the
  * clean 0 baseline rather than inheriting the gameplay shift. Console `cutshift`.
  * Default 0 = today's framing exactly. */
@@ -122,7 +122,7 @@ int   g_PsxUIOrthoPass = 0;
 /* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
-float g_PsxWorldHScale = 1.0f;
+float g_PsxWorldHScale = 0.872f; /* was 1.0; user A/B has vfov==hfov==0.872 matching DuckStation (2026-08-25) */
 /* Where the vertical world crop (g_PsxWorldVScale < 1) sits: 0 = keep the top
  * rows and cut the bottom (today's behaviour), 0.5 = centred, 1 = keep the
  * bottom. Experiment knob for the framing investigation (console `vcropanchor`);
