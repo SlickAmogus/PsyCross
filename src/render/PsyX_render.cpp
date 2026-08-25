@@ -500,6 +500,34 @@ int g_PsxFeedbackStoreAllowed = 0;
  * re-presents it under the new frame's prims. The game sets the flag on
  * freeze ENTRY (same tick) and clears it on exit. */
 int g_PsxPresentLastFrame = 0;
+
+/* OFF on GLES, deliberately.
+ *
+ * This whole mechanism has never once worked on a phone: the capture always
+ * failed there, so GR_PresentLastFrame's `if (!g_freezeFrameValid) return;`
+ * meant it did nothing, and pause/map simply showed the frame's fog clear. That
+ * was the long-standing "map and pause go fog grey" report on both iOS and
+ * Android.
+ *
+ * Repairing the capture turned a dead path live, and the first pause after that
+ * terminates the app -- straight to the home screen, no crash report, no jetsam
+ * report. Moving the present off glBlitFramebuffer and onto the shader draw got
+ * one step further (the "[FREEZE] present" line reaches disk, so BeginScene
+ * completes) and then still died, which rules out the blit specifically and
+ * says the problem is the frozen texture being drawn at all on this driver.
+ *
+ * Rather than keep guessing on a device I cannot attach a debugger to, the
+ * feature goes back to being inert on GLES -- which is exactly the state it was
+ * in for the months this port was playable. Cost: pause and the map show the fog
+ * clear instead of the world underneath, cosmetic and previously the norm.
+ * Skipping the capture as well as the present also drops a full-screen blit and
+ * an 11 MB texture per frame that were only ever feeding this.
+ *
+ * Desktop is untouched, where it works and is tested. */
+#if defined(RENDERER_OGLES)
+#   define PSYX_NO_FREEZE_FRAME 1
+#endif
+
 static GLuint g_freezeFrameTex = 0;
 static GLuint g_freezeFrameFBO = 0;
 static int    g_freezeFrameW = 0;
@@ -4820,6 +4848,9 @@ void GR_ShadowPassEnd(void) {}
  * frame is fully composed in the backbuffer, before the swap. */
 void GR_CaptureLastFrame(void)
 {
+#if defined(PSYX_NO_FREEZE_FRAME)
+	return;
+#endif
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
 	/* A frame that re-presented the capture must not be re-captured,
 	 * or the UI text drawn on top would bake into the frozen image. */
@@ -4945,6 +4976,9 @@ void GR_CaptureLastFrame(void)
  * frame's prims (PAUSED text, console, messages) draw on top of it. */
 void GR_PresentLastFrame(void)
 {
+#if defined(PSYX_NO_FREEZE_FRAME)
+	return;
+#endif
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
 	if (!g_freezeFrameValid)
 		return;
