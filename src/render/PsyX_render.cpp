@@ -79,7 +79,10 @@ float g_PsxPixelAspect = 1.0f;
  * shows ~14.7%% too much vertical world vs PSX/DuckStation (measured 0.872 vertical /
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
-float g_PsxWorldVScale = 0.872f;
+float g_PsxWorldVScale = 1.0f; /* full 224-row frame; was 0.872 (crop) -- the
+    * crop made top- and bottom-anchored shots need different vshift values.
+    * Default vfov 1.0 + hfov 0.76 + vshift 11 matches DuckStation in both the
+    * cafe and infirmary probes (user-validated 2026-08-25). */
 /* EXPLICIT override for the cutscene vertical scale; <= 0 (default) means
  * cutscenes follow g_PsxWorldVScale, cropped exactly like gameplay. Console
  * `cutfov <n>`. Do NOT default this to 1.0 again: ab23f4f shipped that and it
@@ -122,7 +125,8 @@ int   g_PsxUIOrthoPass = 0;
 /* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
-float g_PsxWorldHScale = 0.872f; /* was 1.0; user A/B has vfov==hfov==0.872 matching DuckStation (2026-08-25) */
+float g_PsxWorldHScale = 0.76f; /* 0.872^2: preserves the user-validated shape
+    * product (tallness ~ vfov*hfov) with the vertical opened to the full frame. */
 /* Where the vertical world crop (g_PsxWorldVScale < 1) sits: 0 = keep the top
  * rows and cut the bottom (today's behaviour), 0.5 = centred, 1 = keep the
  * bottom. Experiment knob for the framing investigation (console `vcropanchor`);
@@ -3815,10 +3819,12 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			fbOrthoL = 0.0f;
 			fbOrthoR = psxW;
 			/* hfov for the 4:3 3D branches below: scale the horizontal extent
-			 * around the centre exactly like the Hor+ branch does. Applies to every
-			 * 3D mode (not only Hor+) so the shape-true pair hfov=1/vfov holds in
-			 * pillarbox / true-4:3 windows too. 1.0 = untouched; never the UI pass. */
-			const float hs43   = (!g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			 * around the centre exactly like the Hor+ branch does, so hfov works in
+			 * 4:3-window GAMEPLAY too. The g_PcHorPlusEnabled gate is load-bearing:
+			 * it is the "3D gameplay vs 2D screen" signal, and applying hfov to 2D
+			 * screens shrank the NTSC title background and revealed VRAM garbage at
+			 * its sides (user-reported 2026-08-25). Never the UI pass either. */
+			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
