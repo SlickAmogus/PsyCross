@@ -97,7 +97,10 @@ float g_PsxCutsceneVScale = 0.0f;
  * while g_PsxFixedCamActive is set — NOT by shifting the ortho window here: the ortho
  * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
  * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
-float g_PsxWorldVShift = 11.0f; /* was 20; 11 matches DuckStation better (user A/B, 2026-08-25) */
+float g_PsxWorldVShift = 0.0f; /* band-aid retired 2026-08-25: the true global
+    * offset was the GsInit3D anchor (console 120 vs our 112) -- +8 is now baked
+    * at the boot origin (libgs_stub GsInit3D), derived from the SDK convention
+    * instead of eye-tuned. The knob remains for A/B. */
 /* Same units, but for authored (cutscene / letterboxed) shots, which run at the
  * clean 0 baseline rather than inheriting the gameplay shift. Console `cutshift`.
  * Default 0 = today's framing exactly. */
