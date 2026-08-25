@@ -5104,8 +5104,7 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 			unsigned char px[4] = { 255, 255, 255, 255 };
 			glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
 			s_fbClearLogs++;
-			eprintf("*[FBCLEAR] rect=(%d,%d %dx%d) tex=%u fboStatus=0x%x readback=(%d,%d) %s
-",
+			eprintf("*[FBCLEAR] rect=(%d,%d %dx%d) tex=%u fboStatus=0x%x readback=(%d,%d) %s\n",
 			        x, y, w, h, (unsigned)g_vramTexture, (unsigned)st, px[0], px[1],
 			        (st == GL_FRAMEBUFFER_COMPLETE && px[0] == 0 && px[1] == 0) ? "OK" : "NOT BLANK");
 		}
