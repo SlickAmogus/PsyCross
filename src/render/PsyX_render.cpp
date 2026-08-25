@@ -5093,6 +5093,24 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(cc[0], cc[1], cc[2], cc[3]);
 
+	/* [FBCLEAR] one-shot proof the blank reached the SAMPLED texture (the
+	 * ANGLE rainbow diagnosis): FBO status + a readback of the rect's first
+	 * texel, which must be packed word 0. Three lines per session. */
+	{
+		static int s_fbClearLogs = 0;
+		if (s_fbClearLogs < 3)
+		{
+			GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+			unsigned char px[4] = { 255, 255, 255, 255 };
+			glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+			s_fbClearLogs++;
+			eprintf("*[FBCLEAR] rect=(%d,%d %dx%d) tex=%u fboStatus=0x%x readback=(%d,%d) %s
+",
+			        x, y, w, h, (unsigned)g_vramTexture, (unsigned)st, px[0], px[1],
+			        (st == GL_FRAMEBUFFER_COMPLETE && px[0] == 0 && px[1] == 0) ? "OK" : "NOT BLANK");
+		}
+	}
+
 	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
@@ -5494,7 +5512,15 @@ void GR_UpdateVRAM()
 
 	glBindTexture(GL_TEXTURE_2D, g_vramTexture);
 
-#if defined(RENDERER_OGL)
+	/* Always a sub-image upload: storage was allocated at creation. The old
+	 * RENDERER_OGL branch RE-SPECIFIED the texture with glTexImage2D on every
+	 * upload, which native GL tolerates while the texture is an FBO attachment
+	 * but ANGLE (ES over D3D11/Vulkan) may orphan -- the feedback-rect blank in
+	 * GR_ClearVramRect then cleared dead storage while the sampled texture kept
+	 * the CPU vram[] bytes just stamped over the display-buffer rects: the
+	 * map4_s01 (Lisa) cutscene overlay drew that garbage as a rainbow band,
+	 * ANGLE-only, worsening with TIM streaming. */
+#if 0
 	glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
 #else
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
