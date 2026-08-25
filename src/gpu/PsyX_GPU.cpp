@@ -1642,9 +1642,16 @@ GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
 int g_vertexIndex = 0;
 int g_splitIndex = 0;
 
+/* Per-frame parsed-vertex tally for the grey-flash probe: a 1-frame grey flash
+ * is a fog-coloured clear presented with a near-empty world, and this is the
+ * cheap signal for "near-empty". Accumulated across ClearSplits calls (several
+ * per frame), published/zeroed at GR_SwapWindow. */
+extern "C" { int g_PsxFrameVerts = 0; int g_PsxLastFrameVerts = 0; }
+
 void ClearSplits()
 {
 	currentSplitDebugText = nullptr;
+	g_PsxFrameVerts += g_vertexIndex;
 	g_vertexIndex = 0;
 	g_splitIndex = 0;
 	g_splits[0].kind = GPU_SPLIT_LEGACY;

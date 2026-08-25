@@ -5597,6 +5597,11 @@ void GR_DiagGLError(const char* where)
 
 void GR_SwapWindow()
 {
+	{
+		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
+		g_PsxLastFrameVerts = g_PsxFrameVerts;
+		g_PsxFrameVerts     = 0;
+	}
 	GR_DiagGLError("end of frame");
 
 	/* Stretch the internal target onto the real window. This is the only bind of
