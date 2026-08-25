@@ -123,6 +123,11 @@ int   g_PsxUIOrthoPass = 0;
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
 float g_PsxWorldHScale = 1.0f;
+/* Where the vertical world crop (g_PsxWorldVScale < 1) sits: 0 = keep the top
+ * rows and cut the bottom (today's behaviour), 0.5 = centred, 1 = keep the
+ * bottom. Experiment knob for the framing investigation (console `vcropanchor`);
+ * a DuckStation-style overscan crop would be centred, ours is top-anchored. */
+float g_PsxWorldVCropAnchor = 0.0f;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
@@ -3795,8 +3800,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				const float vscale = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
 				                   : (g_PsxCutsceneActive && g_PsxCutsceneVScale > 0.0f
 				                      ? g_PsxCutsceneVScale : g_PsxWorldVScale);
-				orthoTop = 0.0f;
-				orthoBot = psxH * vscale;
+				orthoTop = psxH * (1.0f - vscale) * g_PsxWorldVCropAnchor;
+				orthoBot = orthoTop + psxH * vscale;
 			}
 			const float psxAspect = psxW / psxH;
 			const float winAspect = (g_windowHeight > 0)
@@ -3809,9 +3814,15 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			fbOrthoB = orthoBot;
 			fbOrthoL = 0.0f;
 			fbOrthoR = psxW;
+			/* hfov for the 4:3 3D branches below: scale the horizontal extent
+			 * around the centre exactly like the Hor+ branch does, so the knob can
+			 * be tested in pillarbox / 4:3 too. 1.0 = untouched; never the UI pass. */
+			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
-				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
+				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
+				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else if (g_PcWidescreenMode == 1) {
 				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
 				 * preserves 1 H px = 1 V px scaling for character proportions. */
@@ -3829,7 +3840,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
 				 * The viewport (below) handles pillarbox vs full-window. */
-				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
+				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
+				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
