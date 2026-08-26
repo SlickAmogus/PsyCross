@@ -2154,6 +2154,8 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
+	/* PSX's 15-bit framebuffer could not represent a residue below 1/32, and this geometry was culled at the fog far distance anyway: snap the last 1/32 to full so distant objects dissolve instead of sitting 1-2/255 off the fog colour. */\
+	"		if (fogAmt > 0.96875) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
