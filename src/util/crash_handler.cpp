@@ -186,9 +186,98 @@ void UnInstallExceptionHandler()
 
 #else
 
+/* POSIX targets used to install nothing at all, which is why an iOS crash left
+ * literally no evidence: no console anyone can read, and a sideloaded build does
+ * not reliably produce a system crash report either. A fatal signal simply ended
+ * the process mid-frame and the log stopped wherever its last flush had reached.
+ *
+ * Catch the fatal signals and write a backtrace to a file next to the log
+ * (Documents on iOS, so Files.app can retrieve it). Everything here is
+ * async-signal-safe on purpose: raw write(2) and backtrace_symbols_fd, no
+ * printf, no malloc, no stdio.
+ *
+ * This also answers a question that guessing cannot: if the file APPEARS the
+ * process took a fatal signal and the trace names the frame. If it does NOT
+ * appear, nothing was signalled and the process was SIGKILLed from outside --
+ * jetsam, the watchdog, or a GPU fault -- which is a completely different
+ * investigation. */
+
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#if defined(__APPLE__) || defined(__linux__)
+#   include <execinfo.h>
+#   define PSYX_HAVE_BACKTRACE 1
+#endif
+
+#if defined(PSYX_HAVE_BACKTRACE)
+
+static void PsyX_WriteStr(int fd, const char* s)
+{
+	if (fd >= 0 && s)
+		(void)!write(fd, s, strlen(s));
+}
+
+static void PsyX_CrashSignalHandler(int sig)
+{
+	/* A fault inside the handler must not recurse forever. */
+	static volatile sig_atomic_t s_inHandler = 0;
+
+	void* frames[64];
+	int   n;
+	int   fd;
+
+	if (s_inHandler)
+		_exit(128 + sig);
+	s_inHandler = 1;
+
+	n = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+
+	fd = open("SilentHill_crash.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
+
+	PsyX_WriteStr(fd, "\n=== fatal signal: ");
+	PsyX_WriteStr(fd, sig == SIGSEGV ? "SIGSEGV" :
+	                  sig == SIGBUS  ? "SIGBUS"  :
+	                  sig == SIGILL  ? "SIGILL"  :
+	                  sig == SIGFPE  ? "SIGFPE"  :
+	                  sig == SIGABRT ? "SIGABRT" : "other");
+	PsyX_WriteStr(fd, " ===\n");
+
+	if (fd >= 0)
+		backtrace_symbols_fd(frames, n, fd);
+	backtrace_symbols_fd(frames, n, STDERR_FILENO);
+
+	if (fd >= 0)
+	{
+		(void)!write(fd, "\n", 1);
+		close(fd);
+	}
+
+	_exit(128 + sig);
+}
+
+#endif /* PSYX_HAVE_BACKTRACE */
+
 void InstallExceptionHandler()
 {
-	
+#if defined(PSYX_HAVE_BACKTRACE)
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = PsyX_CrashSignalHandler;
+	sigemptyset(&sa.sa_mask);
+	/* NODEFER so a fault inside the handler reaches the recursion guard rather
+	 * than deadlocking; RESETHAND so the second one dies normally. */
+	sa.sa_flags = SA_NODEFER | SA_RESETHAND;
+
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS,  &sa, NULL);
+	sigaction(SIGILL,  &sa, NULL);
+	sigaction(SIGFPE,  &sa, NULL);
+	sigaction(SIGABRT, &sa, NULL);
+#endif
 }
 
 void UnInstallExceptionHandler()
