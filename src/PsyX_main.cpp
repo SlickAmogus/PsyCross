@@ -1139,6 +1139,14 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			/* PC port: moved out of #ifdef _DEBUG so the VRAM dump works in normal
 			 * (debug-enabled) builds too — it's the key diagnostic for the texture/
 			 * VRAM bugs (boss-FX ghost textures etc.). Writes VRAM.TGA to the cwd. */
+			/* CTRL IS REQUIRED: F10 is also the quick options overlay in the PC
+			 * port, so without a modifier every open AND close of that panel also
+			 * dumped the whole VRAM to disk -- 512 unbuffered row writes, measured
+			 * at 2075ms and 2585ms worst-frame in a normal session. That is the
+			 * multi-second freeze on opening and closing the quick menu; the panel
+			 * itself was never the cost. */
+			if (!(SDL_GetModState() & KMOD_CTRL))
+				break;
 			eprintwarn("saving VRAM.TGA\n");
 			GR_SaveVRAM("VRAM.TGA", 0, 0, VRAM_WIDTH, VRAM_HEIGHT, 1);
 			break;
