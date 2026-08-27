@@ -2355,19 +2355,19 @@ ShaderID GR_Shader_Compile(const char* source)
 #if defined(ES2_SHADERS)
 	const char* GLSL_HEADER_VERT =
 		"#version 100\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n";
 
 	const char* GLSL_HEADER_FRAG =
 		"#version 100\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define fragColor gl_FragColor\n";
 #elif defined(ES3_SHADERS)
 	const char* GLSL_HEADER_VERT =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2376,7 +2376,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	const char* GLSL_HEADER_FRAG =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -2388,7 +2388,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	 * that these defines paper over. */
 	static const char* const GLSL_HEADER_VERT_GL =
 		"#version 140\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2397,7 +2397,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	static const char* const GLSL_HEADER_FRAG_GL =
 		"#version 140\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -2406,9 +2406,19 @@ ShaderID GR_Shader_Compile(const char* source)
 	/* GLSL ES 3.00 requires the #extension line to precede any other statement,
 	 * so noperspective support is baked into the header rather than the trailing
 	 * defines block. Requested only when the probe found the extension. */
+	/* highp int, NOT lowp. GLSL ES only guarantees ~9 bits for lowp int
+	 * (about +-256), and this renderer does integer work far past that:
+	 * VRAM texel coordinates in a 1024x512 space, CLUT palette indices and
+	 * tpage offsets. Overflowing those sends texture lookups to the wrong
+	 * place, which is the whole-scene texture distortion and the wrong
+	 * semitransparency patches reported on the Vulkan and D3D11 backends.
+	 *
+	 * Desktop GL IGNORES precision qualifiers, so this could only ever show
+	 * on the ES path -- which is exactly what those backends are, since they
+	 * reach the GPU through ANGLE. That is why plain GL was always fine. */
 	static const char* const GLSL_HEADER_VERT_ES3 =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2418,7 +2428,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	static const char* const GLSL_HEADER_VERT_ES3_NP =
 		"#version 300 es\n"
 		"#extension GL_NV_shader_noperspective_interpolation : require\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2427,7 +2437,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	static const char* const GLSL_HEADER_FRAG_ES3 =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -2436,7 +2446,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	static const char* const GLSL_HEADER_FRAG_ES3_NP =
 		"#version 300 es\n"
 		"#extension GL_NV_shader_noperspective_interpolation : require\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
