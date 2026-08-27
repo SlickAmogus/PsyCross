@@ -3554,6 +3554,40 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 #endif
 }
 
+/* Half-widths of the world ortho, in PSX X units measured from centre:
+ * `out43` is the 4:3 frame the shot was authored for, `outWide` is what Hor+
+ * actually installs. Their difference IS the extra picture widescreen reveals
+ * on each side, which is what a shot framed to hide something off the 4:3 edge
+ * needs to be rotated by. Reported rather than recomputed by the caller so the
+ * two can never drift apart -- these are the same expressions used to build the
+ * ortho above. Returns 0 when no widening is in effect. */
+extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
+{
+	float psxW, psxH, psxAspect, winAspect, horScale, effectiveScale, margin, hscale;
+
+	if (!out43 || !outWide || !g_PcHorPlusEnabled || g_PcWidescreenMode != 1)
+		return 0;
+
+	psxW = (float)activeDispEnv.disp.w;
+	psxH = (float)activeDispEnv.disp.h;
+	if (psxW <= 0.0f || psxH <= 0.0f || g_windowHeight <= 0)
+		return 0;
+
+	psxAspect = psxW / psxH;
+	winAspect = (float)g_windowWidth / (float)g_windowHeight;
+	horScale  = winAspect / psxAspect;
+	if (horScale <= 1.0f)
+		return 0;
+
+	effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
+	margin         = psxW * (effectiveScale - 1.0f) * 0.5f;
+	hscale         = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
+
+	*out43   = (psxW * 0.5f) / hscale;
+	*outWide = (psxW * 0.5f + margin) / hscale;
+	return 1;
+}
+
 void GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height, int bReadFromFrameBuffer)
 {
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
