@@ -1115,7 +1115,25 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 	 * it clears on key-up so it can never latch on. */
 	if (nKey == SDL_SCANCODE_F5)
 	{
-		g_skipSwapInterval = (down && (SDL_GetModState() & KMOD_CTRL)) ? 1 : 0;
+		/* TOGGLE, matching the quick options row -- press once for fast
+		 * forward, again for normal. s_f5Down filters SDL's key repeats,
+		 * which would otherwise flip it many times per second while held.
+		 * g_PcFastForward is the single source of truth; the game mirrors
+		 * it into g_skipSwapInterval so pacing and the clock agree. */
+		static int s_f5Down = 0;
+		if (down)
+		{
+			if (!s_f5Down && (SDL_GetModState() & KMOD_CTRL))
+			{
+				extern int g_PcFastForward;
+				g_PcFastForward = !g_PcFastForward;
+			}
+			s_f5Down = 1;
+		}
+		else
+		{
+			s_f5Down = 0;
+		}
 		return;
 	}
 
