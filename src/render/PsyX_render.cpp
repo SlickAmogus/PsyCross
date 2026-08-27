@@ -3527,7 +3527,15 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	const bool wantPillarbox =
 		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
-	if (wantPillarbox && g_windowWidth > 0 && g_windowHeight > 0 && (r | g | b) != 0)
+	/* Menus are NOT excluded any more. They used to be, on the grounds that a
+	 * black clear leaves black bars anyway -- but the fall-through path at the
+	 * bottom runs with the PSX clip-rect SCISSOR still enabled, so its clear is
+	 * confined to the 4:3 region and the bars are never written at all. They
+	 * kept whatever was last drawn there, which is why warm resetting to the
+	 * title left gameplay showing down both sides. Taking this branch for a
+	 * black clear simply makes both clears black, and the bars get cleared
+	 * because this path disables the scissor first. */
+	if (wantPillarbox && g_windowWidth > 0 && g_windowHeight > 0)
 	{
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -3583,7 +3591,12 @@ extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
 	margin         = psxW * (effectiveScale - 1.0f) * 0.5f;
 	hscale         = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
 
-	*out43   = (psxW * 0.5f) / hscale;
+	/* The 4:3 reference is the TRUE PSX frame, NOT the hfov-scaled one. hfov
+	 * (g_PsxWorldHScale) widens what is shown in every mode, so measuring
+	 * against it under-reports how far past the authored 320-wide frame the
+	 * picture now reaches -- which is the edge scenery was actually built to.
+	 * outWide keeps hscale because that is the ortho really installed. */
+	*out43   = psxW * 0.5f;
 	*outWide = (psxW * 0.5f + margin) / hscale;
 	return 1;
 }
