@@ -79,22 +79,28 @@ float g_PsxPixelAspect = 1.0f;
  * shows ~14.7%% too much vertical world vs PSX/DuckStation (measured 0.872 vertical /
  * 1.0 horizontal at a fixed 4:3 spot, extra at the bottom). 0.872 crops the world ortho
  * top-anchored to match; 1.0 = no crop (old behavior). Console `vfov <n>`. */
-float g_PsxWorldVScale = 0.872f;
-/* Vertical FOV scale for the 3D world DURING CUTSCENES, separate from gameplay.
- * The 0.872 gameplay crop is a fixed-gameplay-camera correction; cutscene
- * cameras have their own framing and DuckStation shows them at full vertical
- * FOV, so cropping them to 0.872 zoomed the shot and pushed characters' heads
- * off the top (reported vs emulator). 1.0 = full vertical (matches DuckStation);
- * the 2D UI pass already renders full-vertical independently, so subtitles and
- * letterbox bars are unaffected. Console `cutfov <n>`. */
-float g_PsxCutsceneVScale = 1.0f;
+float g_PsxWorldVScale = 1.0f; /* full 224-row frame; was 0.872 (crop) -- the
+    * crop made top- and bottom-anchored shots need different vshift values.
+    * Default vfov 1.0 + hfov 0.76 + vshift 11 matches DuckStation in both the
+    * cafe and infirmary probes (user-validated 2026-08-25). */
+/* EXPLICIT override for the cutscene vertical scale; <= 0 (default) means
+ * cutscenes follow g_PsxWorldVScale, cropped exactly like gameplay. Console
+ * `cutfov <n>`. Do NOT default this to 1.0 again: ab23f4f shipped that and it
+ * squished every cutscene (~15%% more vertical scene) vs the 8/21 builds --
+ * un-cropping cutscenes was already tried once before that and reverted for
+ * reading as stretched (see the ortho comment at the vscale pick). The knob
+ * exists purely for live tuning during the per-cutscene tilt investigation. */
+float g_PsxCutsceneVScale = 0.0f;
 /* Vertical view shift (amount, PSX screen-Y units) for FIXED-ANGLE camera shots, which
  * frame the top of the scene clipped vs PSX (e.g. a medkit off the top). The GAME applies
  * it (MainLoop, game_main.c) by shifting the GTE projection center down (SetGeomOffset)
  * while g_PsxFixedCamActive is set — NOT by shifting the ortho window here: the ortho
  * shift revealed rows above the frame that screen-space overlay prims (authored 0..224)
  * never cover, showing a faded band at the top. + = view up. Console `vshift`. */
-float g_PsxWorldVShift = 20.0f;
+float g_PsxWorldVShift = 0.0f; /* band-aid retired 2026-08-25: the true global
+    * offset was the GsInit3D anchor (console 120 vs our 112) -- +8 is now baked
+    * at the boot origin (libgs_stub GsInit3D), derived from the SDK convention
+    * instead of eye-tuned. The knob remains for A/B. */
 /* Same units, but for authored (cutscene / letterboxed) shots, which run at the
  * clean 0 baseline rather than inheriting the gameplay shift. Console `cutshift`.
  * Default 0 = today's framing exactly. */
@@ -104,6 +110,14 @@ int   g_PsxFixedCamActive = 0;
  * bars, so the gameplay vertical crop (g_PsxWorldVScale) is skipped while this is set —
  * otherwise it scaled/clipped the bars + subtitles off the bottom of the frame. */
 int   g_PsxCutsceneActive = 0;
+/* Set by the game while the world item-pickup take screen is up. The item is the
+ * only live 3D (the world behind it is a frozen present), staged by its own
+ * authored camera like a cutscene -- so like cutscenes it renders at FULL
+ * vertical scale. Leaving the gameplay vfov crop (0.872 top-anchored) on drew
+ * every picked-up item 112*(1/0.872-1) ~= 16 PSX units below its PSX position
+ * under Hor+ (reported as "pickups ~20 too low"; invisible in pillarbox, which
+ * never crops). Horizontal Hor+ behaviour is unchanged. */
+int   g_PsxItemTakeActive = 0;
 /* Set by the game around the 2D-UI ordering-table draw (OrderingTable2: map-message
  * subtitles, screen fade, cutscene letterbox bars). When set, GR_SetOffscreenState
  * draws that pass at FULL vertical ortho (vscale 1.0) so it isn't clipped by the Hor+
@@ -114,7 +128,13 @@ int   g_PsxUIOrthoPass = 0;
 /* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
-float g_PsxWorldHScale = 1.0f;
+float g_PsxWorldHScale = 0.76f; /* 0.872^2: preserves the user-validated shape
+    * product (tallness ~ vfov*hfov) with the vertical opened to the full frame. */
+/* Where the vertical world crop (g_PsxWorldVScale < 1) sits: 0 = keep the top
+ * rows and cut the bottom (today's behaviour), 0.5 = centred, 1 = keep the
+ * bottom. Experiment knob for the framing investigation (console `vcropanchor`);
+ * a DuckStation-style overscan crop would be centred, ours is top-anchored. */
+float g_PsxWorldVCropAnchor = 0.0f;
 }
 #define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
 
@@ -505,7 +525,7 @@ static GLuint g_freezeFrameTex = 0;
 static GLuint g_freezeFrameFBO = 0;
 static int    g_freezeFrameW = 0;
 static int    g_freezeFrameH = 0;
-static int    g_freezeFrameValid = 0;
+int           g_freezeFrameValid = 0; /* exposed: game-side grey-flash probe reads it */
 static int    g_freezePresentedThisFrame = 0;
 /* ES3 resolve-blit format matching, see GR_CaptureLastFrame. */
 static int    g_freezeRealloc = 0;
@@ -2235,6 +2255,8 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
+	/* PSX's 15-bit framebuffer could not represent a residue below 1/32, and this geometry was culled at the fog far distance anyway: snap the last 1/32 to full so distant objects dissolve instead of sitting 1-2/255 off the fog colour. */\
+	"		if (fogAmt > 0.96875) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
@@ -2434,13 +2456,13 @@ ShaderID GR_Shader_Compile(const char* source)
 #if defined(ES2_SHADERS)
 	const char* GLSL_HEADER_VERT =
 		"#version 100\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n";
 
 	const char* GLSL_HEADER_FRAG =
 		"#version 100\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define fragColor gl_FragColor\n";
 #elif defined(ES3_SHADERS)
@@ -2477,7 +2499,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	 * that these defines paper over. */
 	static const char* const GLSL_HEADER_VERT_GL =
 		"#version 140\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2486,7 +2508,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	static const char* const GLSL_HEADER_FRAG_GL =
 		"#version 140\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -2495,9 +2517,19 @@ ShaderID GR_Shader_Compile(const char* source)
 	/* GLSL ES 3.00 requires the #extension line to precede any other statement,
 	 * so noperspective support is baked into the header rather than the trailing
 	 * defines block. Requested only when the probe found the extension. */
+	/* highp int, NOT lowp. GLSL ES only guarantees ~9 bits for lowp int
+	 * (about +-256), and this renderer does integer work far past that:
+	 * VRAM texel coordinates in a 1024x512 space, CLUT palette indices and
+	 * tpage offsets. Overflowing those sends texture lookups to the wrong
+	 * place, which is the whole-scene texture distortion and the wrong
+	 * semitransparency patches reported on the Vulkan and D3D11 backends.
+	 *
+	 * Desktop GL IGNORES precision qualifiers, so this could only ever show
+	 * on the ES path -- which is exactly what those backends are, since they
+	 * reach the GPU through ANGLE. That is why plain GL was always fine. */
 	static const char* const GLSL_HEADER_VERT_ES3 =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2507,7 +2539,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	static const char* const GLSL_HEADER_VERT_ES3_NP =
 		"#version 300 es\n"
 		"#extension GL_NV_shader_noperspective_interpolation : require\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define VERTEX\n"
 		"#define varying   out\n"
@@ -2516,7 +2548,7 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	static const char* const GLSL_HEADER_FRAG_ES3 =
 		"#version 300 es\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -2525,7 +2557,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	static const char* const GLSL_HEADER_FRAG_ES3_NP =
 		"#version 300 es\n"
 		"#extension GL_NV_shader_noperspective_interpolation : require\n"
-		"precision lowp  int;\n"
+		"precision highp int;\n"
 		"precision highp float;\n"
 		"#define varying     in\n"
 		"#define texture2D   texture\n"
@@ -3669,7 +3701,15 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	const bool wantPillarbox =
 		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
-	if (wantPillarbox && g_windowWidth > 0 && g_windowHeight > 0 && (r | g | b) != 0)
+	/* Menus are NOT excluded any more. They used to be, on the grounds that a
+	 * black clear leaves black bars anyway -- but the fall-through path at the
+	 * bottom runs with the PSX clip-rect SCISSOR still enabled, so its clear is
+	 * confined to the 4:3 region and the bars are never written at all. They
+	 * kept whatever was last drawn there, which is why warm resetting to the
+	 * title left gameplay showing down both sides. Taking this branch for a
+	 * black clear simply makes both clears black, and the bars get cleared
+	 * because this path disables the scissor first. */
+	if (wantPillarbox && g_windowWidth > 0 && g_windowHeight > 0)
 	{
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -3694,6 +3734,45 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	glClearColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 #endif
+}
+
+/* Half-widths of the world ortho, in PSX X units measured from centre:
+ * `out43` is the 4:3 frame the shot was authored for, `outWide` is what Hor+
+ * actually installs. Their difference IS the extra picture widescreen reveals
+ * on each side, which is what a shot framed to hide something off the 4:3 edge
+ * needs to be rotated by. Reported rather than recomputed by the caller so the
+ * two can never drift apart -- these are the same expressions used to build the
+ * ortho above. Returns 0 when no widening is in effect. */
+extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
+{
+	float psxW, psxH, psxAspect, winAspect, horScale, effectiveScale, margin, hscale;
+
+	if (!out43 || !outWide || !g_PcHorPlusEnabled || g_PcWidescreenMode != 1)
+		return 0;
+
+	psxW = (float)activeDispEnv.disp.w;
+	psxH = (float)activeDispEnv.disp.h;
+	if (psxW <= 0.0f || psxH <= 0.0f || g_windowHeight <= 0)
+		return 0;
+
+	psxAspect = psxW / psxH;
+	winAspect = (float)g_windowWidth / (float)g_windowHeight;
+	horScale  = winAspect / psxAspect;
+	if (horScale <= 1.0f)
+		return 0;
+
+	effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
+	margin         = psxW * (effectiveScale - 1.0f) * 0.5f;
+	hscale         = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
+
+	/* The 4:3 reference is the TRUE PSX frame, NOT the hfov-scaled one. hfov
+	 * (g_PsxWorldHScale) widens what is shown in every mode, so measuring
+	 * against it under-reports how far past the authored 320-wide frame the
+	 * picture now reaches -- which is the edge scenery was actually built to.
+	 * outWide keeps hscale because that is the ortho really installed. */
+	*out43   = psxW * 0.5f;
+	*outWide = (psxW * 0.5f + margin) / hscale;
+	return 1;
 }
 
 void GR_SaveVRAM(const char* outputFileName, int x, int y, int width, int height, int bReadFromFrameBuffer)
@@ -3948,10 +4027,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * ortho so it isn't scaled/clipped off the bottom. The FIX_ANG framing shift
 				 * (g_PsxWorldVShift) is applied at the GTE projection center by the game, not
 				 * here — an ortho-window shift reveals rows overlay prims never cover. */
-				const float vscale = g_PsxUIOrthoPass ? 1.0f
-				                   : (g_PsxCutsceneActive ? g_PsxCutsceneVScale : g_PsxWorldVScale);
-				orthoTop = 0.0f;
-				orthoBot = psxH * vscale;
+				const float vscale = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
+				                   : (g_PsxCutsceneActive && g_PsxCutsceneVScale > 0.0f
+				                      ? g_PsxCutsceneVScale : g_PsxWorldVScale);
+				orthoTop = psxH * (1.0f - vscale) * g_PsxWorldVCropAnchor;
+				orthoBot = orthoTop + psxH * vscale;
 			}
 			const float psxAspect = psxW / psxH;
 			const float winAspect = (g_windowHeight > 0)
@@ -3964,9 +4044,18 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			fbOrthoB = orthoBot;
 			fbOrthoL = 0.0f;
 			fbOrthoR = psxW;
+			/* hfov for the 4:3 3D branches below: scale the horizontal extent
+			 * around the centre exactly like the Hor+ branch does, so hfov works in
+			 * 4:3-window GAMEPLAY too. The g_PcHorPlusEnabled gate is load-bearing:
+			 * it is the "3D gameplay vs 2D screen" signal, and applying hfov to 2D
+			 * screens shrank the NTSC title background and revealed VRAM garbage at
+			 * its sides (user-reported 2026-08-25). Never the UI pass either. */
+			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
-				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
+				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
+				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			} else if (g_PcWidescreenMode == 1) {
 				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
 				 * preserves 1 H px = 1 V px scaling for character proportions. */
@@ -3984,7 +4073,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			} else {
 				/* Pillarbox (mode 0, default) or stretch (mode 2): 4:3 ortho.
 				 * The viewport (below) handles pillarbox vs full-window. */
-				GR_Ortho2D(0.0f, psxW, orthoBot, orthoTop, -1.0f, 1.0f);
+				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
+				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
@@ -4598,9 +4688,23 @@ static void sh_mul(const float* a, const float* b, float* r)  /* r = a * b */
 static void GR_EnsureShadowTarget(void)
 {
 	/* Clamp once, so a bad config value cannot ask the driver for something
-	 * absurd. 4096 is comfortably within ES 3.0's guaranteed max texture size. */
+	 * absurd. 8192 is above ES 3.0's guaranteed minimum (4096), so sizes past
+	 * that are additionally capped to the driver's real limit -- a GPU that
+	 * can't do it gets the biggest map it can instead of an incomplete FBO. */
 	if (g_PsyX_ShadowMapSize < 256)   g_PsyX_ShadowMapSize = 256;
-	if (g_PsyX_ShadowMapSize > 4096)  g_PsyX_ShadowMapSize = 4096;
+	if (g_PsyX_ShadowMapSize > 8192)  g_PsyX_ShadowMapSize = 8192;
+	if (g_PsyX_ShadowMapSize > 4096)
+	{
+		static GLint s_maxTexSize = 0;
+		if (s_maxTexSize == 0)
+			glGetIntegerv(GL_MAX_TEXTURE_SIZE, &s_maxTexSize);
+		if (s_maxTexSize > 0 && g_PsyX_ShadowMapSize > s_maxTexSize)
+		{
+			eprintf("*shadow map %d exceeds GL_MAX_TEXTURE_SIZE %d, clamping\n",
+			        g_PsyX_ShadowMapSize, (int)s_maxTexSize);
+			g_PsyX_ShadowMapSize = s_maxTexSize;
+		}
+	}
 
 	/* Resolution changed at runtime: drop the old target and build a new one. */
 	if (g_shadowFBO != 0 && s_shadowTexSize != g_PsyX_ShadowMapSize)
@@ -5333,6 +5437,23 @@ static void GR_ClearVramRect(int x, int y, int w, int h)
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(cc[0], cc[1], cc[2], cc[3]);
 
+	/* [FBCLEAR] one-shot proof the blank reached the SAMPLED texture (the
+	 * ANGLE rainbow diagnosis): FBO status + a readback of the rect's first
+	 * texel, which must be packed word 0. Three lines per session. */
+	{
+		static int s_fbClearLogs = 0;
+		if (s_fbClearLogs < 3)
+		{
+			GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+			unsigned char px[4] = { 255, 255, 255, 255 };
+			glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+			s_fbClearLogs++;
+			eprintf("*[FBCLEAR] rect=(%d,%d %dx%d) tex=%u fboStatus=0x%x readback=(%d,%d) %s\n",
+			        x, y, w, h, (unsigned)g_vramTexture, (unsigned)st, px[0], px[1],
+			        (st == GL_FRAMEBUFFER_COMPLETE && px[0] == 0 && px[1] == 0) ? "OK" : "NOT BLANK");
+		}
+	}
+
 	glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 
 	/* Sentinels, not the real state — see GR_DrawFullscreenTexture. */
@@ -5734,7 +5855,15 @@ void GR_UpdateVRAM()
 
 	glBindTexture(GL_TEXTURE_2D, g_vramTexture);
 
-#if defined(RENDERER_OGL)
+	/* Always a sub-image upload: storage was allocated at creation. The old
+	 * RENDERER_OGL branch RE-SPECIFIED the texture with glTexImage2D on every
+	 * upload, which native GL tolerates while the texture is an FBO attachment
+	 * but ANGLE (ES over D3D11/Vulkan) may orphan -- the feedback-rect blank in
+	 * GR_ClearVramRect then cleared dead storage while the sampled texture kept
+	 * the CPU vram[] bytes just stamped over the display-buffer rects: the
+	 * map4_s01 (Lisa) cutscene overlay drew that garbage as a rainbow band,
+	 * ANGLE-only, worsening with TIM streaming. */
+#if 0
 	glTexImage2D(GL_TEXTURE_2D, 0, VRAM_INTERNAL_FORMAT, VRAM_WIDTH, VRAM_HEIGHT, 0, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
 #else
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
@@ -5841,6 +5970,11 @@ void GR_DiagGLError(const char* where)
 
 void GR_SwapWindow()
 {
+	{
+		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
+		g_PsxLastFrameVerts = g_PsxFrameVerts;
+		g_PsxFrameVerts     = 0;
+	}
 	GR_DiagGLError("end of frame");
 
 	/* Stretch the internal target onto the real window. This is the only bind of
