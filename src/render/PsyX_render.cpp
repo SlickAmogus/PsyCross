@@ -164,7 +164,27 @@ static float PsxDisplayPixelAspect(void)
 	if (w <= 0.0f || h <= 0.0f)
 		return g_PsxPixelAspect;
 
-	return (w / h) / (4.0f / 3.0f);
+	/* Solve for the PAR that lands the FINAL on-screen picture on 4:3.
+	 *
+	 * The widened ortho spans psxW*effScale/hscale across the window and
+	 * psxH*vscale down it, with effScale = horScale*PAR. Substituting
+	 * horScale = winAspect/psxAspect, the window terms cancel and the
+	 * on-screen pixel aspect comes out as vscale*hscale/PAR -- the hfov and
+	 * vfov knobs are IN that expression, so a PAR derived from the display
+	 * size alone lands wherever those knobs happen to sit. With the shipped
+	 * hfov of 0.76 that is 0.709 rather than the 0.933 a television gives.
+	 *
+	 * Dividing them back out makes the mode mean what it says: the picture is
+	 * 4:3 at any resolution and at any knob setting. hfov and vfov therefore
+	 * do nothing here, which is the point -- they were eyeball compensations
+	 * for this exact problem, and the television is not a matter of taste.
+	 * display_aspect = raw restores them. */
+	{
+		const float target = (4.0f / 3.0f) / (w / h);
+		const float hs = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
+		const float vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
+		return (hs * vs) / target;
+	}
 }
 #define PSX_NTSC_PIXEL_ASPECT (PsxDisplayPixelAspect())
 
@@ -3916,7 +3936,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			 * it is the "3D gameplay vs 2D screen" signal, and applying hfov to 2D
 			 * screens shrank the NTSC title background and revealed VRAM garbage at
 			 * its sides (user-reported 2026-08-25). Never the UI pass either. */
-			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			/* The 4:3 paths carry hfov too, so a CRT picture has to drop it here as
+			 * well or pillarbox stays squashed while the widened path is correct --
+			 * which is exactly how the two modes came to disagree. */
+			const float hs43   = (!g_PsxAspectRaw) ? 1.0f
+			                   : ((g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f);
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
