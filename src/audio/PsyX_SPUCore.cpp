@@ -1336,7 +1336,7 @@ void SPUCore::StepSharedNoise()
 // Rendering
 // ---------------------------------------------------------------------------
 
-void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
+void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutput* split)
 {
     for (int f = 0; f < frameCount; ++f)
     {
@@ -1402,6 +1402,11 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
             v.attr.volumex.right = SaturateS16(v.curVolR);
             v.attr.envx = static_cast<int16_t>(v.envLevel);
 
+            /* Pre-pan mono tap for the spatialiser: the exact sample the mix
+             * below is about to pan, so the two can never disagree. */
+            if (split && split->voiceMono[vi])
+                split->voiceMono[vi][f] = SaturateS16(envScaled);
+
             int32_t voiceL = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolL) >> 15);
             int32_t voiceR = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolR) >> 15);
             mixL += voiceL;
@@ -1438,6 +1443,11 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
                 (static_cast<int64_t>(cd.r) * m_xaMasterGainQ16) >> 16);
             int32_t cdL = static_cast<int32_t>((static_cast<int64_t>(xaL) * m_cdVolL) >> 15);
             int32_t cdR = static_cast<int32_t>((static_cast<int64_t>(xaR) * m_cdVolR) >> 15);
+            if (split && split->cdLR)
+            {
+                split->cdLR[f * 2 + 0] = SaturateS16(cdL);
+                split->cdLR[f * 2 + 1] = SaturateS16(cdR);
+            }
             mixL += cdL;
             mixR += cdR;
             if (m_cdReverb)
@@ -1447,12 +1457,23 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
             }
         }
 
+        else if (split && split->cdLR)
+        {
+            split->cdLR[f * 2 + 0] = 0;
+            split->cdLR[f * 2 + 1] = 0;
+        }
+
         int32_t reverbOutL = 0;
         int32_t reverbOutR = 0;
         m_reverb.Process(m_ram, kSpuRamSize,
                          SaturateS16(static_cast<int32_t>(reverbInL)),
                          SaturateS16(static_cast<int32_t>(reverbInR)),
                          &reverbOutL, &reverbOutR);
+        if (split && split->wetLR)
+        {
+            split->wetLR[f * 2 + 0] = SaturateS16(reverbOutL);
+            split->wetLR[f * 2 + 1] = SaturateS16(reverbOutR);
+        }
         mixL += reverbOutL;
         mixR += reverbOutR;
 
@@ -1475,8 +1496,25 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount)
         mixL = (static_cast<int64_t>(clampedL) * m_curMasterVolL) >> 15;
         mixR = (static_cast<int64_t>(clampedR) * m_curMasterVolR) >> 15;
 
-        outInterleavedLR[f * 2 + 0] = SaturateS16(static_cast<int32_t>(mixL));
-        outInterleavedLR[f * 2 + 1] = SaturateS16(static_cast<int32_t>(mixR));
+        if (outInterleavedLR)
+        {
+            outInterleavedLR[f * 2 + 0] = SaturateS16(static_cast<int32_t>(mixL));
+            outInterleavedLR[f * 2 + 1] = SaturateS16(static_cast<int32_t>(mixR));
+        }
+    }
+
+    if (split)
+    {
+        /* End-of-block pan, for the caller's azimuth. Sampling once per block
+         * rather than per frame is deliberate: OpenAL positions a source once
+         * per queued buffer anyway. */
+        for (int vi = 0; vi < kNumVoices; ++vi)
+        {
+            split->panL[vi] = m_voices[vi].curVolL;
+            split->panR[vi] = m_voices[vi].curVolR;
+        }
+        split->masterL = m_curMasterVolL;
+        split->masterR = m_curMasterVolR;
     }
 }
 
