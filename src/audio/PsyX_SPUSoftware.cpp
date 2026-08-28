@@ -146,6 +146,15 @@ PSX_API_EXPORT void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, 
         g_audioConfig.flags |= PSYX_AUDIO_FLAG_REQUIRE_BIT_PERFECT;
 }
 
+/* Spatial output opt-in, set before SpuInit. speakers mirrors
+ * PsyX_SPUAL_SetOutputMode: 0 auto, 1 stereo, 2 quad, 3 5.1, 4 7.1, 5 HRTF.
+ * Ignored by the legacy backend, which already has its own layout handling. */
+PSX_API_EXPORT void PsyX_SPUAL_ConfigureSpatial(int enable, int speakers)
+{
+    g_spatialRequested = enable != 0;
+    g_spatialSpeakers  = speakers;
+}
+
 PSX_API_EXPORT int PsyX_SPUAL_ConfigureRenderer(
     int renderer, int idealClip, int referenceClip, int referenceDither)
 {
