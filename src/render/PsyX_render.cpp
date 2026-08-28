@@ -151,6 +151,15 @@ float g_PsxWorldVCropAnchor = 0.0f;
  * g_PsxAspectRaw = 1 restores the previous behaviour: the framebuffer at
  * whatever PAR the `par` knob says, faithful to the game's own numbers rather
  * than to the television it was shown on. */
+/* Trim on the CRT picture aspect, console `crtaspect`. 1.0 = a textbook 4:3.
+ *
+ * The 4:3 target assumes the 224-line frame fills the whole screen height,
+ * but a console puts 224 active lines inside a 240-line window and how much a
+ * given set overscans varies, so the true picture is a few percent either way
+ * and no formula settles it. Environments hide that -- nobody knows how wide a
+ * corridor should be -- while a human figure shows it immediately, which is why
+ * Harry is the thing to judge it on. Below 1.0 makes him taller and thinner. */
+float g_PsxCrtAspectTrim = 1.0f;
 int   g_PsxAspectRaw = 0;
 static float PsxDisplayPixelAspect(void)
 {
@@ -180,7 +189,8 @@ static float PsxDisplayPixelAspect(void)
 	 * for this exact problem, and the television is not a matter of taste.
 	 * display_aspect = raw restores them. */
 	{
-		const float target = (4.0f / 3.0f) / (w / h);
+		const float trim   = (g_PsxCrtAspectTrim > 0.0f) ? g_PsxCrtAspectTrim : 1.0f;
+		const float target = ((4.0f / 3.0f) * trim) / (w / h);
 		const float hs = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
 		const float vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
 		return (hs * vs) / target;
