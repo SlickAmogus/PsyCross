@@ -4199,32 +4199,19 @@ static const char* s_postShaderSrc =
 	"	p += dot(p, p + 45.32);\n"
 	"	return fract(p.x * p.y);\n"
 	"}\n"
-	/* Film grain, the way film actually behaves.
+	/* Film grain. Time seeds the NOISE, it never moves it.
 	 *
-	 * The old version was hash(pixel + u_time), which ADDS time to the
-	 * coordinate and slides the whole noise field diagonally across the screen.
-	 * Time seeds the hash here instead, so each grain stays put and only its
-	 * value changes.
-	 *
-	 * Quantised to 24 updates a second rather than per frame: real grain is one
-	 * pattern per photographed frame, and at 200 fps a per-frame reseed reads as
-	 * fizzing video static rather than film.
-	 *
-	 * Cells are sized in SCREEN pixels against a 1080p reference so the grain
-	 * keeps its apparent size at 4K instead of dissolving into a fine haze.
-	 *
-	 * Strength follows luminance: grain lives in the mid-tones and falls away in
-	 * deep shadow and blown highlights. Flat noise over black is what makes a
-	 * naive grain read as dirt on the lens. */
-	"float filmGrain(vec2 fragPx, vec2 srcSize, float t) {\n"
-	"	float cell = max(srcSize.y / 1080.0, 1.0);\n"
-	"	vec2  g    = floor(fragPx / cell);\n"
-	"	float seed = floor(t * 24.0);\n"
-	"	return hash(g + vec2(seed * 0.7548, seed * 0.5698));\n"
-	"}\n"
-	"float grainWeight(vec3 c) {\n"
-	"	float l = dot(c, vec3(0.299, 0.587, 0.114));\n"
-	"	return 4.0 * l * (1.0 - l);\n"
+	 * Two ways to get this wrong, and the first version had one and my first fix
+	 * had the other. hash(pixel + time) slides the field diagonally across the
+	 * screen. Offsetting the lookup by a per-frame amount is the same mistake in
+	 * steps: the pattern is spatially coherent, so it visibly jumps around rather
+	 * than re-randomising. Time has to enter the hash as its own dimension, which
+	 * is what this does -- every pixel keeps its position and only its value
+	 * changes, which is what film grain actually looks like. */
+	"float grainNoise(vec2 p, float t) {\n"
+	"	vec3 q = fract(vec3(p.xy, t) * vec3(443.897, 441.423, 437.195));\n"
+	"	q += dot(q, q.yzx + 19.19);\n"
+	"	return fract((q.x + q.y) * q.z);\n"
 	"}\n"
 	"vec3 colorGrade(vec3 c) {\n"
 	"	c = (c - 0.5) * 1.12 + 0.5;\n"                       /* contrast */
@@ -4274,8 +4261,8 @@ static const char* s_postShaderSrc =
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"	} else if (u_postMode == 5) {\n"                     /* Film grain */
 	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		float n = filmGrain(gl_FragCoord.xy, 1.0 / u_texSize, u_time);\n"
-	"		col += (n - 0.5) * 0.13 * (0.35 + 0.65 * grainWeight(col));\n"
+	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
+	"		col += (n - 0.5) * 0.10;\n"
 	"	} else if (u_postMode == 6) {\n"                     /* Sharpen */
 	"		vec3 c = texture2D(s_texture, uv).rgb;\n"
 	"		vec3 b = (texture2D(s_texture, uv + vec2(u_texSize.x, 0.0)).rgb\n"
@@ -4294,8 +4281,8 @@ static const char* s_postShaderSrc =
 	"	} else if (u_postMode == 8) {\n"                     /* Cinematic: grade + vignette + grain */
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 0.9, 0.0, 1.0);\n"
-	"		float n = filmGrain(gl_FragCoord.xy, 1.0 / u_texSize, u_time);\n"
-	"		col += (n - 0.5) * 0.060 * (0.35 + 0.65 * grainWeight(col));\n"
+	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
+	"		col += (n - 0.5) * 0.045;\n"
 	"	} else {\n"                                          /* passthrough */
 	"		col = texture2D(s_texture, uv).rgb;\n"
 	"	}\n"
