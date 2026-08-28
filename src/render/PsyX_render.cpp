@@ -136,7 +136,37 @@ float g_PsxWorldHScale = 0.76f; /* 0.872^2: preserves the user-validated shape
  * a DuckStation-style overscan crop would be centred, ours is top-anchored. */
 float g_PsxWorldVCropAnchor = 0.0f;
 }
-#define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
+/* Display aspect mode. A real CRT scans the console's framebuffer out to a 4:3
+ * screen whatever its line count, so a 320x224 NTSC frame is stretched to 4:3
+ * and appears slightly squashed horizontally next to square pixels. Games were
+ * composed on that picture, so it is the default.
+ *
+ * On the widened path the on-screen pixel aspect works out to exactly 1/PAR, so
+ * stretching the real framebuffer to 4:3 means PAR = (dispW/dispH) / (4/3):
+ * 1.0 for a 320x240 buffer, which is already 4:3, and 1.0714 for the 320x224
+ * this game actually outputs. Pillarbox already looked right because its
+ * viewport is hardcoded 4:3; only the full-window paths needed this, which is
+ * why the two modes disagreed.
+ *
+ * g_PsxAspectRaw = 1 restores the previous behaviour: the framebuffer at
+ * whatever PAR the `par` knob says, faithful to the game's own numbers rather
+ * than to the television it was shown on. */
+int   g_PsxAspectRaw = 0;
+static float PsxDisplayPixelAspect(void)
+{
+	float w, h;
+
+	if (g_PsxAspectRaw)
+		return g_PsxPixelAspect;
+
+	w = (float)activeDispEnv.disp.w;
+	h = (float)activeDispEnv.disp.h;
+	if (w <= 0.0f || h <= 0.0f)
+		return g_PsxPixelAspect;
+
+	return (w / h) / (4.0f / 3.0f);
+}
+#define PSX_NTSC_PIXEL_ASPECT (PsxDisplayPixelAspect())
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
