@@ -1,6 +1,7 @@
 // PsyX_SPUCore.cpp - see PsyX_SPUCore.h for design notes/limitations.
 
 #include "PsyX_SPUCore.h"
+#include "../PsyX_main.h" /* [SPUSTUCK] TEMPORARY: eprintinfo -> g_logStream */
 
 #include <string.h>
 #include <algorithm>
@@ -622,6 +623,27 @@ void SPUCore::KeyOffVoice(SPUVoiceState& v)
 {
     v.envPhase = EnvPhase::Release;
     v.envCounter = 0;
+    /* [SPUSTUCK] TEMPORARY probe -- radio-never-stops investigation. Arms the
+     * per-voice watchdog below; the ADSR is printed here because the release
+     * shift is the one field that can make a key-off never finish. */
+    {
+        static int s_keyOffLogs = 0;
+        int _vi = (int)(&v - &m_voices[0]);
+        v.dbgFramesSinceKeyOff = 0;
+        v.dbgKeyOffSeen        = true;
+        v.dbgStuckReported     = false;
+        if (s_keyOffLogs < 24)
+        {
+            s_keyOffLogs++;
+            eprintinfo("[SPUSTUCK] keyoff v%02d adsr1=%04x adsr2=%04x rr=%d(%s) "
+                       "r_mode=%d env=%d loopAddr=%06x curAddr=%06x\n",
+                       _vi, (unsigned)v.attr.adsr1, (unsigned)v.attr.adsr2,
+                       (int)(v.attr.rr & 0x1F),
+                       (v.attr.rr & 0x1F) == 0x1F ? "ALL-ONES: never steps" : "ok",
+                       (int)v.attr.r_mode, (int)v.envLevel,
+                       (unsigned)v.repeatAddr, (unsigned)v.curAddr);
+        }
+    }
 }
 
 void SPUCore::SetKey(int onOffCmd, uint32_t voiceBitmask)
@@ -1344,6 +1366,33 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
         // how many (if any) voices currently have NON set - see
         // StepSharedNoise()/IsNoiseGeneratorImplemented().
         StepSharedNoise();
+
+        /* [SPUSTUCK] TEMPORARY: a voice that is still audible seconds after
+         * its key-off is the bug, and this names it once and then shuts up.
+         * One line per stuck voice for the whole session. */
+        for (int _v = 0; _v < kNumVoices; ++_v)
+        {
+            SPUVoiceState& _s = m_voices[_v];
+            if (!_s.dbgKeyOffSeen || _s.dbgStuckReported)
+                continue;
+            if (_s.envLevel <= 0x0100 || _s.envPhase == EnvPhase::Off)
+            {
+                _s.dbgKeyOffSeen = false;   /* it did go quiet -- nothing to say */
+                continue;
+            }
+            if (++_s.dbgFramesSinceKeyOff >= 44100u * 3u)
+            {
+                _s.dbgStuckReported = true;
+                eprintinfo("[SPUSTUCK] STILL PLAYING 3s after keyoff: v%02d "
+                           "phase=%d env=%d adsr1=%04x adsr2=%04x rr=%d r_mode=%d "
+                           "loopEnd=%d repeat=%06x cur=%06x\n",
+                           _v, (int)_s.envPhase, (int)_s.envLevel,
+                           (unsigned)_s.attr.adsr1, (unsigned)_s.attr.adsr2,
+                           (int)(_s.attr.rr & 0x1F), (int)_s.attr.r_mode,
+                           (int)_s.reachedLoopEnd,
+                           (unsigned)_s.repeatAddr, (unsigned)_s.curAddr);
+            }
+        }
 
         int64_t mixL = 0;
         int64_t mixR = 0;

@@ -167,6 +167,11 @@ struct SPUVoiceState
     bool     forceReleaseOnBlockEnd; // set by an ADPCM "End+Mute" header (code 1)
 
     // -- ADSR envelope generator --
+    /* [SPUSTUCK] TEMPORARY: frames since KeyOff, so a voice that never
+     * goes quiet can be named. Remove with the probe in the .cpp. */
+    uint32_t dbgFramesSinceKeyOff;
+    bool     dbgKeyOffSeen;
+    bool     dbgStuckReported;
     EnvPhase envPhase;
     int32_t  envLevel;         // current ADSR volume, nominally 0..0x7FFF
     uint32_t envCounter;       // accumulator; bit15 (0x8000) set => time to step
