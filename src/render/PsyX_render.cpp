@@ -381,7 +381,7 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 		magFilter = GL_LINEAR;
 		minFilter = GL_LINEAR;
 
-#if !defined(RENDERER_OGLES)
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
 			GLint mipW = 0;
@@ -4737,7 +4737,7 @@ static void GR_EnsureShadowTarget(void)
 	             0, GL_DEPTH_COMPONENT, g_grIsGLES ? GL_UNSIGNED_INT : GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-#if !defined(RENDERER_OGLES)
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 	if (!g_grIsGLES)
 	{
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
@@ -4758,7 +4758,7 @@ static void GR_EnsureShadowTarget(void)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
 	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
 	 * the array form, which takes the same GL_NONE. */
-#if !defined(RENDERER_OGLES)
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 	if (g_grCaps.drawBuffer)
 		glDrawBuffer(GL_NONE);
 	else
