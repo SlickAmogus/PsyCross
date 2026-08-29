@@ -261,6 +261,13 @@ void PsyX_AudioSetXaMasterGain(double gain) { PsyX_SPUAL_SetXaMasterGain(gain); 
 void PsyX_AudioSetXaPaused(int paused) { PsyX_SPUAL_SetXaPaused(paused); }
 uint32_t PsyX_AudioGetQueuedXaFrames() { return PsyX_SPUAL_GetQueuedXaFrames(); }
 
+#if defined(PSYX_NO_OPENAL)
+void Pc_SpuStopLoopingVoices(void)
+{
+	/* On PSYX_NO_OPENAL builds (Android), the software SPU is used and loops are handled by the SPU core */
+}
+#endif
+
 #undef DISPATCH_RETURN
 #undef DISPATCH_VOID
 
