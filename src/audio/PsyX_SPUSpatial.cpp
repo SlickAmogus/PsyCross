@@ -2,6 +2,7 @@
 #include "PsyX_SPUCore.h"
 #include "../PsyX_main.h"
 
+#if !defined(PSYX_NO_OPENAL)
 #include <SDL.h>
 #include <AL/al.h>
 #include <AL/alc.h>
@@ -373,3 +374,30 @@ void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user)
     g_xaPump = pump;
     g_xaPumpUser = user;
 }
+
+#else
+
+bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speakerMode)
+{
+    (void)core;
+    (void)coreMutex;
+    (void)speakerMode;
+    return false;
+}
+
+void PsyX_SPUSpatial_Stop(void)
+{
+}
+
+int PsyX_SPUSpatial_Active(void)
+{
+    return 0;
+}
+
+void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user)
+{
+    (void)pump;
+    (void)user;
+}
+
+#endif
