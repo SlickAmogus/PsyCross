@@ -3653,6 +3653,19 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
  * needs to be rotated by. Reported rather than recomputed by the caller so the
  * two can never drift apart -- these are the same expressions used to build the
  * ortho above. Returns 0 when no widening is in effect. */
+/* The pixel aspect the renderer is ACTUALLY using this frame.
+ *
+ * g_PsxPixelAspect is only the `par` knob, and display_aspect = crt does not
+ * read it: it solves for the aspect that lands the picture on its 4:3 target
+ * over the live hfov/vfov. Game-side code that sizes anything to the visible
+ * frame -- overlay quads, cull bounds, the letterbox bars -- must use THIS,
+ * or it computes the frame the port had before the CRT solve existed and
+ * comes up short by exactly the ratio between the two. */
+extern "C" float GR_LivePixelAspect(void)
+{
+	return (float)PSX_NTSC_PIXEL_ASPECT;
+}
+
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
 {
 	float psxW, psxH, psxAspect, winAspect, horScale, effectiveScale, margin, hscale;
