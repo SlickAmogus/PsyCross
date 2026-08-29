@@ -51,6 +51,10 @@ int strcasecmp(const char* _l, const char* _r)
 #endif // _WIN32
 
 SDL_Window* g_window = NULL;
+extern int  g_presentWidth, g_presentHeight;
+extern int  g_cfgRenderWidth, g_cfgRenderHeight, g_cfgFullscreenMode;
+extern "C" void GR_ApplyPresentSize(int realW, int realH);
+
 
 /* PC port: mouse confinement. Default on; the launcher/config can clear it. */
 int g_cfg_confineCursor = 1;
@@ -868,8 +872,10 @@ void PsyX_Sys_DoPollEvent()
 				switch (event.window.event)
 				{
 				case SDL_WINDOWEVENT_RESIZED:
-					g_windowWidth = event.window.data1;
-					g_windowHeight = event.window.data2;
+					/* This used to assign the render size directly, which is how
+					 * borderless lost the chosen resolution: a fullscreen-desktop
+					 * window reports the DESKTOP size here right after creation. */
+					GR_ApplyPresentSize(event.window.data1, event.window.data2);
 					GR_ResetDevice();
 					break;
 				case SDL_WINDOWEVENT_CLOSE:
@@ -1124,14 +1130,55 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 	if (g_dbg_gameDebugKeys)
 		g_dbg_gameDebugKeys(nKey, down);
 
-	/* Backspace fast-forward (g_skipSwapInterval) removed — it was unguarded and
-	 * trivially hit by accident, silently running the game at uncapped speed. */
+	/* Fast-forward, held on CTRL+F5. This was on bare Backspace once and was
+	 * removed for being trivially hit by accident, which silently ran the game
+	 * at uncapped speed. Behind Ctrl it cannot be tripped by a stray press, and
+	 * it clears on key-up so it can never latch on. */
+	if (nKey == SDL_SCANCODE_F5)
+	{
+		/* TOGGLE, matching the quick options row -- press once for fast
+		 * forward, again for normal. s_f5Down filters SDL's key repeats,
+		 * which would otherwise flip it many times per second while held.
+		 * g_PcFastForward is the single source of truth; the game mirrors
+		 * it into g_skipSwapInterval so pacing and the clock agree. */
+		static int s_f5Down = 0;
+		if (down)
+		{
+			if (!s_f5Down && (SDL_GetModState() & KMOD_CTRL))
+			{
+				extern int g_PcFastForward;
+				g_PcFastForward = !g_PcFastForward;
+			}
+			s_f5Down = 1;
+		}
+		else
+		{
+			s_f5Down = 0;
+		}
+		return;
+	}
 
 	if (!down)
 	{
+		/* EVERY bind below requires CTRL.
+		 *
+		 * These share the keyboard with the game and with the launcher's own
+		 * bindings, and an unmodified function key is far too easy to hit by
+		 * accident: F10 alone collided with the quick options overlay and made
+		 * every open and close dump the whole VRAM to disk (a 2+ second freeze),
+		 * and the old bare F5/F6 flipped PGXP settings silently, with nothing on
+		 * screen and nothing in the log to say why the picture changed.
+		 *
+		 * The PGXP toggles are gone entirely rather than gated: they did nothing
+		 * visible in game, and F6 is the quick-save key. */
+		if (!(SDL_GetModState() & KMOD_CTRL))
+			return;
+
 		switch (nKey)
 		{
-#ifdef _DEBUG
+		/* Shipped in release builds, not just _DEBUG: with Ctrl required these
+		 * are safe to expose, and they are genuinely useful to players poking at
+		 * the renderer. */
 		case SDL_SCANCODE_F1:
 			g_dbg_wireframeMode ^= 1;
 			eprintwarn("wireframe mode: %d\n", g_dbg_wireframeMode);
@@ -1141,6 +1188,9 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			g_dbg_texturelessMode ^= 1;
 			eprintwarn("textureless mode: %d\n", g_dbg_texturelessMode);
 			break;
+#ifdef _DEBUG
+		/* Debug-only: inert unless g_dbg_emulatorPaused is set, and nothing
+		 * binds that, so shipping it would only risk the arrow keys. */
 		case SDL_SCANCODE_UP:
 		case SDL_SCANCODE_DOWN:
 			if (g_dbg_emulatorPaused)
@@ -1151,9 +1201,8 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 #endif
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 		case SDL_SCANCODE_F10:
-			/* PC port: moved out of #ifdef _DEBUG so the VRAM dump works in normal
-			 * (debug-enabled) builds too — it's the key diagnostic for the texture/
-			 * VRAM bugs (boss-FX ghost textures etc.). Writes VRAM.TGA to the cwd. */
+			/* The key diagnostic for texture/VRAM bugs (boss-FX ghost textures
+			 * and friends). Writes VRAM.TGA to the cwd. */
 			eprintwarn("saving VRAM.TGA\n");
 			GR_SaveVRAM("VRAM.TGA", 0, 0, VRAM_WIDTH, VRAM_HEIGHT, 1);
 			break;
@@ -1162,18 +1211,9 @@ void PsyX_Sys_DoDebugKeys(int nKey, char down)
 			PsyX_TakeScreenshot();
 			break;
 #endif
-		/* F3 freed for the game-side tone-map cycle (dbg_overlay.c). The old
-		 * bilinear-filtering toggle here was redundant — filtering is set via the
-		 * launcher (psx_dither/Filtering option -> main_pc.c). */
-		/* F4 keyboard-controller-slot cycle removed — a stray tap moved keyboard +
-		 * mouse input off player 1, silently killing fire/aim (read as a gameplay
-		 * bug). g_activeKeyboardControllers stays at its 0x1 default. */
-		case SDL_SCANCODE_F5:
-			g_cfg_pgxpTextureCorrection ^= 1;
-			break;
-		case SDL_SCANCODE_F6:
-			g_cfg_pgxpZBuffer ^= 1;
-			break;
+		/* F3 is the game-side tone-map cycle (dbg_overlay.c). F4 was a keyboard
+		 * controller-slot cycle: a stray tap moved keyboard + mouse off player 1
+		 * and silently killed fire/aim, so it stays removed. */
 		}
 	}
 }
@@ -1263,7 +1303,7 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 		SDL_SetWindowSize(g_window, width, height);
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN);
 	}
-	else if (fullscreen == 2) /* borderless = desktop mode, resolution ignored */
+	else if (fullscreen == 2) /* borderless: desktop-sized window, scene rendered at the chosen size */
 	{
 		SDL_SetWindowFullscreen(g_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 	}
@@ -1274,6 +1314,25 @@ void PsyX_ApplyWindowState(int width, int height, int fullscreen)
 	}
 
 	SDL_GetWindowSize(g_window, &g_windowWidth, &g_windowHeight);
+
+	/* The window is now the PRESENT size. Borderless used to stop here, which is
+	 * why it ignored the chosen resolution and simply ran at desktop size.
+	 *
+	 * Instead, keep the desktop-sized window and render the scene into an
+	 * internal target at the chosen resolution, stretched to the window at
+	 * present. g_windowWidth/Height stay the RENDER size, so every viewport,
+	 * scissor and aspect calculation keeps working untouched.
+	 *
+	 * Skipped when the request matches the desktop (nothing to gain) or when
+	 * MSAA is on: the multisampling lives on the window's own buffer, so
+	 * redirecting the scene into a single-sampled target would silently throw
+	 * antialiasing away. If the target cannot be allocated the helper returns 0
+	 * and the stock desktop-resolution path runs exactly as before. */
+	g_cfgRenderWidth    = width;
+	g_cfgRenderHeight   = height;
+	g_cfgFullscreenMode = fullscreen;
+	GR_ApplyPresentSize(g_windowWidth, g_windowHeight);
+
 	GR_ResetDevice();
 	PsyX_UpdateMouseConfinement();
 }

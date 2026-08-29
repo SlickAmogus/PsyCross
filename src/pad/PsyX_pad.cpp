@@ -6,6 +6,7 @@
 #include "PsyX/PsyX_public.h"
 
 #include <string.h>
+#include <stdlib.h> /* abs */
 
 extern "C"
 {
@@ -44,6 +45,12 @@ const u_char*			g_sdlKeyboardState = NULL;
 
 u_short PsyX_Pad_UpdateKeyboardInput();
 void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
+static int PsyX_Pad_MergeAllControllers(LPPADRAW pad);
+
+/* The controller rumble follows: slot 0 by default, then whichever pad was last
+ * actually used (button or stick). Rumble goes ONLY to this one, so a second
+ * idle controller never buzzes. */
+static int g_activeControllerSlot = 0;
 
 /* Touch controls live in the port (pc_touch.c), which knows about game state;
  * declared rather than included so PsyCross keeps no pc_port include path. */
@@ -283,20 +290,43 @@ void PsyX_Pad_InternalPadUpdates()
 
 		if (controller->padData)
 		{
+			int anyAttached;
 			pad = (LPPADRAW)controller->padData;
 
-			PsyX_Pad_UpdateGameControllerInput(controller, pad);
+			if (i == 0)
+			{
+				// Player 1: any connected controller drives it (single-player).
+				anyAttached = PsyX_Pad_MergeAllControllers(pad);
 
-			// Retransmit the registered actuator buffer (PSX pad driver
-			// behavior) so in-place value changes by the game reach SDL.
-			if (g_actBufTable[i] && g_actBufLen[i] > 0 && controller->gc)
-				PsyX_Pad_Vibrate(0, i, g_actBufTable[i], g_actBufLen[i]);
+				// P1 rumble goes to the ACTIVE pad only (last one used), so an
+				// idle second controller never buzzes.
+				if (g_actBufTable[i] && g_actBufLen[i] > 0)
+				{
+					int a = g_activeControllerSlot;
+					if (a < 0 || a >= MAX_CONTROLLERS ||
+					    !g_controllers[a].gc || !SDL_GameControllerGetAttached(g_controllers[a].gc))
+						a = 0;
+					if (g_controllers[a].gc && SDL_GameControllerGetAttached(g_controllers[a].gc))
+						PsyX_Pad_Vibrate(0, a, g_actBufTable[i], g_actBufLen[i]);
+				}
+			}
+			else
+			{
+				PsyX_Pad_UpdateGameControllerInput(controller, pad);
+
+				// Retransmit the registered actuator buffer (PSX pad driver
+				// behavior) so in-place value changes by the game reach SDL.
+				if (g_actBufTable[i] && g_actBufLen[i] > 0 && controller->gc)
+					PsyX_Pad_Vibrate(0, i, g_actBufTable[i], g_actBufLen[i]);
+
+				anyAttached = (controller->gc && SDL_GameControllerGetAttached(controller->gc));
+			}
 
 			// PC port: analog mode is config-driven (controller_movement) rather
 			// than the original Select+Start manual toggle. analog/both -> 0x73
 			// (left stick active), dpad -> 0x41 (digital, stick ignored). Only
 			// when a real controller is attached; keyboard stays digital below.
-			if (controller->gc && SDL_GameControllerGetAttached(controller->gc))
+			if (anyAttached)
 			{
 				pad->id = (g_cfg_controllerMovement == 1) ? 0x41 : 0x73;
 			}
@@ -508,6 +538,71 @@ void PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad
 	pad->analog[1] = (rightY / 256) + 128;
 	pad->analog[2] = (leftX / 256) + 128;
 	pad->analog[3] = (leftY / 256) + 128;
+}
+
+/* Single-player: ANY connected controller drives Player 1. Controllers are
+ * assigned to slots in plug order, but the game only reads slot 0, so whichever
+ * pad happened to land there was the only one that worked -- with two pads
+ * connected the "wrong" one often won. Merge every attached controller into the
+ * P1 pad instead: buttons are active-low so a bit is pressed if ANY pad clears
+ * it (AND), and each analog axis takes whichever pad is pushed furthest from
+ * centre. A pad sitting idle at neutral contributes nothing, so a second
+ * controller left alone never fights the one in use. */
+static int PsyX_Pad_MergeAllControllers(LPPADRAW pad)
+{
+	u_short buttons = 0xFFFF;
+	short   bestLX = 0, bestLY = 0, bestRX = 0, bestRY = 0;
+	int     any = 0, i;
+
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* cont = g_controllers[i].gc;
+		u_short w1, w2, ret;
+		short   lx, ly, rx, ry;
+
+		if (!cont || !SDL_GameControllerGetAttached(cont))
+			continue;
+		any = 1;
+
+		w1 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping,  g_controllers[i].hystWord[0]);
+		w2 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping2, g_controllers[i].hystWord[1]);
+		g_controllers[i].hystWord[0] = w1;
+		g_controllers[i].hystWord[1] = w2;
+		ret = w1 & w2;
+		if (g_cfg_disableDpadMovement)
+			ret |= 0x10 | 0x40 | 0x80 | 0x20;
+		buttons &= ret;
+
+		lx = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_x);
+		ly = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_left_y);
+		rx = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_x);
+		ry = GetControllerButtonState(cont, g_cfg_controllerMapping.gc_axis_right_y);
+		if (abs(lx) > abs(bestLX)) bestLX = lx;
+		if (abs(ly) > abs(bestLY)) bestLY = ly;
+		if (abs(rx) > abs(bestRX)) bestRX = rx;
+		if (abs(ry) > abs(bestRY)) bestRY = ry;
+
+		/* Follow the pad that is actually being used, so rumble targets it. A
+		 * pressed button (ret != all-released) or a stick well off centre marks
+		 * this pad active; an idle pad leaves the current choice alone. */
+		if (ret != 0xFFFF ||
+		    abs(lx) > 12000 || abs(ly) > 12000 || abs(rx) > 12000 || abs(ry) > 12000)
+			g_activeControllerSlot = i;
+	}
+
+	if (!any)
+	{
+		pad->analog[0] = pad->analog[1] = pad->analog[2] = pad->analog[3] = 127;
+		*(u_short*)pad->buttons = 0xFFFF;
+		return 0;
+	}
+
+	*(u_short*)pad->buttons = buttons;
+	pad->analog[0] = (bestRX / 256) + 128;
+	pad->analog[1] = (bestRY / 256) + 128;
+	pad->analog[2] = (bestLX / 256) + 128;
+	pad->analog[3] = (bestLY / 256) + 128;
+	return 1;
 }
 
 static u_short PsyX_Pad_BuildKbWord(const PsyXKeyboardMapping& mapping)
