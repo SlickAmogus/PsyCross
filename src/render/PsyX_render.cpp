@@ -191,8 +191,16 @@ static float PsxDisplayPixelAspect(void)
 	{
 		const float trim   = (g_PsxCrtAspectTrim > 0.0f) ? g_PsxCrtAspectTrim : 1.0f;
 		const float target = ((4.0f / 3.0f) * trim) / (w / h);
-		const float hs = (g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f;
-		const float vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
+		/* The 2D UI pass renders with hscale and vscale pinned at 1 (its ortho
+		 * block forces them), so dividing the WORLD knobs out of its PAR hands
+		 * it a compensation for scaling it never had -- which widened the ortho
+		 * until the 320-wide UI filled the window and the text stretched. The UI
+		 * wants the plain 4:3 picture and nothing else, so it stays pillarboxed
+		 * and unscaled at any window width. */
+		const float hs = g_PsxUIOrthoPass ? 1.0f
+		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
+		const float vs = g_PsxUIOrthoPass ? 1.0f
+		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
 		return (hs * vs) / target;
 	}
 }
