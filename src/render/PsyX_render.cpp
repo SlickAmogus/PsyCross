@@ -158,7 +158,13 @@ float g_PsxWorldVCropAnchor = 0.0f;
  * given set overscans varies, so the true picture is a few percent either way
  * and no formula settles it. Environments hide that -- nobody knows how wide a
  * corridor should be -- while a human figure shows it immediately, which is why
- * Harry is the thing to judge it on. Below 1.0 makes him taller and thinner. */
+ * Harry is the thing to judge it on. Below 1.0 makes him taller and thinner.
+ *
+ * The two textbook readings bracket 1.0 to 1.071: stretch the 224 lines to fill
+ * a 4:3 screen, or let them sit inside the 240-line 4:3 window (square pixels).
+ * The PC port ships 0.9 anyway -- config crt_aspect_trim, set from a side by
+ * side against a real set -- so this default is only the neutral fallback for
+ * a caller that never assigns it. */
 float g_PsxCrtAspectTrim = 1.0f;
 int   g_PsxAspectRaw = 0;
 static float PsxDisplayPixelAspect(void)
