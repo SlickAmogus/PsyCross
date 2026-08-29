@@ -623,3 +623,28 @@ void Pc_SpuStopLoopingVoices(void)
 #endif
 
 }
+
+#if defined(PSYX_NO_OPENAL)
+/* PsyX_SPUSpatial.cpp is out of the build on a target with no OpenAL (see
+   PsyCross/CMakeLists.txt): it exists to hand the software SPU to OpenAL for
+   surround placement, and includes <AL/al.h> to do it.
+
+   Its header already contracts that Start returns false when OpenAL is
+   unavailable and that the caller then keeps the ordinary stereo sink, which
+   is exactly what SpuInit above does -- so this is the documented path, not a
+   bypass. C++ linkage deliberately: the header is not extern "C", so these
+   must sit outside the block above to match its declarations. */
+bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speakerMode)
+{
+    (void)core; (void)coreMutex; (void)speakerMode;
+    return false;
+}
+
+void PsyX_SPUSpatial_Stop(void) { }
+int  PsyX_SPUSpatial_Active(void) { return 0; }
+
+void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user)
+{
+    (void)pump; (void)user;
+}
+#endif
