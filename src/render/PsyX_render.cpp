@@ -203,9 +203,17 @@ static float PsxDisplayPixelAspect(void)
 		 * until the 320-wide UI filled the window and the text stretched. The UI
 		 * wants the plain 4:3 picture and nothing else, so it stays pillarboxed
 		 * and unscaled at any window width. */
+		/* Whatever the ortho block below actually installs, this must divide out
+		 * the SAME numbers -- a knob divided out here but not applied there (or
+		 * the reverse) is a picture scaled by the difference. The item-take
+		 * screen is the case that bites: it pins vscale to 1 while hscale keeps
+		 * the world value, so solving its PAR against the world's vfov left the
+		 * held item 1/vfov too narrow, which at the shipped 1.06 is the
+		 * noticeably tall, thin pickup. Keep these two conditions and the
+		 * vscale/hscale lines in GR_SetOffscreenState identical. */
 		const float hs = g_PsxUIOrthoPass ? 1.0f
 		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
-		const float vs = g_PsxUIOrthoPass ? 1.0f
+		const float vs = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
 		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
 		return (hs * vs) / target;
 	}
