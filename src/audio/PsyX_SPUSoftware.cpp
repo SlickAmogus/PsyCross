@@ -84,6 +84,39 @@ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
     for (uint32_t i = 0; i < xaFrames; ++i)
         g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
 
+    /* [XAFEED] TEMPORARY -- "voices sound tinny" investigation. The core takes
+     * ONE CD frame per output frame and substitutes SILENCE when the queue runs
+     * dry, so a producer that is even slightly behind the audio callback punches
+     * a gap into every block. At a 1024-frame block that is a ~43 Hz buzz laid
+     * over the voice, which is what tinny sounds like. Reports the shortfall
+     * only while a clip is actually feeding, once every ~2 s, 20 lines max. */
+    {
+        static uint64_t s_want = 0, s_got = 0, s_blocks = 0, s_short = 0;
+        static uint32_t s_next = 0;
+        static int      s_logs = 0;
+        if (xaFrames > 0 || s_want > 0)
+        {
+            s_want += frames;
+            s_got  += xaFrames;
+            s_blocks++;
+            if (xaFrames < frames)
+                s_short++;
+        }
+        if (s_want >= 88200u && s_logs < 20)   /* ~2 s of audio */
+        {
+            s_logs++;
+            eprintinfo("[XAFEED] wanted=%llu got=%llu (%.2f%% fed) blocks=%llu "
+                       "short=%llu (%.1f%% of blocks) queueLeft=%u\n",
+                       (unsigned long long)s_want, (unsigned long long)s_got,
+                       s_want ? (100.0 * (double)s_got / (double)s_want) : 0.0,
+                       (unsigned long long)s_blocks, (unsigned long long)s_short,
+                       s_blocks ? (100.0 * (double)s_short / (double)s_blocks) : 0.0,
+                       g_xa ? PsyX_XAStream_PeekQueuedOutputFrames(g_xa) : 0u);
+            s_want = s_got = s_blocks = s_short = 0;
+        }
+        (void)s_next;
+    }
+
     g_spu().RenderFrames(output, static_cast<int>(frames));
     SDL_UnlockMutex(g_spuMutex);
     return frames;
