@@ -1170,7 +1170,23 @@ static bool StepGenericEnvelope(int32_t& level, uint32_t& counter,
     }
     else if (exponential && decreasing)
     {
-        adsrStep = static_cast<int32_t>((static_cast<int64_t>(adsrStep) * level) / 0x8000);
+        const int32_t scaled =
+            static_cast<int32_t>((static_cast<int64_t>(adsrStep) * level) / 0x8000);
+
+        /* Integer division truncates toward zero, so this scaling reaches ZERO
+         * while the level is still audible: with the fixed -8 step Decay and
+         * Release use, any level below 0x8000/8 = 4096 gives -0.99.. -> 0, and
+         * the envelope then never moves again. A key-off in that band is a
+         * voice that plays FOREVER, which on a looping sample means forever
+         * out loud -- the radio still going on the main menu long after the
+         * demo ended, logged at exactly env=4095, one below the threshold.
+         *
+         * Keep the step's sign whenever it has any distance left to travel, so
+         * an exponential decrease always converges. It costs at most 4095 extra
+         * steps (~0.7 s of tail at the release rate that reported this). */
+        adsrStep = (scaled == 0 && adsrStep != 0 && level > 0)
+                 ? ((adsrStep < 0) ? -1 : 1)
+                 : scaled;
     }
 
     // "Using a step value of all-ones causes the volume to never step, and
