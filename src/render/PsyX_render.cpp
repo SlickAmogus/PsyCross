@@ -203,9 +203,17 @@ static float PsxDisplayPixelAspect(void)
 		 * until the 320-wide UI filled the window and the text stretched. The UI
 		 * wants the plain 4:3 picture and nothing else, so it stays pillarboxed
 		 * and unscaled at any window width. */
+		/* Whatever the ortho block below actually installs, this must divide out
+		 * the SAME numbers -- a knob divided out here but not applied there (or
+		 * the reverse) is a picture scaled by the difference. The item-take
+		 * screen is the case that bites: it pins vscale to 1 while hscale keeps
+		 * the world value, so solving its PAR against the world's vfov left the
+		 * held item 1/vfov too narrow, which at the shipped 1.06 is the
+		 * noticeably tall, thin pickup. Keep these two conditions and the
+		 * vscale/hscale lines in GR_SetOffscreenState identical. */
 		const float hs = g_PsxUIOrthoPass ? 1.0f
 		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
-		const float vs = g_PsxUIOrthoPass ? 1.0f
+		const float vs = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
 		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
 		return (hs * vs) / target;
 	}
@@ -3817,6 +3825,19 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
  * needs to be rotated by. Reported rather than recomputed by the caller so the
  * two can never drift apart -- these are the same expressions used to build the
  * ortho above. Returns 0 when no widening is in effect. */
+/* The pixel aspect the renderer is ACTUALLY using this frame.
+ *
+ * g_PsxPixelAspect is only the `par` knob, and display_aspect = crt does not
+ * read it: it solves for the aspect that lands the picture on its 4:3 target
+ * over the live hfov/vfov. Game-side code that sizes anything to the visible
+ * frame -- overlay quads, cull bounds, the letterbox bars -- must use THIS,
+ * or it computes the frame the port had before the CRT solve existed and
+ * comes up short by exactly the ratio between the two. */
+extern "C" float GR_LivePixelAspect(void)
+{
+	return (float)PSX_NTSC_PIXEL_ASPECT;
+}
+
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
 {
 	float psxW, psxH, psxAspect, winAspect, horScale, effectiveScale, margin, hscale;
