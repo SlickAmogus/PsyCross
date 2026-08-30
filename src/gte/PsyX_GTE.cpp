@@ -397,7 +397,9 @@ static bool IdentityKey(const short k[9]) {
 	return Eq9(k, id);
 }
 static bool AspectIdentityKey(const short k[9]) {
-	/* Psy-Q GsIDMATRIX2: identity plus the exact 3/4 NTSC Y scale. */
+	/* A 3/4 Y scale, exactly representable, so PGXP can shadow it without
+	 * quantization error if a game builds one. NOT Psy-Q's GsIDMATRIX2, which
+	 * is a plain identity (see libgs_stub.c) -- this used to claim it was. */
 	static const short id[9] = { 4096, 0, 0, 0, 3072, 0, 0, 0, 4096 };
 	return Eq9(k, id);
 }

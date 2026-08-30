@@ -17,6 +17,14 @@ list(REMOVE_ITEM PSYCROSS_SRCS_CPP
 if(ANDROID OR IOS)
 	list(REMOVE_ITEM PSYCROSS_SRCS_CPP
 		"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPULegacy.cpp")
+	# PsyX_SPUSpatial.cpp routes the software SPU through OpenAL placement
+	# for surround layouts, so it includes <AL/al.h> unconditionally and
+	# cannot compile where there is no OpenAL at all. Its own header already
+	# contracts "returns false if OpenAL is unavailable", and
+	# PsyX_SPUSoftware falls through to the stereo sink on false, so the
+	# stubs in that file are the documented behaviour rather than a bypass.
+	list(REMOVE_ITEM PSYCROSS_SRCS_CPP
+		"${CMAKE_CURRENT_SOURCE_DIR}/src/audio/PsyX_SPUSpatial.cpp")
 	# glad.c is the desktop-GL entry-point loader. Both mobile targets link
 	# their GLES implementation directly (PsyX_render.h leaves USE_GLAD
 	# undefined on each), so the loader is never called and its desktop-only
@@ -156,4 +164,6 @@ if(BUILD_TESTING)
     psycross_add_audio_test(psycross_reference_xa_test
         tests/audio/PsyX_ReferenceXA_test.cpp
         src/audio/PsyX_ReferenceXA.cpp src/audio/PsyX_ReferenceResampler.cpp)
+    psycross_add_audio_test(psycross_xastream_fidelity_test
+        tests/audio/PsyX_XAStream_fidelity_test.cpp src/audio/PsyX_XAStream.cpp)
 endif()

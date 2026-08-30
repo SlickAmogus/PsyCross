@@ -4,6 +4,7 @@
 #include "PsyX_SPUCore.h"
 #include "PsyX_XAStream.h"
 #include "PsyX_ReferenceXA.h"
+#include "PsyX_SPUSpatial.h"
 #include "PsyX/PsyX_audio.h"
 
 #include "../PsyX_main.h"
@@ -41,6 +42,11 @@ PsyX::RendererMode g_renderer = PsyX::RendererMode::Exact;
 PsyX::ClipMode g_clipMode = PsyX::ClipMode::None;
 PsyXAudioDither g_dither = PSYX_AUDIO_DITHER_NONE;
 bool g_rendererConfigValid = true;
+/* Spatial output: the core still synthesises and reverbs exactly as it does
+ * for the stereo sink, but its per-voice taps are placed in a speaker field
+ * by OpenAL instead of being downmixed here. Opt-in via audio_spatial. */
+bool g_spatialRequested = false;
+int  g_spatialSpeakers = 0;
 uint32_t g_idealNativePhase = 0;
 
 void EnsureConfig()
@@ -50,6 +56,21 @@ void EnsureConfig()
         PsyX_AudioDefaultConfig(&g_audioConfig);
         g_audioConfigured = true;
     }
+}
+
+/* Feeds the core the XA/CD frames a block is about to consume. The stereo
+ * sink does this inline in its callback; the spatial pump has no callback of
+ * its own, so it calls this first and the core mixes CD exactly as before. */
+void SpatialXaPump(void*, int frames)
+{
+    static std::vector<int16_t> xa;
+    xa.resize(static_cast<size_t>(frames) * 2u);
+    SDL_LockMutex(g_spuMutex);
+    uint32_t xaFrames = g_xa && !g_xaPaused ?
+        PsyX_XAStream_Pop44100Stereo(g_xa, xa.data(), frames) : 0;
+    for (uint32_t i = 0; i < xaFrames; ++i)
+        g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
+    SDL_UnlockMutex(g_spuMutex);
 }
 
 uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
@@ -123,6 +144,15 @@ PSX_API_EXPORT void PsyX_SPUAL_ConfigureOutput(int backend, int mode, int rate, 
         static_cast<uint32_t>(PSYX_AUDIO_FLAG_ALLOW_FAMILY_RATE_EXPANSION);
     if (bitPerfect)
         g_audioConfig.flags |= PSYX_AUDIO_FLAG_REQUIRE_BIT_PERFECT;
+}
+
+/* Spatial output opt-in, set before SpuInit. speakers mirrors
+ * PsyX_SPUAL_SetOutputMode: 0 auto, 1 stereo, 2 quad, 3 5.1, 4 7.1, 5 HRTF.
+ * Ignored by the legacy backend, which already has its own layout handling. */
+PSX_API_EXPORT void PsyX_SPUAL_ConfigureSpatial(int enable, int speakers)
+{
+    g_spatialRequested = enable != 0;
+    g_spatialSpeakers  = speakers;
 }
 
 PSX_API_EXPORT int PsyX_SPUAL_ConfigureRenderer(
@@ -202,6 +232,19 @@ int PsyX_SPUAL_InitSound()
     SDL_UnlockMutex(g_spuMutex);
 
     EnsureConfig();
+
+    if (g_spatialRequested)
+    {
+        PsyX_SPUSpatial_SetXaPump(SpatialXaPump, nullptr);
+        if (PsyX_SPUSpatial_Start(&g_spu(), g_spuMutex, g_spatialSpeakers))
+        {
+            g_initialized = true;
+            return 1;
+        }
+        /* Fall through to the ordinary stereo sink rather than losing audio. */
+        eprintwarn("Spatial output unavailable; using the stereo sink\n");
+    }
+
     const uint32_t nativeRate = g_spu().GetNativeSampleRate();
     PsyXAudioResult result = g_renderer == PsyX::RendererMode::Exact
         ? PsyX_AudioStart(&g_audioConfig, RenderAudio, nullptr)
@@ -580,3 +623,28 @@ void Pc_SpuStopLoopingVoices(void)
 #endif
 
 }
+
+#if defined(PSYX_NO_OPENAL)
+/* PsyX_SPUSpatial.cpp is out of the build on a target with no OpenAL (see
+   PsyCross/CMakeLists.txt): it exists to hand the software SPU to OpenAL for
+   surround placement, and includes <AL/al.h> to do it.
+
+   Its header already contracts that Start returns false when OpenAL is
+   unavailable and that the caller then keeps the ordinary stereo sink, which
+   is exactly what SpuInit above does -- so this is the documented path, not a
+   bypass. C++ linkage deliberately: the header is not extern "C", so these
+   must sit outside the block above to match its declarations. */
+bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speakerMode)
+{
+    (void)core; (void)coreMutex; (void)speakerMode;
+    return false;
+}
+
+void PsyX_SPUSpatial_Stop(void) { }
+int  PsyX_SPUSpatial_Active(void) { return 0; }
+
+void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user)
+{
+    (void)pump; (void)user;
+}
+#endif

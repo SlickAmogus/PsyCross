@@ -136,7 +136,89 @@ float g_PsxWorldHScale = 0.76f; /* 0.872^2: preserves the user-validated shape
  * a DuckStation-style overscan crop would be centred, ours is top-anchored. */
 float g_PsxWorldVCropAnchor = 0.0f;
 }
-#define PSX_NTSC_PIXEL_ASPECT (g_PsxPixelAspect)
+/* Display aspect mode. A real CRT scans the console's framebuffer out to a 4:3
+ * screen whatever its line count, so a 320x224 NTSC frame is stretched to 4:3
+ * and appears slightly squashed horizontally next to square pixels. Games were
+ * composed on that picture, so it is the default.
+ *
+ * On the widened path the on-screen pixel aspect works out to exactly 1/PAR, so
+ * stretching the real framebuffer to 4:3 means PAR = (dispW/dispH) / (4/3):
+ * 1.0 for a 320x240 buffer, which is already 4:3, and 1.0714 for the 320x224
+ * this game actually outputs. Pillarbox already looked right because its
+ * viewport is hardcoded 4:3; only the full-window paths needed this, which is
+ * why the two modes disagreed.
+ *
+ * g_PsxAspectRaw = 1 restores the previous behaviour: the framebuffer at
+ * whatever PAR the `par` knob says, faithful to the game's own numbers rather
+ * than to the television it was shown on. */
+/* Trim on the CRT picture aspect, console `crtaspect`. 1.0 = a textbook 4:3.
+ *
+ * The 4:3 target assumes the 224-line frame fills the whole screen height,
+ * but a console puts 224 active lines inside a 240-line window and how much a
+ * given set overscans varies, so the true picture is a few percent either way
+ * and no formula settles it. Environments hide that -- nobody knows how wide a
+ * corridor should be -- while a human figure shows it immediately, which is why
+ * Harry is the thing to judge it on. Below 1.0 makes him taller and thinner.
+ *
+ * The two textbook readings bracket 1.0 to 1.071: stretch the 224 lines to fill
+ * a 4:3 screen, or let them sit inside the 240-line 4:3 window (square pixels).
+ * The PC port ships 0.9 anyway -- config crt_aspect_trim, set from a side by
+ * side against a real set -- so this default is only the neutral fallback for
+ * a caller that never assigns it. */
+float g_PsxCrtAspectTrim = 1.0f;
+int   g_PsxAspectRaw = 0;
+static float PsxDisplayPixelAspect(void)
+{
+	float w, h;
+
+	if (g_PsxAspectRaw)
+		return g_PsxPixelAspect;
+
+	w = (float)activeDispEnv.disp.w;
+	h = (float)activeDispEnv.disp.h;
+	if (w <= 0.0f || h <= 0.0f)
+		return g_PsxPixelAspect;
+
+	/* Solve for the PAR that lands the FINAL on-screen picture on 4:3.
+	 *
+	 * The widened ortho spans psxW*effScale/hscale across the window and
+	 * psxH*vscale down it, with effScale = horScale*PAR. Substituting
+	 * horScale = winAspect/psxAspect, the window terms cancel and the
+	 * on-screen pixel aspect comes out as vscale*hscale/PAR -- the hfov and
+	 * vfov knobs are IN that expression, so a PAR derived from the display
+	 * size alone lands wherever those knobs happen to sit. With the shipped
+	 * hfov of 0.76 that is 0.709 rather than the 0.933 a television gives.
+	 *
+	 * Dividing them back out makes the mode mean what it says: the picture is
+	 * 4:3 at any resolution and at any knob setting. hfov and vfov therefore
+	 * do nothing here, which is the point -- they were eyeball compensations
+	 * for this exact problem, and the television is not a matter of taste.
+	 * display_aspect = raw restores them. */
+	{
+		const float trim   = (g_PsxCrtAspectTrim > 0.0f) ? g_PsxCrtAspectTrim : 1.0f;
+		const float target = ((4.0f / 3.0f) * trim) / (w / h);
+		/* The 2D UI pass renders with hscale and vscale pinned at 1 (its ortho
+		 * block forces them), so dividing the WORLD knobs out of its PAR hands
+		 * it a compensation for scaling it never had -- which widened the ortho
+		 * until the 320-wide UI filled the window and the text stretched. The UI
+		 * wants the plain 4:3 picture and nothing else, so it stays pillarboxed
+		 * and unscaled at any window width. */
+		/* Whatever the ortho block below actually installs, this must divide out
+		 * the SAME numbers -- a knob divided out here but not applied there (or
+		 * the reverse) is a picture scaled by the difference. The item-take
+		 * screen is the case that bites: it pins vscale to 1 while hscale keeps
+		 * the world value, so solving its PAR against the world's vfov left the
+		 * held item 1/vfov too narrow, which at the shipped 1.06 is the
+		 * noticeably tall, thin pickup. Keep these two conditions and the
+		 * vscale/hscale lines in GR_SetOffscreenState identical. */
+		const float hs = g_PsxUIOrthoPass ? 1.0f
+		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
+		const float vs = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
+		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
+		return (hs * vs) / target;
+	}
+}
+#define PSX_NTSC_PIXEL_ASPECT (PsxDisplayPixelAspect())
 
 int g_PreviousBlendMode = BM_NONE;
 int g_PreviousDepthMode = 0;
@@ -3810,6 +3892,19 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
  * needs to be rotated by. Reported rather than recomputed by the caller so the
  * two can never drift apart -- these are the same expressions used to build the
  * ortho above. Returns 0 when no widening is in effect. */
+/* The pixel aspect the renderer is ACTUALLY using this frame.
+ *
+ * g_PsxPixelAspect is only the `par` knob, and display_aspect = crt does not
+ * read it: it solves for the aspect that lands the picture on its 4:3 target
+ * over the live hfov/vfov. Game-side code that sizes anything to the visible
+ * frame -- overlay quads, cull bounds, the letterbox bars -- must use THIS,
+ * or it computes the frame the port had before the CRT solve existed and
+ * comes up short by exactly the ratio between the two. */
+extern "C" float GR_LivePixelAspect(void)
+{
+	return (float)PSX_NTSC_PIXEL_ASPECT;
+}
+
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
 {
 	float psxW, psxH, psxAspect, winAspect, horScale, effectiveScale, margin, hscale;
@@ -4109,7 +4204,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			 * it is the "3D gameplay vs 2D screen" signal, and applying hfov to 2D
 			 * screens shrank the NTSC title background and revealed VRAM garbage at
 			 * its sides (user-reported 2026-08-25). Never the UI pass either. */
-			const float hs43   = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f;
+			/* The 4:3 paths carry hfov too, so a CRT picture has to drop it here as
+			 * well or pillarbox stays squashed while the widened path is correct --
+			 * which is exactly how the two modes came to disagree. */
+			const float hs43   = (!g_PsxAspectRaw) ? 1.0f
+			                   : ((g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f);
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
 			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
@@ -4422,6 +4521,20 @@ static const char* s_postShaderSrc =
 	"	p += dot(p, p + 45.32);\n"
 	"	return fract(p.x * p.y);\n"
 	"}\n"
+	/* Film grain. Time seeds the NOISE, it never moves it.
+	 *
+	 * Two ways to get this wrong, and the first version had one and my first fix
+	 * had the other. hash(pixel + time) slides the field diagonally across the
+	 * screen. Offsetting the lookup by a per-frame amount is the same mistake in
+	 * steps: the pattern is spatially coherent, so it visibly jumps around rather
+	 * than re-randomising. Time has to enter the hash as its own dimension, which
+	 * is what this does -- every pixel keeps its position and only its value
+	 * changes, which is what film grain actually looks like. */
+	"float grainNoise(vec2 p, float t) {\n"
+	"	vec3 q = fract(vec3(p.xy, t) * vec3(443.897, 441.423, 437.195));\n"
+	"	q += dot(q, q.yzx + 19.19);\n"
+	"	return fract((q.x + q.y) * q.z);\n"
+	"}\n"
 	"vec3 colorGrade(vec3 c) {\n"
 	"	c = (c - 0.5) * 1.12 + 0.5;\n"                       /* contrast */
 	"	float l = dot(c, vec3(0.299, 0.587, 0.114));\n"
@@ -4470,7 +4583,7 @@ static const char* s_postShaderSrc =
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"	} else if (u_postMode == 5) {\n"                     /* Film grain */
 	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		float n = hash(floor(uv / u_texSize) + u_time);\n"
+	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
 	"		col += (n - 0.5) * 0.10;\n"
 	"	} else if (u_postMode == 6) {\n"                     /* Sharpen */
 	"		vec3 c = texture2D(s_texture, uv).rgb;\n"
@@ -4490,7 +4603,7 @@ static const char* s_postShaderSrc =
 	"	} else if (u_postMode == 8) {\n"                     /* Cinematic: grade + vignette + grain */
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 0.9, 0.0, 1.0);\n"
-	"		float n = hash(floor(uv / u_texSize) + u_time);\n"
+	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
 	"		col += (n - 0.5) * 0.045;\n"
 	"	} else {\n"                                          /* passthrough */
 	"		col = texture2D(s_texture, uv).rgb;\n"
