@@ -2691,6 +2691,7 @@ void DrawSplit(const GPUDrawSplit& split)
 				split.drawenv.clip.w, split.drawenv.clip.h);
 			bigSplitLog++;
 		}
+
 	}
 	if(split.debugText)
 		GR_PushDebugLabel(split.debugText);
@@ -3021,10 +3022,24 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			//      0x7FFF'FFFF'FFFF; anything past that is kernel)   — break
 			//   4. Wild but technically-mapped — can't catch without
 			//      VirtualQuery; rely on the 1<<20 node safety counter.
+			//
+			// Case 3 is a WINDOWS fact, not a universal one, and applying it
+			// everywhere black-screened the Android port: Scudo (Android's
+			// allocator) hands out heap pointers like 0xB400007AE07C4070, so
+			// every legitimate packet looked like a kernel address and the walk
+			// halted before drawing anything. Only the FMV player survived,
+			// because it bypasses the OT. arm64 also lets the top byte carry
+			// pointer tags, so there is no portable ceiling to test against —
+			// the 1<<20 node counter below is what bounds a runaway chain.
+#if defined(_WIN32)
+			const uintptr_t kUserSpaceCeiling = 0x7FFFFFFFFFFFULL;
+#else
+			const uintptr_t kUserSpaceCeiling = UINTPTR_MAX;
+#endif
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
 			if (nextPtr < 0x10000 ||
 			    nextPtr == static_cast<uintptr_t>(-1) ||
-			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+			    nextPtr >= kUserSpaceCeiling) {
 				static int s_badNextLogged = 0;
 				if (s_badNextLogged < 16) {
 					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",

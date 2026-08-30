@@ -381,6 +381,7 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 		magFilter = GL_LINEAR;
 		minFilter = GL_LINEAR;
 
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
 			GLint mipW = 0;
@@ -388,6 +389,7 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 			if (mipW > 0)
 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
 		}
+#endif
 	}
 
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
@@ -594,6 +596,10 @@ static int    g_freezeFrameW = 0;
 static int    g_freezeFrameH = 0;
 int           g_freezeFrameValid = 0; /* exposed: game-side grey-flash probe reads it */
 static int    g_freezePresentedThisFrame = 0;
+/* ES3 resolve-blit format matching, see GR_CaptureLastFrame. */
+static int    g_freezeRealloc = 0;
+static int    g_freezeFlipFormat = 0;
+static int    g_freezeAlphaBits = -1;
 int framebuffer_need_update = 0;
 
 #if defined(__EMSCRIPTEN__) || defined(__RPI__) || defined(__ANDROID__)
@@ -1118,18 +1124,6 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 
 #if defined(RENDERER_OGLES)
 
-#if defined(__ANDROID__)
-	//Override to full screen.
-	SDL_DisplayMode displayMode;
-	if (SDL_GetCurrentDisplayMode(0, &displayMode) == 0)
-	{
-		screenWidth = displayMode.w;
-		windowWidth = displayMode.w;
-		screenHeight = displayMode.h;
-		windowHeight = displayMode.h;
-	}
-#endif
-
 	//SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, OGLES_VERSION);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -1140,6 +1134,25 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		eprinterr("Failed to initialise - OpenGL ES %d.x is not supported.\n", OGLES_VERSION);
 		return 0;
 	}
+
+#if defined(__ANDROID__)
+	/* Android always hands back a fullscreen surface whose size is the display's,
+	 * not the one requested of SDL_CreateWindow. g_windowWidth/Height feed the
+	 * viewport and the aspect-corrected cull bounds, so they have to be the real
+	 * drawable size or every clip rect is computed against the wrong extents.
+	 * (The upstream block that used to sit here assigned to screenWidth/
+	 * windowWidth — names this fork does not have — and ran before the window
+	 * existed, so it could never have taken effect anyway.) */
+	{
+		int drawableW = 0, drawableH = 0;
+		SDL_GL_GetDrawableSize(g_window, &drawableW, &drawableH);
+		if (drawableW > 0 && drawableH > 0)
+		{
+			g_windowWidth = drawableW;
+			g_windowHeight = drawableH;
+		}
+	}
+#endif
 
 #elif defined(RENDERER_OGL)
 
@@ -2272,7 +2285,7 @@ int g_PsxFogToBlack = 0;
 const char* gte_shader_4 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -2290,7 +2303,7 @@ const char* gte_shader_4 =
 const char* gte_shader_8 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -2308,7 +2321,7 @@ const char* gte_shader_8 =
 const char* gte_shader_16 =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -2326,7 +2339,7 @@ const char* gte_shader_16 =
 const char* gte_shader_32_rgba =
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
-	"AFFINE_VARYING vec4 v_page_clut;\n"
+	"PAGE_CLUT_VARYING vec4 v_page_clut;\n"
 	"varying float v_z;\n"
 	"varying float v_fogAmount;\n"
 	"varying float v_is3d;\n"
@@ -2447,6 +2460,16 @@ ShaderID GR_Shader_Compile(const char* source)
 		"precision highp float;\n"
 		"#define fragColor gl_FragColor\n";
 #elif defined(ES3_SHADERS)
+	/* highp int, NOT lowp. GLSL ES only guarantees 9 bits for a lowp int
+	 * (-256..255), and this shader does integer work on PSX quantities that are
+	 * nowhere near that small: 16-bit Z depths, VRAM texel coordinates across a
+	 * 1024x512 page, CLUT and tpage indices. With lowp every one of them
+	 * truncated and the world came out as a single flat colour on device.
+	 *
+	 * It read as harmless because desktop GLSL PARSES precision qualifiers and
+	 * then ignores them -- they exist only so ES source compiles -- so the same
+	 * line is a no-op at 140 and fatal at 300 es. ES3 guarantees highp int in
+	 * both stages, so asking for it is free here. */
 	const char* GLSL_HEADER_VERT =
 		"#version 300 es\n"
 		"precision highp int;\n"
@@ -2585,6 +2608,17 @@ ShaderID GR_Shader_Compile(const char* source)
 #else
 		tcNoPerspective = g_grCaps.noperspective ? "noperspective " : "";
 #endif
+	}
+
+	if (g_grIsGLES)
+	{
+		strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING flat out\n");
+		strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING flat in\n");
+	}
+	else
+	{
+		strcat(extra_vs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
+		strcat(extra_fs_defines, "#define PAGE_CLUT_VARYING AFFINE_VARYING\n");
 	}
 
 	{
@@ -2849,7 +2883,12 @@ int GR_InitialisePSX()
 	 * the sample count the driver actually granted (may differ from requested). */
 	if (g_cfg_msaaSamples > 0)
 	{
+#if !defined(RENDERER_OGLES)
+		/* GLES has no GL_MULTISAMPLE toggle — rasterisation is multisampled
+		 * whenever the framebuffer is, so there is nothing to enable there.
+		 * The granted-sample-count check below still applies. */
 		glEnable(GL_MULTISAMPLE);
+#endif
 		int actualSamples = 0;
 		SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES, &actualSamples);
 		eprintf("*MSAA: requested %dx, got %dx\n", g_cfg_msaaSamples, actualSamples);
@@ -2954,6 +2993,21 @@ int GR_InitialisePSX()
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
 			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+
+			/* Every render-to-VRAM pass goes through this FBO. If the driver
+			 * rejects the attachment format the writes are silently dropped and
+			 * everything sampling VRAM reads a constant, which on screen is a
+			 * world in one flat colour and nothing in the log. Say so instead. */
+			{
+				const GLenum fbStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+				const GLenum glErr    = glGetError();
+				eprintinfo("[VRAM-FBO] status=0x%04X (%s) glError=0x%04X internalFormat=0x%04X format=0x%04X %dx%d\n",
+				           (unsigned)fbStatus,
+				           fbStatus == GL_FRAMEBUFFER_COMPLETE ? "COMPLETE" : "INCOMPLETE",
+				           (unsigned)glErr,
+				           (unsigned)VRAM_INTERNAL_FORMAT, (unsigned)VRAM_FORMAT,
+				           VRAM_WIDTH, VRAM_HEIGHT);
+			}
 
 			glBindFramebuffer(GL_FRAMEBUFFER, GR_ScreenFBO());
 		}
@@ -3610,6 +3664,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	framebuffer_need_update = 1;
 
 #if USE_OPENGL
+
 	/* PC port: when pillarboxing (4:3 content centered in a wider window), keep
 	 * the side bars black even when the game clears the framebuffer to a
 	 * non-black color. The item-examine ("story item") screen clears to the gray
@@ -4682,10 +4737,7 @@ static void GR_EnsureShadowTarget(void)
 	             0, GL_DEPTH_COMPONENT, g_grIsGLES ? GL_UNSIGNED_INT : GL_FLOAT, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	/* CLAMP_TO_BORDER and the border colour are desktop GL / ES 3.2; ES 3.0 has
-	 * neither. CLAMP_TO_EDGE is a safe stand-in here because the fragment shader
-	 * already rejects receivers outside 0..1 in the light frustum before it ever
-	 * samples, so the border texels are never observed. */
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 	if (!g_grIsGLES)
 	{
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
@@ -4694,6 +4746,7 @@ static void GR_EnsureShadowTarget(void)
 		glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
 	}
 	else
+#endif
 	{
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -4705,9 +4758,11 @@ static void GR_EnsureShadowTarget(void)
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, g_shadowDepthTex, 0);
 	/* Depth-only target. ES 3.0 dropped the singular glDrawBuffer in favour of
 	 * the array form, which takes the same GL_NONE. */
+#if !defined(RENDERER_OGLES) && !defined(__ANDROID__)
 	if (g_grCaps.drawBuffer)
 		glDrawBuffer(GL_NONE);
 	else
+#endif
 	{
 		const GLenum none = GL_NONE;
 		glDrawBuffers(1, &none);
@@ -4879,12 +4934,40 @@ void GR_CaptureLastFrame(void)
 		glGenFramebuffers(1, &g_freezeFrameFBO);
 	}
 
-	if (g_freezeFrameW != g_windowWidth || g_freezeFrameH != g_windowHeight)
+	if (g_freezeFrameW != g_windowWidth || g_freezeFrameH != g_windowHeight || g_freezeRealloc)
 	{
-		g_freezeFrameW = g_windowWidth;
-		g_freezeFrameH = g_windowHeight;
+		g_freezeFrameW  = g_windowWidth;
+		g_freezeFrameH  = g_windowHeight;
+		g_freezeRealloc = 0;
 		glBindTexture(GL_TEXTURE_2D, g_freezeFrameTex);
+#if defined(ES3_SHADERS)
+		/* The blit below is a multisample RESOLVE whenever MSAA is on, and ES3
+		 * rejects a resolve outright unless the read and draw buffers have
+		 * IDENTICAL formats -- desktop GL happily converts. A fixed GL_RGBA8
+		 * against a window with no alpha therefore failed with INVALID_OPERATION
+		 * every frame, leaving the freeze texture black: the black pause screen.
+		 *
+		 * Match the window instead of assuming. If the guess is still refused,
+		 * the error path below flips it once and re-allocates, so an odd EGL
+		 * config resolves itself rather than silently showing black forever. */
+		{
+			int alphaBits = 8;
+
+			if (SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &alphaBits) != 0)
+				alphaBits = 8;
+			if (g_freezeFlipFormat)
+				alphaBits = (alphaBits > 0) ? 0 : 8;
+
+			if (alphaBits > 0)
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_freezeFrameW, g_freezeFrameH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+			else
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8,  g_freezeFrameW, g_freezeFrameH, 0, GL_RGB,  GL_UNSIGNED_BYTE, NULL);
+
+			g_freezeAlphaBits = alphaBits;
+		}
+#else
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_freezeFrameW, g_freezeFrameH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+#endif
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 		glBindTexture(GL_TEXTURE_2D, 0);
@@ -4895,14 +4978,64 @@ void GR_CaptureLastFrame(void)
 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_freezeFrameTex, 0);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 
+	/* Clear the error state FIRST. This frame already carries a recurring
+	 * 0x0502 from elsewhere (see the GR_SwapWindow drain), and glGetError
+	 * returns the oldest error, so checking after the blit without draining
+	 * first blames this call for someone else's failure -- which is exactly
+	 * what it did: it reported a capture that had actually succeeded. */
+	{
+		int guard = 0;
+		while (glGetError() != GL_NO_ERROR && ++guard < 8) { }
+	}
+
 	glBlitFramebuffer(0, 0, g_windowWidth, g_windowHeight,
 		0, 0, g_freezeFrameW, g_freezeFrameH,
 		GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
+	/* Report once whether the capture actually happened. g_freezeFrameValid used
+	 * to be set unconditionally, so a capture that failed still counted as good
+	 * and pause presented a black texture with no clue why -- which is exactly
+	 * what Android shows. With MSAA the read buffer is multisample, making this
+	 * a resolve blit, and ES3 rejects those on any format/size mismatch. */
+	{
+		static int s_reported = 0;
+		GLenum     err = glGetError();
+
+		if (err != GL_NO_ERROR)
+		{
+			/* Only ever mark the capture good when it really succeeded --
+			 * setting this unconditionally is what made a failed capture
+			 * present as a black screen with nothing to point at. */
+			if (s_reported < 3)
+			{
+				s_reported++;
+				eprintwarn("[FREEZE] capture %dx%d FAILED err=0x%04X msaa=%d fbo=0x%04X%s\n",
+					g_freezeFrameW, g_freezeFrameH, (unsigned)err, g_cfg_msaaSamples,
+					(unsigned)glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER),
+					g_freezeFlipFormat ? "" : " - retrying with the other format");
+			}
+
+			if (!g_freezeFlipFormat)
+			{
+				g_freezeFlipFormat = 1;
+				g_freezeRealloc    = 1;
+			}
+		}
+		else
+		{
+			if (!s_reported)
+			{
+				s_reported = 1;
+				eprintinfo("[FREEZE] capture %dx%d ok (msaa=%d, %s)\n",
+					g_freezeFrameW, g_freezeFrameH, g_cfg_msaaSamples,
+					g_freezeAlphaBits > 0 ? "RGBA8" : "RGB8");
+			}
+			g_freezeFrameValid = 1;
+		}
+	}
+
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
-
-	g_freezeFrameValid = 1;
 #endif
 }
 
@@ -5697,6 +5830,7 @@ void GR_UpdateVRAM()
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, VRAM_WIDTH, VRAM_HEIGHT, VRAM_FORMAT, GL_UNSIGNED_BYTE, vram);
 #endif
 
+
 	GR_RestoreStoredFramebufferRegion();
 
 	/* PC port: the full vram[] re-upload just stamped CPU bytes over the
@@ -5838,6 +5972,32 @@ void GR_SwapWindow()
 	}
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+	/* Nothing in this renderer checks glGetError, so a state or format the
+	 * driver rejects just produces a wrong image and no message. Drain a BOUNDED
+	 * number per frame: glGetError can keep reporting without ever returning
+	 * GL_NO_ERROR when there is no current context, and an unbounded drain here
+	 * hangs the frame instead of diagnosing it. */
+	{
+		static unsigned s_seenErrBits = 0;
+		static int      s_errLogged   = 0;
+		int             drain;
+		for (drain = 0; drain < 8; drain++)
+		{
+			const GLenum err = glGetError();
+			if (err == GL_NO_ERROR)
+				break;
+			{
+				const unsigned bit = 1u << (err & 0x7);
+				if (!(s_seenErrBits & bit) && s_errLogged < 16)
+				{
+					s_seenErrBits |= bit;
+					s_errLogged++;
+					eprinterr("[GL] glGetError=0x%04X during frame\n", (unsigned)err);
+				}
+			}
+		}
+	}
+
 	if (PsyX_Angle_Active())
 		PsyX_Angle_Swap();
 	else

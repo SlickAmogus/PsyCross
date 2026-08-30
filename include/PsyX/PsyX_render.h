@@ -126,7 +126,23 @@
  * driver every frame. RG8 is the same 8-bit-normalised value to the shader, at
  * 1 MB and a straight copy. Costs a few ms on fast drivers; on weak GL 3.1
  * iGPUs the converting path is the difference between playable and ~3 FPS. */
+/* GL_LUMINANCE_ALPHA is an ES2-era format and it is NOT colour-renderable in
+ * GLES 3.0. The VRAM texture is not just sampled -- it is bound as
+ * GL_COLOR_ATTACHMENT0 for the render-to-VRAM passes (see the
+ * glFramebufferTexture2D calls on g_vramTexture) -- so on ES3 those
+ * framebuffers came back INCOMPLETE, every VRAM write was dropped, and
+ * everything that sampled VRAM resolved to one constant. On device that is a
+ * world drawn in a single flat colour, with FMVs unaffected because the FMV
+ * player owns a separate RGBA texture.
+ *
+ * ES 3.0 requires RG8 and lists it as colour-renderable, so it can use exactly
+ * what the desktop path uses. Only ES2 (which has neither) still needs
+ * LUMINANCE_ALPHA, and GPU_FETCH_VRAM_FUNC keys its .ra-vs-.rg swizzle off
+ * VRAM_FORMAT, so the shader follows automatically. */
 #if defined(RENDERER_OGL)
+#	define VRAM_FORMAT            GL_RG
+#	define VRAM_INTERNAL_FORMAT   GL_RG8
+#elif defined(RENDERER_OGLES) && OGLES_VERSION >= 3
 #	define VRAM_FORMAT            GL_RG
 #	define VRAM_INTERNAL_FORMAT   GL_RG8
 #elif defined(RENDERER_OGLES)
