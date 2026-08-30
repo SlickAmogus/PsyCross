@@ -207,7 +207,14 @@ void UnInstallExceptionHandler()
 #include <unistd.h>
 #include <fcntl.h>
 
-#if defined(__APPLE__) || defined(__linux__)
+/* Android defines __linux__ but is not glibc. Bionic only declares backtrace()
+ * and backtrace_symbols_fd() from API 33, and this builds against minSdk 21, so
+ * <execinfo.h> resolves while the functions do not exist -- "use of undeclared
+ * identifier 'backtrace'" rather than a missing header. Everything below is
+ * compiled out there, and InstallExceptionHandler becomes the no-op it already
+ * is on any platform without a backtrace. Android has its own crash reporting
+ * (tombstones, logcat) regardless. */
+#if (defined(__APPLE__) || defined(__linux__)) && !defined(__ANDROID__)
 #   include <execinfo.h>
 #   define PSYX_HAVE_BACKTRACE 1
 #endif
