@@ -125,6 +125,16 @@ int   g_PsxItemTakeActive = 0;
  * cutscenes — is unchanged. This replaces the old g_PsxCutsceneActive vscale skip
  * (which un-cropped the whole cutscene frame and looked stretched). */
 int   g_PsxUIOrthoPass = 0;
+
+/* The ortho the UI pass last installed, published so an overlay can place
+ * itself in EXACTLY the space its prims are drawn in instead of rebuilding
+ * the solve from window aspect and the knobs. Every reconstruction has to be
+ * kept in step with hfov, vfov, the pixel aspect, the CRT trim and the
+ * display-aspect mode, and the on-screen HUD drifting off the panel is what
+ * happens when one of them is missed. Defaults are the plain 4:3 frame, used
+ * until the first UI pass has run. */
+float g_PsxUiOrthoL = 0.0f, g_PsxUiOrthoR = 320.0f;
+float g_PsxUiOrthoT = 0.0f, g_PsxUiOrthoB = 240.0f;
 /* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
@@ -4174,6 +4184,18 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * The viewport (below) handles pillarbox vs full-window. */
 				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
+			}
+
+			/* Whatever the branches above settled on, recorded for the overlays.
+			 * Only the UI pass: that is the one OT2 -- the HUD, the touch
+			 * controls -- is drawn under, and the world pass would hand them a
+			 * frame that moves with the FOV knobs. */
+			if (g_PsxUIOrthoPass && fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
+			{
+				g_PsxUiOrthoL = fbOrthoL;
+				g_PsxUiOrthoR = fbOrthoR;
+				g_PsxUiOrthoT = fbOrthoT;
+				g_PsxUiOrthoB = fbOrthoB;
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
