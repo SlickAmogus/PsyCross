@@ -24,6 +24,7 @@ extern "C" int GR_NeedViewSpaceData(void);
 
 OT_TAG prim_terminator = { (uintptr_t)-1, 0 }; // P_TAG with zero primLength
 
+extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h);
 int g_currentOTBucketCount = 0;
 float g_otBucketDepth = 0.0f;
 
@@ -734,7 +735,13 @@ int g_DrawPrimMode = 0;
 // valid immediately after RotTransPers calls), looked up during primitive parsing
 // to give GL per-vertex perspective depth.  Cleared each GsDrawOt call.
 // 4096 slots, linear probe ≤16; collision rate is negligible for typical scene sizes.
-#define SZ_TABLE_BITS 12
+/* 12 bits = 4096 entries, and a dense outdoor frame submits MORE prims than
+ * that, so the table saturated and the 16-probe insert force-evicted. A prim
+ * whose lookup then misses gets depthMode DISABLED while its neighbours get
+ * WORLD -- and depthMode is part of the split merge key, so every miss forces
+ * a NEW split. That is what exhausted MAX_DRAW_SPLITS. 15 bits = 32768 entries
+ * (~1 MB) puts the load factor back under 20%. */
+#define SZ_TABLE_BITS 15
 #define SZ_TABLE_SIZE (1 << SZ_TABLE_BITS)
 #define SZ_TABLE_MASK (SZ_TABLE_SIZE - 1)
 
@@ -1605,7 +1612,7 @@ static void ApplyGtePerVertexDepth(GrVertex* vertex, const P_TAG* polyTag, bool 
 	ItemProbe_RecordDraw(vertex, polyTag, isQuad, zBefore);
 }
 
-enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN };
+enum GPUDrawSplitKind { GPU_SPLIT_LEGACY, GPU_SPLIT_MODERN, GPU_SPLIT_FBCAPTURE };
 
 struct GPUDrawSplit
 {
@@ -1634,7 +1641,11 @@ struct GPUDrawSplit
 	const char*		debugText;
 };
 
-#define MAX_DRAW_SPLITS	 4096
+/* 4096 was reached in ordinary play on a dense outdoor map (a user capture hit
+ * it on 89% of its log lines). Every split past the cap is DROPPED geometry, so
+ * the frame renders partially -- the black/flickering frames and the "expect
+ * rendering errors" spam. ~180 bytes each, so 16384 costs ~3 MB. */
+#define MAX_DRAW_SPLITS	 16384
 
 GrVertex g_vertexBuffer[MAX_VERTEX_BUFFER_SIZE];
 GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
@@ -2621,7 +2632,16 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 
 	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
 	{
-		eprinterr("MAX_DRAW_SPLITS reached (too many blend modes, texture formats, drawEnv clip rects, dfe switches), expect rendering errors\n");
+		/* Bounded: this fires per DROPPED SPLIT, so an overflowing frame used to
+		 * emit thousands of lines. That alone cost hundreds of ms a frame -- the
+		 * reported "performance drops" were substantially this log write. */
+		static unsigned s_dropped = 0, s_logged = 0;
+		s_dropped++;
+		if (s_logged < 5 || (s_dropped & 0xFFFu) == 0) {
+			s_logged++;
+			eprinterr("MAX_DRAW_SPLITS (%d) reached -- geometry dropped this frame; "
+			          "%u splits dropped so far\n", MAX_DRAW_SPLITS, s_dropped);
+		}
 		return;
 	}
 
@@ -2664,10 +2684,47 @@ static void AddModernSplit(unsigned int handle)
 	split.numVerts = 0;
 }
 
+/* A capture point in draw order (DR_PSYX_FBCAPTURE, 0xB4): everything drawn so
+ * far this frame is packed into the VRAM rect carried in drawenv.clip, so the
+ * prims after it sample it. The scene-scratch effects depend on exactly this
+ * ordering -- draw the scene, then composite it back -- and PC draws the scene
+ * on screen instead of into VRAM, so the capture has to sit where the game's
+ * DR_AREA switched back. See GR_CaptureFrameToVramRect. */
+static void AddFbCaptureSplit(int x, int y, int w, int h)
+{
+	GPUDrawSplit& current = g_splits[g_splitIndex];
+	current.numVerts = g_vertexIndex - current.startVertex;
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+	{
+		eprinterr("MAX_DRAW_SPLITS reached while appending fb capture\n");
+		return;
+	}
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	split.kind = GPU_SPLIT_FBCAPTURE;
+	split.drawenv.clip.x = (short)x;
+	split.drawenv.clip.y = (short)y;
+	split.drawenv.clip.w = (short)w;
+	split.drawenv.clip.h = (short)h;
+	split.startVertex = g_vertexIndex;
+	split.numVerts = 0;
+}
+
 /* Debug isolation of the additive (BM_ADD) layer, driven by the `add` console cmd.
  * 0 = drop every additive split (confirm whether a fire/lightning effect is additive
  * geometry), 1 = normal, 2 = draw additive WITH the depth test that GR_SetBlendMode
  * normally disables (test the "additive draws through the floor" hypothesis). */
+/* World-opaque depth function under PGXP. 1 = GL_ALWAYS (the PS1-OT painter
+ * design: the painter winner leaves true per-pixel depth behind). 0 = GL_LEQUAL,
+ * which keeps painter order for an exact depth tie but lets a genuinely nearer
+ * coplanar face win regardless of the order it was drawn in.
+ *
+ * ALWAYS hands the whole decision to paint order, so two coplanar road quads
+ * whose GTE depth straddles an OT bucket boundary swap which one paints last as
+ * the camera moves, and the surface flickers between them. That is the road
+ * flicker in central Silent Hill, and it stops with PGXP off because the off
+ * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. */
+int g_PsxWorldDepthAlways = 1;
+
 int g_PsxDbgAddMode = 1;
 
 void DrawSplit(const GPUDrawSplit& split)
@@ -2721,7 +2778,8 @@ void DrawSplit(const GPUDrawSplit& split)
 	 * off the cache is already 0 and GR_SetDepthFuncAlways early-returns without
 	 * touching glDepthFunc, so pixels stay byte-identical. (depthMode is always
 	 * DISABLED when off.) */
-	GR_SetDepthFuncAlways(g_PsxUsePgxp && split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE);
+	GR_SetDepthFuncAlways(g_PsxUsePgxp && g_PsxWorldDepthAlways &&
+	                      split.depthMode == SPLIT_DEPTH_WORLD && split.blendMode == BM_NONE);
 
 	if (g_PsxDbgAddMode == 2 && isAdditive)
 		GR_EnableDepth(1);
@@ -2857,6 +2915,9 @@ void DrawAllSplits()
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
 			GR_DrawModernMesh(g_splits[i].modernHandle);
+		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
+			GR_CaptureFrameToVramRect(g_splits[i].drawenv.clip.x, g_splits[i].drawenv.clip.y,
+			                          g_splits[i].drawenv.clip.w, g_splits[i].drawenv.clip.h);
 		else
 			DrawSplit(g_splits[i]);
 	}
@@ -3806,6 +3867,13 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 	{
 		DR_PSYX_MODERN_MESH* modern = (DR_PSYX_MODERN_MESH*)polyTag;
 		AddModernSplit(modern->code[1]);
+		return 2;
+	}
+	case 0x04:
+	{
+		const DR_PSYX_FBCAPTURE* cap = (const DR_PSYX_FBCAPTURE*)polyTag;
+		AddFbCaptureSplit((int)(cap->code[0] & 0x3FF), (int)((cap->code[0] >> 10) & 0x1FF),
+		                  (int)(cap->code[1] & 0xFFFF), (int)(cap->code[1] >> 16));
 		return 2;
 	}
 	}

@@ -764,6 +764,17 @@ typedef struct {
 
 static_assert(sizeof(DR_PSYX_MODERN_MESH) / 4 - P_LEN == 2, "DR_PSYX_MODERN_MESH size must be 2 longs");
 
+/* 0xB4: capture the frame drawn so far into a VRAM rect, at this point in draw
+ * order. code[0] = 0xB4<<24 | x | y<<10, code[1] = w | h<<16. Produced by the
+ * PC port's OT sanitizer in place of a game DR_AREA that switches drawing back
+ * from an offscreen scratch rect (the scene-scratch soft-focus effects). */
+typedef struct {
+	DECLARE_P_ADDR
+	u_int code[2];
+} DR_PSYX_FBCAPTURE;
+
+static_assert(sizeof(DR_PSYX_FBCAPTURE) / 4 - P_LEN == 2, "DR_PSYX_FBCAPTURE size must be 2 longs");
+
 typedef struct {
 	DECLARE_P_ADDR
 	u_int  code;

@@ -5176,7 +5176,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 /* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
  * invalidates the renderer's cached GL state, so this is safe to run mid-frame
  * (GR_UpdateVRAM calls it after a full vram[] re-upload). */
-static void GR_PackFrameToVramRect(int x, int y, int w, int h)
+static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 {
 #if USE_OPENGL
 	GLint vp[4];
@@ -5199,7 +5199,7 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	{
 		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
 		if (dampLoc != -1)
-			glUniform1f(dampLoc, g_PsxFeedbackDamp);
+			glUniform1f(dampLoc, gain);
 	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
@@ -5219,6 +5219,11 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	g_PreviousDepthMode    = -999;
 	g_PreviousScissorState = -999;
 #endif
+}
+
+static void GR_PackFrameToVramRect(int x, int y, int w, int h)
+{
+	GR_PackFrameToVramRectGain(x, y, w, h, g_PsxFeedbackDamp);
 }
 
 /* Pack the captured frame into every rect the game may read back: both PSX
@@ -5303,38 +5308,14 @@ static void GR_ClearAllFeedbackRects(void)
 		GR_ClearVramRect(g_sceneFbRedirect.x, g_sceneFbRedirect.y, g_sceneFbRedirect.w, g_sceneFbRedirect.h);
 }
 
-/* Called once per present: capture the composed frame, then pack it into the
- * feedback rects. */
-extern "C" void GR_StoreFrameBufferPsx(void)
+/* Capture the frame as rendered so far into the (w x h) pack texture, mapped so
+ * PSX coordinate (u,v) of the display buffer lands on texel (u,v). Shared by the
+ * per-present feedback store and the mid-frame scene-scratch capture; see the
+ * g_psxAreaVp note below for why the source rect is not simply the viewport. */
+static void GR_CaptureFrameToPackTex(int w, int h)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
-	int w, h;
 	GLuint readFBO = 0;
-
-	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
-		return;
-
-	/* The game just wrote its own data into a display-buffer rect — leave it
-	 * alone until it stops (see GR_NoteVramUploadForFeedback). */
-	if (g_fbFeedbackSuppress > 0)
-	{
-		g_fbFeedbackSuppress--;
-		return;
-	}
-
-	/* Loading-screen-only: while the loading/transition blur is not drawing,
-	 * blank the feedback rects (word 0 → transparent) so the per-map overlays
-	 * this store would otherwise drive read nothing instead of a stale/garbage
-	 * frame. See g_PsxFeedbackStoreAllowed. */
-	if (g_PsxFeedbackStoreAllowed <= 0)
-	{
-		GR_ClearAllFeedbackRects();
-		return;
-	}
-	g_PsxFeedbackStoreAllowed--;
-
-	w = g_psxDispBuf[0].w;
-	h = g_psxDispBuf[0].h;
 
 	GR_EnsureFbPackTarget(w, h);
 
@@ -5421,11 +5402,79 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
+#endif
+}
+
+/* One present has passed for the scene scratch-redirect. Runs on EVERY present,
+ * not only when the feedback store is allowed: the redirect is now armed by the
+ * game's own DR_AREA every frame the scene draws, so if this only ticked on the
+ * store path the rect would be blanked forever after the scene ended -- and
+ * (320,256 320x224) holds real map textures in other rooms. */
+static void GR_SceneRedirectTick(void)
+{
+	if (g_sceneFbRedirectTtl <= 0)
+		return;
+	g_sceneFbRedirectTtl--;
+	if (g_sceneFbRedirectTtl == 0 && s_sceneFbRedirectArms < 32)
+	{
+		eprintinfo("[FBSCRATCH] redirect LAPSED (%d,%d %dx%d) - rect no longer refreshed\n",
+		           g_sceneFbRedirect.x, g_sceneFbRedirect.y,
+		           g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+	}
+}
+
+/* Called once per present: capture the composed frame, then pack it into the
+ * feedback rects. */
+extern "C" void GR_StoreFrameBufferPsx(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
+		return;
+
+	/* The game just wrote its own data into a display-buffer rect — leave it
+	 * alone until it stops (see GR_NoteVramUploadForFeedback). */
+	if (g_fbFeedbackSuppress > 0)
+	{
+		g_fbFeedbackSuppress--;
+		GR_SceneRedirectTick();
+		return;
+	}
+
+	/* Loading-screen-only: while the loading/transition blur is not drawing,
+	 * blank the feedback rects (word 0 → transparent) so the per-map overlays
+	 * this store would otherwise drive read nothing instead of a stale/garbage
+	 * frame. See g_PsxFeedbackStoreAllowed. */
+	if (g_PsxFeedbackStoreAllowed <= 0)
+	{
+		GR_ClearAllFeedbackRects();
+		GR_SceneRedirectTick();
+		return;
+	}
+	g_PsxFeedbackStoreAllowed--;
+
+	GR_CaptureFrameToPackTex(g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 
 	GR_PackFrameToAllFeedbackRects();
+	GR_SceneRedirectTick();
+#endif
+}
 
-	if (g_sceneFbRedirectTtl > 0)
-		g_sceneFbRedirectTtl--;
+/* Mid-frame: pack everything drawn so far into a VRAM rect, in draw order, so
+ * the prims that follow can sample it. This is how the scene-scratch effects
+ * (map4_s04 Lisa, map3_s02, map7_s02) work: on PSX the DR_AREA points the whole
+ * scene at offscreen VRAM and then eight SPRTs composite it back at 1-2 px
+ * offsets with different blends -- a soft-focus. PC draws the scene on screen,
+ * so the moment the game switches the area back is where the capture goes
+ * (game_main.c rewrites that DR_AREA into DR_PSYX_FBCAPTURE). One-shot, not a
+ * loop -- the rect is fully rewritten every frame -- so the gain is unity; the
+ * feedback damp exists only for rects that feed on their own output. */
+extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (w <= 0 || h <= 0)
+		return;
+	GR_CaptureFrameToPackTex(w, h);
+	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
 #endif
 }
 
