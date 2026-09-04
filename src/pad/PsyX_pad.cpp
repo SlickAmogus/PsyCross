@@ -15,7 +15,9 @@ extern int g_padCommEnable;
 
 typedef struct
 {
-	Sint32				deviceId;	// linked device Id
+	Sint32				deviceId;	// linked device INDEX (from config pin or first open)
+	SDL_JoystickID		instanceId;	// joystick INSTANCE id while open, -1 when closed --
+									// the currency REMOVED events speak in
 	SDL_GameController* gc;
 
 	u_char*				padData;
@@ -43,6 +45,7 @@ static unsigned char*	g_actBufTable[MAX_CONTROLLERS];
 static int				g_actBufLen[MAX_CONTROLLERS];
 const u_char*			g_sdlKeyboardState = NULL;
 
+void    PsyX_Pad_CloseController(int slot);
 u_short PsyX_Pad_UpdateKeyboardInput();
 void	PsyX_Pad_UpdateGameControllerInput(PsyXController* controller, LPPADRAW pad);
 static int PsyX_Pad_MergeAllControllers(LPPADRAW pad);
@@ -69,6 +72,8 @@ int PsyX_Pad_InitSystem()
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
 
 	memset(g_controllers, 0, sizeof(g_controllers));
+	for (int i = 0; i < MAX_CONTROLLERS; i++)
+		g_controllers[i].instanceId = -1; /* memset zero is a VALID instance id */
 
 	// init keyboard state
 	g_sdlKeyboardState = SDL_GetKeyboardState(NULL);
@@ -126,17 +131,29 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 
 	if (controller->gc)
 	{
-		return;
+		/* A live handle: nothing to do. A STALE one (device yanked, REMOVED
+		 * missed or mismatched) must not block the slot forever -- that was
+		 * the "restart the game to get the pad back". */
+		if (SDL_GameControllerGetAttached(controller->gc))
+			return;
+		PsyX_Pad_CloseController(slot);
 	}
 
 	controller->gc = SDL_GameControllerOpen(deviceId);
 	controller->switchingAnalog = false;
+	controller->instanceId = -1;
 
 	if (controller->gc)
 	{
+		controller->instanceId =
+			SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller->gc));
+
 		// assign device id automatically
 		if (controller->deviceId == -1)
 			controller->deviceId = deviceId;
+
+		eprintinfo("Controller '%s' -> slot %d (instance %d)\n",
+			SDL_GameControllerName(controller->gc), slot, (int)controller->instanceId);
 	}
 }
 
@@ -144,9 +161,12 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 void PsyX_Pad_CloseController(int slot)
 {
 	PsyXController* controller = &g_controllers[slot];
-	SDL_GameControllerClose(controller->gc);
+
+	if (controller->gc)
+		SDL_GameControllerClose(controller->gc);
 
 	controller->gc = NULL;
+	controller->instanceId = -1;
 }
 
 // Called from LIBPAD
@@ -179,46 +199,67 @@ void PsyX_Pad_InitPad(int slot, u_char* padData)
 // called from Psy-X SDL events
 void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 {
+	/* `which` on an ADDED event is a DEVICE INDEX; see Removed for the id
+	 * mismatch that used to strand pads. The old haptic subsystem reinit is
+	 * gone: rumble runs through SDL_GameControllerRumble, no SDL_Haptic
+	 * handles exist, and quitting the subsystem mid-event was the crash its
+	 * own FIXME warned about. */
 	int i;
 	PsyXController* controller;
 
-	// reinitialize haptics (why we still here?)
-	SDL_QuitSubSystem(SDL_INIT_HAPTIC);			// FIXME: this will crash if you already have haptics
-	SDL_InitSubSystem(SDL_INIT_HAPTIC);
-
 	PsyX_Pad_Debug_ListControllers();
 
-	// find mapping and open
+	/* Free any slot whose handle went stale (missed REMOVED, USB re-enumeration). */
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		controller = &g_controllers[i];
+		if (controller->gc && !SDL_GameControllerGetAttached(controller->gc))
+			PsyX_Pad_CloseController(i);
+	}
+
+	/* Config-pinned slots accept exactly their device index; unpinned slots
+	 * accept any newcomer. Matching on controller->deviceId is wrong here: it
+	 * auto-latches the index of the FIRST device, so a pad replugged into a
+	 * different port (new index) could never rejoin its slot. */
 	for (i = 0; i < MAX_CONTROLLERS; i++)
 	{
 		controller = &g_controllers[i];
 
-		if (controller->deviceId == -1 || controller->deviceId == deviceId)
-		{
-			PsyX_Pad_OpenController(deviceId, i);
-			break;
-		}
+		if (controller->gc)
+			continue;
+		if (g_cfg_controllerToSlotMapping[i] != -1 &&
+		    g_cfg_controllerToSlotMapping[i] != deviceId)
+			continue;
+
+		PsyX_Pad_OpenController(deviceId, i);
+		break;
 	}
 }
 
 // called from Psy-X SDL events
-void PsyX_Pad_Event_ControllerRemoved(Sint32 deviceId)
+void PsyX_Pad_Event_ControllerRemoved(Sint32 instanceId)
 {
+	/* `which` on a REMOVED event is the joystick INSTANCE ID, not the device
+	 * index ADDED carries. The old code compared it to the stored device
+	 * index: the first unplug worked only while index 0 happened to meet
+	 * instance 0, the replugged pad came back as instance 1, and from then on
+	 * removals matched nothing -- the slot kept a dead handle forever, the
+	 * ADDED handler saw the slot as occupied, and only a restart recovered
+	 * the pad. */
 	int i;
-	PsyXController* controller;
 
-	PsyX_Pad_Debug_ListControllers();
-
-	// find mapping and close
-	for (int i = 0; i < MAX_CONTROLLERS; i++)
+	for (i = 0; i < MAX_CONTROLLERS; i++)
 	{
-		controller = &g_controllers[i];
+		PsyXController* controller = &g_controllers[i];
 
-		if (controller->deviceId == deviceId)
+		if (controller->gc && controller->instanceId == (SDL_JoystickID)instanceId)
 		{
+			eprintinfo("Controller in slot %d disconnected\n", i);
 			PsyX_Pad_CloseController(i);
 		}
 	}
+
+	PsyX_Pad_Debug_ListControllers();
 }
 
 void PsyX_Pad_InternalPadUpdates()
