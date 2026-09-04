@@ -5631,6 +5631,13 @@ static void GR_RestoreStoredFramebufferRegion(void)
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
 	if (!g_fbStoreValid || g_PsxSkipFramebufferStore)
 		return;
+	/* glBlitFramebuffer is a glad-loaded pointer (NULL until loaded). If a
+	 * driver/context leaves it unloaded, calling it jumps to 0x0 -- the
+	 * issue #102 crash signature (GR_UpdateVRAM -> call 0x0 on the cafe map
+	 * pickup). Skip the restore rather than fault; the feedback effect just
+	 * degrades. */
+	if (!glBlitFramebuffer)
+		return;
 
 	const int x = g_PreviousFramebuffer.x;
 	const int y = g_PreviousFramebuffer.y;
