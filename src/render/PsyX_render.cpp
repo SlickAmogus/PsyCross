@@ -1830,7 +1830,17 @@ int g_PsxFogToBlack = 0;
  * the signed dither offset over-brightened the faint low-cyan anti-aliased rim of the
  * subtractive blood decal, so it subtracted ~nothing over a light floor and leaked the
  * bright floor through as white speckled edges. Opaque geometry (u_fogToBlack==0) keeps
- * full dither. */
+ * full dither.
+ *
+ * Dither and the 5-bit quantize both fade out with fog (scaled by 1 - fogAmt). The
+ * void behind the world is cleared to the raw 8-bit fog colour (GR_Clear), but a
+ * dithered, quantized fragment lands on quantize(fogColor) +- dither -- a constant
+ * shade off the void plus a crosshatch -- so a fully fogged object never matches the
+ * fog it sits in (reported: objects show as distinct outlines in the far void, in
+ * daytime fog and night darkness alike). At full fog there is no object detail left
+ * to preserve, so fading both makes a fogged fragment resolve to exactly fogColor =
+ * the void (no seam, culling not needed to hide it), while the near scene is
+ * untouched (fogAmt ~ 0 there). fogAmt comes from GPU_LIT_TAIL just above. */
 #	define GPU_DITHERING_NO_VCOLOR\
 		"		mat4 dither = mat4(\n"\
 		"			-4.0,  +0.0,  -3.0,  +1.0,\n"\
@@ -1838,10 +1848,11 @@ int g_PsxFogToBlack = 0;
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
-		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack));\n"\
+		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack)) * (1.0 - fogAmt);\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
-		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
+		"		    vec3 qcol = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
+		"		    fragColor.xyz = mix(qcol, fragColor.xyz, fogAmt);\n"\
 		"		}\n"
 
 #	define GPU_ARRAY_FUNC\
