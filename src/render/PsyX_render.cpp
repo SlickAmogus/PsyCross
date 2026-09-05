@@ -275,6 +275,17 @@ int g_PcMenuPillarbox = 1;
  * Default 1 = Hor+ with square pixels. Override from config.cfg via widescreen_mode. */
 int g_PcWidescreenMode = 1;
 
+/* PC port: the centred half-width, in PSX ortho units, that the WORLD 2D ortho
+ * was last set to in GR_SetOffscreenState (160 for 4:3; wider for genuine Hor+).
+ * This is the SINGLE source of truth for "where is the screen edge" for HUD
+ * elements (minimap) that must sit flush to it. They must NOT re-derive it from
+ * a window size: the renderer chooses the ortho from g_windowWidth/Height (the
+ * logical/render size), while SDL_GetWindowSize returns the actual window, and
+ * in borderless those differ (e.g. 640x480 render presented to a 1920x1080
+ * desktop) -- reading the wrong one widened the panel off-screen. Latched only
+ * on the world pass so menus/UI passes cannot move it. */
+float g_PcWorldOrthoHalfW = 160.0f;
+
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
 
@@ -4010,6 +4021,13 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				 * The viewport (below) handles pillarbox vs full-window. */
 				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
+			}
+
+			/* Publish the world ortho's centred half-width for HUD placement.
+			 * Only on the world pass (matches g_PcWorldHorPlus), so the 2D UI
+			 * pass's always-4:3 ortho does not overwrite it. */
+			if (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) {
+				g_PcWorldOrthoHalfW = (fbOrthoR - fbOrthoL) * 0.5f;
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
