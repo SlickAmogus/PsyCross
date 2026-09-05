@@ -2258,8 +2258,13 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
-	/* PSX's 15-bit framebuffer could not represent a residue below 1/32, and this geometry was culled at the fog far distance anyway: snap the last 1/32 to full so distant objects dissolve instead of sitting 1-2/255 off the fog colour. */\
-	"		if (fogAmt > 0.96875) fogAmt = 1.0;\n"\
+	/* Snap near-full fog to exactly full. Geometry past the fog plane (culled on
+	 * PSX, drawn here) sits at ~0.9-0.97 fog, so a few percent of its own colour
+	 * still bleeds through the mix and distant trees/objects read as faint shapes a
+	 * shade off the flat void. There is no detail worth keeping that deep, so snap
+	 * the top ~3/32 to full and they dissolve completely. Only the near-full top of
+	 * the curve is touched; near and mid fog are unchanged (tunable via `fogstr`). */\
+	"		if (fogAmt > 0.90625) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
