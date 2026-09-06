@@ -292,16 +292,19 @@ int g_PcMenuPillarbox = 1;
  * Default 1 = Hor+ with square pixels. Override from config.cfg via widescreen_mode. */
 int g_PcWidescreenMode = 1;
 
-/* PC port: the centred half-width, in PSX ortho units, that the WORLD 2D ortho
- * was last set to in GR_SetOffscreenState (160 for 4:3; wider for genuine Hor+).
- * This is the SINGLE source of truth for "where is the screen edge" for HUD
- * elements (minimap) that must sit flush to it. They must NOT re-derive it from
- * a window size: the renderer chooses the ortho from g_windowWidth/Height (the
- * logical/render size), while SDL_GetWindowSize returns the actual window, and
- * in borderless those differ (e.g. 640x480 render presented to a 1920x1080
- * desktop) -- reading the wrong one widened the panel off-screen. Latched only
- * on the world pass so menus/UI passes cannot move it. */
-float g_PcWorldOrthoHalfW = 160.0f;
+/* PC port: the visible rectangle of the OVERLAY pass (OT2, the g_OtTags0
+ * layers), in prim coordinates {left, right, top, bottom}, as last set in
+ * GR_SetOffscreenState on a gameplay frame. The SINGLE source of truth for
+ * "where is the screen edge" for HUD elements (minimap) that must sit flush to
+ * it. They must NOT re-derive it from a window size: the renderer chooses the
+ * ortho from g_windowWidth/Height (the logical/render size), while
+ * SDL_GetWindowSize returns the actual window, and in borderless those differ
+ * (e.g. 640x480 render presented to a 1920x1080 desktop). Nor from the WORLD
+ * ortho: its width is divided by hfov and its height scaled by vfov, neither of
+ * which the overlay pass applies, so that placed the minimap off the edge at
+ * any hfov other than 1. Defaults to the 4:3 frame until the first latch. */
+float g_PcHudRect[4] = { -160.0f, 160.0f, -120.0f, 120.0f };
+extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
 
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
@@ -4057,11 +4060,22 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			}
 
-			/* Publish the world ortho's centred half-width for HUD placement.
-			 * Only on the world pass (matches g_PcWorldHorPlus), so the 2D UI
-			 * pass's always-4:3 ortho does not overwrite it. */
-			if (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) {
-				g_PcWorldOrthoHalfW = (fbOrthoR - fbOrthoL) * 0.5f;
+			/* Publish the OVERLAY pass's visible rectangle, in prim coordinates,
+			 * for HUD placement. OT2 (the g_OtTags0 layers: minimap, cutscene
+			 * bars, crosshair) is drawn under the UI ortho, which carries neither
+			 * hfov nor vfov, so the HUD has to be placed against THIS ortho.
+			 * Placing it against the world ortho, whose width is divided by hfov,
+			 * pushed the minimap past the visible edge whenever hfov was not 1.
+			 * Latched on gameplay frames only (the flag is 0 on menu frames) so a
+			 * menu's 4:3 ortho cannot move it. The vertical span is the real one
+			 * too, so a 224-line display no longer masquerades as 240. */
+			if (g_PcHorPlusEnabled && g_PsxUIOrthoPass) {
+				float ox = 0.0f, oy = 0.0f;
+				PsyX_GetDrawEnvOffset(&ox, &oy);
+				g_PcHudRect[0] = fbOrthoL - ox;
+				g_PcHudRect[1] = fbOrthoR - ox;
+				g_PcHudRect[2] = fbOrthoT - oy;
+				g_PcHudRect[3] = fbOrthoB - oy;
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
