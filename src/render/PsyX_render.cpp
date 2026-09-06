@@ -211,10 +211,27 @@ static float PsxDisplayPixelAspect(void)
 		 * held item 1/vfov too narrow, which at the shipped 1.06 is the
 		 * noticeably tall, thin pickup. Keep these two conditions and the
 		 * vscale/hscale lines in GR_SetOffscreenState identical. */
-		const float hs = g_PsxUIOrthoPass ? 1.0f
-		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
-		const float vs = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
-		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
+		/* ...and that includes the ortho's g_PcHorPlusEnabled gate. The ortho
+		 * applies hscale/vscale ONLY on a Hor+ (3D gameplay) frame; on a Hor+-off
+		 * frame -- 2D screens, the inventory, the area-load screen -- it installs
+		 * the plain 4:3 ortho with both pinned at 1, so they must be divided out
+		 * here as 1 too. This solve had no such gate and read the world vfov on
+		 * every frame, so any Hor+-off 3D came out 1/vfov too narrow: invisible at
+		 * vfov 1.0, but at the (correct) 1.08 Harry on the load screen was tall,
+		 * thin and running off the bottom, and the inventory item kept a residual
+		 * ~8% stretch. The vfov is right; this mismatch was the bug. Cutscenes are
+		 * cropped by g_PsxCutsceneVScale in the ortho, so mirror that as well. */
+		extern int g_PcHorPlusEnabled;
+		const int   worldPass = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass);
+		const float hs = worldPass ? ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f)
+		                           : 1.0f;
+		float vs;
+		if (!worldPass || g_PsxItemTakeActive)
+			vs = 1.0f;
+		else if (g_PsxCutsceneActive && g_PsxCutsceneVScale > 0.0f)
+			vs = g_PsxCutsceneVScale;
+		else
+			vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
 		return (hs * vs) / target;
 	}
 }
