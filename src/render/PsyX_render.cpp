@@ -2278,14 +2278,6 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
-	/* Snap only the last 1/32 of fog to full: PSX's 15-bit framebuffer could not
-	 * represent a residue below 1/32, so this just removes a 1-2/255 shade-off at
-	 * the true fog wall. It must stay this high (0.96875): interior corridors fog
-	 * to ~0.9 at their far end at the SAME fog values distant exterior geometry
-	 * hits, so a lower global snap over-fogs interiors into a solid wall (regressed
-	 * at 29/32). Hiding far daylight-exterior geometry more aggressively needs a
-	 * scene-side signal, not a global threshold -- future fog-distance control. */\
-	"		if (fogAmt > 0.96875) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
