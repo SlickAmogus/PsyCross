@@ -2453,6 +2453,32 @@ static int PgxpNearClipEmit(GrVertex* v, int count)
 	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
 		return count;
 
+	/* [PGXPCLIP]: the first dozen polys the clipper takes, per session, with
+	 * each vertex's screen position, view depth and W. A far quad losing one
+	 * corner (the mall screens) means one vertex carries a view depth that
+	 * says "behind the eye"; this names which. Event-capped, never per frame. */
+	{
+		static int s_clipLog = 0;
+		/* Only the suspicious kind: every vertex projects on-screen (a real
+		 * straddler's behind-eye vertex saturates the GTE screen box) yet one
+		 * still reads as behind the near plane. */
+		bool onScreen = true;
+		for (int j = 0; j < count; j++)
+			if (v[j].x < -400.0f || v[j].x > 400.0f || v[j].y < -300.0f || v[j].y > 300.0f)
+				onScreen = false;
+		if (onScreen && s_clipLog < 24)
+		{
+			s_clipLog++;
+			eprintinfo("[PGXPCLIP] n=%d nearZ=%.1f | v0=(%.0f,%.0f z=%.0f w=%.3f) v1=(%.0f,%.0f z=%.0f w=%.3f) v2=(%.0f,%.0f z=%.0f w=%.3f) v3=(%.0f,%.0f z=%.0f w=%.3f)\n",
+				count, (double)g_PgxpNearZ,
+				(double)v[0].x, (double)v[0].y, (double)v[0].vsz, (double)v[0].ppw,
+				(double)v[1].x, (double)v[1].y, (double)v[1].vsz, (double)v[1].ppw,
+				(double)v[2].x, (double)v[2].y, (double)v[2].vsz, (double)v[2].ppw,
+				(double)(count > 3 ? v[3].x : 0.0f), (double)(count > 3 ? v[3].y : 0.0f),
+				(double)(count > 3 ? v[3].vsz : 0.0f), (double)(count > 3 ? v[3].ppw : 0.0f));
+		}
+	}
+
 	/* Growth headroom: never write past the vertex buffer; keeping the
 	 * unclipped poly stays within the pre-existing envelope. Force the whole
 	 * poly affine (same rule as the guard-band bail below): an eligible poly
