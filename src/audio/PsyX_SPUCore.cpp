@@ -625,15 +625,34 @@ void SPUCore::KeyOnVoice(SPUVoiceState& v, int voiceIndex)
             g_PsyX_SfxOverride(static_cast<int>(v.attr.addr), &modPcm, &modCount, &modRate) &&
             modCount > 0 && modPcm != nullptr)
         {
-            // A replacement plays at the rate it was AUTHORED at. A voice consumes
-            // decoded samples at (pitch/4096) per 44.1kHz tick, so advancing the
-            // source by rate*4096/(44100*pitch) per emitted sample lands it at its
-            // own rate for this Key On. Pitch the game applies later still scales
-            // relative to that latch, so a modulated sound keeps its modulation --
-            // the same contract the OpenAL path documents.
-            const uint64_t pitch = v.attr.pitch ? static_cast<uint64_t>(v.attr.pitch) : 4096ull;
-            const uint64_t rate = (modRate > 0) ? static_cast<uint64_t>(modRate) : 44100ull;
-            uint64_t step = (rate * 4096ull * 65536ull) / (44100ull * pitch);
+            // A replacement whose rate is KNOWN plays at the rate it was AUTHORED
+            // at. A voice consumes decoded samples at (pitch/4096) per 44.1kHz
+            // tick, so advancing the source by rate*4096/(44100*pitch) per emitted
+            // sample lands it at its own rate for this Key On. Pitch the game
+            // applies later still scales relative to that latch, so a modulated
+            // sound keeps its modulation -- the same contract the OpenAL path
+            // documents.
+            //
+            // An UNKNOWN rate (modRate 0) falls back to native semantics instead:
+            // one source sample per (pitch/4096) tick, exactly what the original
+            // ADPCM at this address would have done. That is every sample lifted
+            // out of a whole-bank SND/<BANK>.VAB replacement -- ADPCM carries no
+            // rate, so the registry reports 0 and the game's own pitch is the only
+            // thing that knows how fast the sound should run. Latching a 44100
+            // baseline there played such a bank at a flat 44.1kHz however low the
+            // game keyed it, which is what broke the replaced weapon sounds:
+            // PISTOL and SHOTGUN are whole-bank mods. The OpenAL path draws the
+            // same line -- overridePitchBase stays 0 unless modRate > 0, leaving
+            // plain pitch/4096 semantics in place.
+            uint64_t step = 0x10000ull;
+
+            if (modRate > 0 && v.attr.pitch > 0)
+            {
+                const uint64_t pitch = static_cast<uint64_t>(v.attr.pitch);
+                const uint64_t rate = static_cast<uint64_t>(modRate);
+
+                step = (rate * 4096ull * 65536ull) / (44100ull * pitch);
+            }
 
             if (step == 0) step = 1;
             if (step > 0xFFFFFFFFull) step = 0xFFFFFFFFull;
