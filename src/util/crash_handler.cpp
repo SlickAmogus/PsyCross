@@ -279,11 +279,33 @@ void InstallExceptionHandler()
 	 * than deadlocking; RESETHAND so the second one dies normally. */
 	sa.sa_flags = SA_NODEFER | SA_RESETHAND;
 
-	sigaction(SIGSEGV, &sa, NULL);
-	sigaction(SIGBUS,  &sa, NULL);
-	sigaction(SIGILL,  &sa, NULL);
-	sigaction(SIGFPE,  &sa, NULL);
-	sigaction(SIGABRT, &sa, NULL);
+	/* Never displace a handler the host already installed.
+	 *
+	 * pc_port's Sh_InstallCrashFilter takes these same five signals, and it runs
+	 * FIRST -- main_pc.c installs it long before PsyX_Initialise reaches this.
+	 * Overwriting it would have swapped a handler that flushes the game log and
+	 * prints module+offset frames (ASLR-proof, resolvable with addr2line) for
+	 * this one, which does neither. The log losing its last buffered second is
+	 * precisely what made an Android crash report undiagnosable.
+	 *
+	 * So this is the fallback for a host that installs nothing, and stands down
+	 * for one that does. */
+	{
+		static const int kSignals[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+		unsigned i;
+
+		for (i = 0; i < sizeof(kSignals) / sizeof(kSignals[0]); i++)
+		{
+			struct sigaction cur;
+
+			memset(&cur, 0, sizeof(cur));
+			if (sigaction(kSignals[i], NULL, &cur) == 0 &&
+			    cur.sa_handler != SIG_DFL && cur.sa_handler != SIG_IGN)
+				continue;
+
+			sigaction(kSignals[i], &sa, NULL);
+		}
+	}
 #endif
 }
 

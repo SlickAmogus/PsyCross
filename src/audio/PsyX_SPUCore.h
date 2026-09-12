@@ -155,6 +155,16 @@ struct SPUVoiceState
     int      blockSamplePos;   // index of the NEXT undelivered sample in blockSamples (0..28)
     bool     blockValid;       // false until the first block has been decoded
 
+    // -- Loose per-sound replacement (pc_sfx_override.c, via g_PsyX_SfxOverride) --
+    // Latched at Key On for a voice whose start address has a replacement
+    // registered. While set, blocks are filled from this PC-owned PCM instead of
+    // decoding the ADPCM at curAddr; everything downstream (pitch counter,
+    // interpolation, ADSR, volumes, ENDX) is unaware of the substitution.
+    const int16_t* ovrPcm;     // borrowed; owned by the game side. null = not replaced
+    uint32_t ovrCount;         // samples available in ovrPcm
+    uint64_t ovrPos;           // 16.16 cursor into ovrPcm
+    uint32_t ovrStep;          // 16.16 source samples per emitted sample (rate latch)
+
     // 4-tap history window consumed by the Gaussian interpolator, in the
     // order the documented formula expects: [0]=new,[1]=old,[2]=older,[3]=oldest.
     int16_t  interpTaps[4];

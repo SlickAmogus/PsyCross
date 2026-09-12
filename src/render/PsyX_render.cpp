@@ -126,15 +126,6 @@ int   g_PsxItemTakeActive = 0;
  * (which un-cropped the whole cutscene frame and looked stretched). */
 int   g_PsxUIOrthoPass = 0;
 
-/* The ortho the UI pass last installed, published so an overlay can place
- * itself in EXACTLY the space its prims are drawn in instead of rebuilding
- * the solve from window aspect and the knobs. Every reconstruction has to be
- * kept in step with hfov, vfov, the pixel aspect, the CRT trim and the
- * display-aspect mode, and the on-screen HUD drifting off the panel is what
- * happens when one of them is missed. Defaults are the plain 4:3 frame, used
- * until the first UI pass has run. */
-float g_PsxUiOrthoL = 0.0f, g_PsxUiOrthoR = 320.0f;
-float g_PsxUiOrthoT = 0.0f, g_PsxUiOrthoB = 240.0f;
 /* 3D-world HORIZONTAL ortho scale (Hor+ widescreen only). 1.0 = identity (current
  * behaviour); >1 narrows the ortho around center = wider models, <1 = narrower. Pure
  * tuning/preference knob, default neutral. Console `hfov`; not applied to the UI pass. */
@@ -221,10 +212,27 @@ static float PsxDisplayPixelAspect(void)
 		 * held item 1/vfov too narrow, which at the shipped 1.06 is the
 		 * noticeably tall, thin pickup. Keep these two conditions and the
 		 * vscale/hscale lines in GR_SetOffscreenState identical. */
-		const float hs = g_PsxUIOrthoPass ? 1.0f
-		               : ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f);
-		const float vs = (g_PsxUIOrthoPass || g_PsxItemTakeActive) ? 1.0f
-		               : ((g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f);
+		/* ...and that includes the ortho's g_PcHorPlusEnabled gate. The ortho
+		 * applies hscale/vscale ONLY on a Hor+ (3D gameplay) frame; on a Hor+-off
+		 * frame -- 2D screens, the inventory, the area-load screen -- it installs
+		 * the plain 4:3 ortho with both pinned at 1, so they must be divided out
+		 * here as 1 too. This solve had no such gate and read the world vfov on
+		 * every frame, so any Hor+-off 3D came out 1/vfov too narrow: invisible at
+		 * vfov 1.0, but at the (correct) 1.08 Harry on the load screen was tall,
+		 * thin and running off the bottom, and the inventory item kept a residual
+		 * ~8% stretch. The vfov is right; this mismatch was the bug. Cutscenes are
+		 * cropped by g_PsxCutsceneVScale in the ortho, so mirror that as well. */
+		extern int g_PcHorPlusEnabled;
+		const int   worldPass = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass);
+		const float hs = worldPass ? ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f)
+		                           : 1.0f;
+		float vs;
+		if (!worldPass || g_PsxItemTakeActive)
+			vs = 1.0f;
+		else if (g_PsxCutsceneActive && g_PsxCutsceneVScale > 0.0f)
+			vs = g_PsxCutsceneVScale;
+		else
+			vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
 		return (hs * vs) / target;
 	}
 }
@@ -346,6 +354,20 @@ int g_PcMenuPillarbox = 1;
  *       to fill 16:9. Characters appear ~33% wider. Not recommended.
  * Default 1 = Hor+ with square pixels. Override from config.cfg via widescreen_mode. */
 int g_PcWidescreenMode = 1;
+
+/* PC port: the visible rectangle of the OVERLAY pass (OT2, the g_OtTags0
+ * layers), in prim coordinates {left, right, top, bottom}, as last set in
+ * GR_SetOffscreenState on a gameplay frame. The SINGLE source of truth for
+ * "where is the screen edge" for HUD elements (minimap) that must sit flush to
+ * it. They must NOT re-derive it from a window size: the renderer chooses the
+ * ortho from g_windowWidth/Height (the logical/render size), while
+ * SDL_GetWindowSize returns the actual window, and in borderless those differ
+ * (e.g. 640x480 render presented to a 1920x1080 desktop). Nor from the WORLD
+ * ortho: its width is divided by hfov and its height scaled by vfov, neither of
+ * which the overlay pass applies, so that placed the minimap off the edge at
+ * any hfov other than 1. Defaults to the 4:3 frame until the first latch. */
+float g_PcHudRect[4] = { -160.0f, 160.0f, -120.0f, 120.0f };
+extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
 
 int g_cfg_pgxpTextureCorrection = 1;
 int g_cfg_pgxpZBuffer = 1;
@@ -1997,7 +2019,17 @@ int g_PsxFogToBlack = 0;
  * the signed dither offset over-brightened the faint low-cyan anti-aliased rim of the
  * subtractive blood decal, so it subtracted ~nothing over a light floor and leaked the
  * bright floor through as white speckled edges. Opaque geometry (u_fogToBlack==0) keeps
- * full dither. */
+ * full dither.
+ *
+ * Dither and the 5-bit quantize both fade out with fog (scaled by 1 - fogAmt). The
+ * void behind the world is cleared to the raw 8-bit fog colour (GR_Clear), but a
+ * dithered, quantized fragment lands on quantize(fogColor) +- dither -- a constant
+ * shade off the void plus a crosshatch -- so a fully fogged object never matches the
+ * fog it sits in (reported: objects show as distinct outlines in the far void, in
+ * daytime fog and night darkness alike). At full fog there is no object detail left
+ * to preserve, so fading both makes a fogged fragment resolve to exactly fogColor =
+ * the void (no seam, culling not needed to hide it), while the near scene is
+ * untouched (fogAmt ~ 0 there). fogAmt comes from GPU_LIT_TAIL just above. */
 #	define GPU_DITHERING_NO_VCOLOR\
 		"		mat4 dither = mat4(\n"\
 		"			-4.0,  +0.0,  -3.0,  +1.0,\n"\
@@ -2005,10 +2037,11 @@ int g_PsxFogToBlack = 0;
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
 		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
-		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack));\n"\
+		"		float dStrength = u_ditherForce * v_is3d * (1.0 - float(u_fogToBlack)) * (1.0 - fogAmt);\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
-		"		    fragColor.xyz = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
+		"		    vec3 qcol = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
+		"		    fragColor.xyz = mix(qcol, fragColor.xyz, fogAmt);\n"\
 		"		}\n"
 
 #	define GPU_ARRAY_FUNC\
@@ -2414,8 +2447,6 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
-	/* PSX's 15-bit framebuffer could not represent a residue below 1/32, and this geometry was culled at the fog far distance anyway: snap the last 1/32 to full so distant objects dissolve instead of sitting 1-2/255 off the fog colour. */\
-	"		if (fogAmt > 0.96875) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
@@ -4245,16 +4276,22 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
 			}
 
-			/* Whatever the branches above settled on, recorded for the overlays.
-			 * Only the UI pass: that is the one OT2 -- the HUD, the touch
-			 * controls -- is drawn under, and the world pass would hand them a
-			 * frame that moves with the FOV knobs. */
-			if (g_PsxUIOrthoPass && fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
-			{
-				g_PsxUiOrthoL = fbOrthoL;
-				g_PsxUiOrthoR = fbOrthoR;
-				g_PsxUiOrthoT = fbOrthoT;
-				g_PsxUiOrthoB = fbOrthoB;
+			/* Publish the OVERLAY pass's visible rectangle, in prim coordinates,
+			 * for HUD placement. OT2 (the g_OtTags0 layers: minimap, cutscene
+			 * bars, crosshair) is drawn under the UI ortho, which carries neither
+			 * hfov nor vfov, so the HUD has to be placed against THIS ortho.
+			 * Placing it against the world ortho, whose width is divided by hfov,
+			 * pushed the minimap past the visible edge whenever hfov was not 1.
+			 * Latched on gameplay frames only (the flag is 0 on menu frames) so a
+			 * menu's 4:3 ortho cannot move it. The vertical span is the real one
+			 * too, so a 224-line display no longer masquerades as 240. */
+			if (g_PcHorPlusEnabled && g_PsxUIOrthoPass) {
+				float ox = 0.0f, oy = 0.0f;
+				PsyX_GetDrawEnvOffset(&ox, &oy);
+				g_PcHudRect[0] = fbOrthoL - ox;
+				g_PcHudRect[1] = fbOrthoR - ox;
+				g_PcHudRect[2] = fbOrthoT - oy;
+				g_PcHudRect[3] = fbOrthoB - oy;
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection
@@ -5560,7 +5597,7 @@ static void GR_EnsureFbPackTarget(int w, int h)
 /* Pack the captured frame into one VRAM rect. Saves/restores viewport + FBO and
  * invalidates the renderer's cached GL state, so this is safe to run mid-frame
  * (GR_UpdateVRAM calls it after a full vram[] re-upload). */
-static void GR_PackFrameToVramRect(int x, int y, int w, int h)
+static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 {
 #if USE_OPENGL
 	GLint vp[4];
@@ -5583,7 +5620,7 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	{
 		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
 		if (dampLoc != -1)
-			glUniform1f(dampLoc, g_PsxFeedbackDamp);
+			glUniform1f(dampLoc, gain);
 	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
@@ -5603,6 +5640,11 @@ static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 	g_PreviousDepthMode    = -999;
 	g_PreviousScissorState = -999;
 #endif
+}
+
+static void GR_PackFrameToVramRect(int x, int y, int w, int h)
+{
+	GR_PackFrameToVramRectGain(x, y, w, h, g_PsxFeedbackDamp);
 }
 
 /* Pack the captured frame into every rect the game may read back: both PSX
@@ -5687,38 +5729,14 @@ static void GR_ClearAllFeedbackRects(void)
 		GR_ClearVramRect(g_sceneFbRedirect.x, g_sceneFbRedirect.y, g_sceneFbRedirect.w, g_sceneFbRedirect.h);
 }
 
-/* Called once per present: capture the composed frame, then pack it into the
- * feedback rects. */
-extern "C" void GR_StoreFrameBufferPsx(void)
+/* Capture the frame as rendered so far into the (w x h) pack texture, mapped so
+ * PSX coordinate (u,v) of the display buffer lands on texel (u,v). Shared by the
+ * per-present feedback store and the mid-frame scene-scratch capture; see the
+ * g_psxAreaVp note below for why the source rect is not simply the viewport. */
+static void GR_CaptureFrameToPackTex(int w, int h)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
-	int w, h;
 	GLuint readFBO = 0;
-
-	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
-		return;
-
-	/* The game just wrote its own data into a display-buffer rect — leave it
-	 * alone until it stops (see GR_NoteVramUploadForFeedback). */
-	if (g_fbFeedbackSuppress > 0)
-	{
-		g_fbFeedbackSuppress--;
-		return;
-	}
-
-	/* Loading-screen-only: while the loading/transition blur is not drawing,
-	 * blank the feedback rects (word 0 → transparent) so the per-map overlays
-	 * this store would otherwise drive read nothing instead of a stale/garbage
-	 * frame. See g_PsxFeedbackStoreAllowed. */
-	if (g_PsxFeedbackStoreAllowed <= 0)
-	{
-		GR_ClearAllFeedbackRects();
-		return;
-	}
-	g_PsxFeedbackStoreAllowed--;
-
-	w = g_psxDispBuf[0].w;
-	h = g_psxDispBuf[0].h;
 
 	GR_EnsureFbPackTarget(w, h);
 
@@ -5805,11 +5823,79 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	g_PreviousScissorState = 0;
 
 	g_fbPackValid = 1;
+#endif
+}
+
+/* One present has passed for the scene scratch-redirect. Runs on EVERY present,
+ * not only when the feedback store is allowed: the redirect is now armed by the
+ * game's own DR_AREA every frame the scene draws, so if this only ticked on the
+ * store path the rect would be blanked forever after the scene ended -- and
+ * (320,256 320x224) holds real map textures in other rooms. */
+static void GR_SceneRedirectTick(void)
+{
+	if (g_sceneFbRedirectTtl <= 0)
+		return;
+	g_sceneFbRedirectTtl--;
+	if (g_sceneFbRedirectTtl == 0 && s_sceneFbRedirectArms < 32)
+	{
+		eprintinfo("[FBSCRATCH] redirect LAPSED (%d,%d %dx%d) - rect no longer refreshed\n",
+		           g_sceneFbRedirect.x, g_sceneFbRedirect.y,
+		           g_sceneFbRedirect.w, g_sceneFbRedirect.h);
+	}
+}
+
+/* Called once per present: capture the composed frame, then pack it into the
+ * feedback rects. */
+extern "C" void GR_StoreFrameBufferPsx(void)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
+		return;
+
+	/* The game just wrote its own data into a display-buffer rect — leave it
+	 * alone until it stops (see GR_NoteVramUploadForFeedback). */
+	if (g_fbFeedbackSuppress > 0)
+	{
+		g_fbFeedbackSuppress--;
+		GR_SceneRedirectTick();
+		return;
+	}
+
+	/* Loading-screen-only: while the loading/transition blur is not drawing,
+	 * blank the feedback rects (word 0 → transparent) so the per-map overlays
+	 * this store would otherwise drive read nothing instead of a stale/garbage
+	 * frame. See g_PsxFeedbackStoreAllowed. */
+	if (g_PsxFeedbackStoreAllowed <= 0)
+	{
+		GR_ClearAllFeedbackRects();
+		GR_SceneRedirectTick();
+		return;
+	}
+	g_PsxFeedbackStoreAllowed--;
+
+	GR_CaptureFrameToPackTex(g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 
 	GR_PackFrameToAllFeedbackRects();
+	GR_SceneRedirectTick();
+#endif
+}
 
-	if (g_sceneFbRedirectTtl > 0)
-		g_sceneFbRedirectTtl--;
+/* Mid-frame: pack everything drawn so far into a VRAM rect, in draw order, so
+ * the prims that follow can sample it. This is how the scene-scratch effects
+ * (map4_s04 Lisa, map3_s02, map7_s02) work: on PSX the DR_AREA points the whole
+ * scene at offscreen VRAM and then eight SPRTs composite it back at 1-2 px
+ * offsets with different blends -- a soft-focus. PC draws the scene on screen,
+ * so the moment the game switches the area back is where the capture goes
+ * (game_main.c rewrites that DR_AREA into DR_PSYX_FBCAPTURE). One-shot, not a
+ * loop -- the rect is fully rewritten every frame -- so the gain is unity; the
+ * feedback damp exists only for rects that feed on their own output. */
+extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
+{
+#if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	if (w <= 0 || h <= 0)
+		return;
+	GR_CaptureFrameToPackTex(w, h);
+	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
 #endif
 }
 
@@ -5965,6 +6051,13 @@ static void GR_RestoreStoredFramebufferRegion(void)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
 	if (!g_fbStoreValid || g_PsxSkipFramebufferStore)
+		return;
+	/* glBlitFramebuffer is a glad-loaded pointer (NULL until loaded). If a
+	 * driver/context leaves it unloaded, calling it jumps to 0x0 -- the
+	 * issue #102 crash signature (GR_UpdateVRAM -> call 0x0 on the cafe map
+	 * pickup). Skip the restore rather than fault; the feedback effect just
+	 * degrades. */
+	if (!glBlitFramebuffer)
 		return;
 
 	const int x = g_PreviousFramebuffer.x;
