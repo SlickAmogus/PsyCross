@@ -2,6 +2,8 @@
 
 #include "PsyX_SPUCore.h"
 
+#include "PsyX/PsyX_public.h" /* g_PsyX_SfxOverride */
+
 #include <string.h>
 #include <algorithm>
 #include <cmath>
@@ -604,6 +606,62 @@ void SPUCore::KeyOnVoice(SPUVoiceState& v, int voiceIndex)
     v.envLevel = 0;             // Key On always resets envelope to 0
     v.envCounter = 0;
     v.everKeyedOn = true;
+
+    // Loose per-sound replacement, the same registry the OpenAL voice path uses
+    // (g_PsyX_SfxOverride -> pc_sfx_override.c), keyed on the SPU address this
+    // voice plays from. Without this the software SPU just decodes the original
+    // ADPCM and every sound mod is silently ignored -- which is what happened to
+    // all of them when the software SPU became the default renderer.
+    v.ovrPcm = nullptr;
+    v.ovrCount = 0;
+    v.ovrPos = 0;
+    v.ovrStep = 0x10000u;
+    {
+        const short* modPcm = nullptr;
+        int modCount = 0;
+        int modRate = 0;
+
+        if (g_PsyX_SfxOverride != nullptr &&
+            g_PsyX_SfxOverride(static_cast<int>(v.attr.addr), &modPcm, &modCount, &modRate) &&
+            modCount > 0 && modPcm != nullptr)
+        {
+            // A replacement whose rate is KNOWN plays at the rate it was AUTHORED
+            // at. A voice consumes decoded samples at (pitch/4096) per 44.1kHz
+            // tick, so advancing the source by rate*4096/(44100*pitch) per emitted
+            // sample lands it at its own rate for this Key On. Pitch the game
+            // applies later still scales relative to that latch, so a modulated
+            // sound keeps its modulation -- the same contract the OpenAL path
+            // documents.
+            //
+            // An UNKNOWN rate (modRate 0) falls back to native semantics instead:
+            // one source sample per (pitch/4096) tick, exactly what the original
+            // ADPCM at this address would have done. That is every sample lifted
+            // out of a whole-bank SND/<BANK>.VAB replacement -- ADPCM carries no
+            // rate, so the registry reports 0 and the game's own pitch is the only
+            // thing that knows how fast the sound should run. Latching a 44100
+            // baseline there played such a bank at a flat 44.1kHz however low the
+            // game keyed it, which is what broke the replaced weapon sounds:
+            // PISTOL and SHOTGUN are whole-bank mods. The OpenAL path draws the
+            // same line -- overridePitchBase stays 0 unless modRate > 0, leaving
+            // plain pitch/4096 semantics in place.
+            uint64_t step = 0x10000ull;
+
+            if (modRate > 0 && v.attr.pitch > 0)
+            {
+                const uint64_t pitch = static_cast<uint64_t>(v.attr.pitch);
+                const uint64_t rate = static_cast<uint64_t>(modRate);
+
+                step = (rate * 4096ull * 65536ull) / (44100ull * pitch);
+            }
+
+            if (step == 0) step = 1;
+            if (step > 0xFFFFFFFFull) step = 0xFFFFFFFFull;
+
+            v.ovrPcm = reinterpret_cast<const int16_t*>(modPcm);
+            v.ovrCount = static_cast<uint32_t>(modCount);
+            v.ovrStep = static_cast<uint32_t>(step);
+        }
+    }
     if (voiceIndex >= 0 && voiceIndex < kNumVoices)
     {
         m_referenceVoices[voiceIndex].resampler.Reset();
@@ -957,6 +1015,43 @@ void SPUCore::ClearCdQueue()
 
 void SPUCore::DecodeAdpcmBlock(SPUVoiceState& v, int voiceIndex)
 {
+    if (v.ovrPcm != nullptr)
+    {
+        // Replaced sample: fill the block from PC-owned PCM rather than decoding
+        // the ADPCM at curAddr. Nothing downstream changes.
+        bool ended = false;
+
+        for (int i = 0; i < kAdpcmBlockSamples; ++i)
+        {
+            const uint32_t idx = static_cast<uint32_t>(v.ovrPos >> 16);
+
+            if (idx >= v.ovrCount)
+            {
+                v.blockSamples[i] = 0;
+                ended = true;
+                continue;
+            }
+            v.blockSamples[i] = v.ovrPcm[idx];
+            v.ovrPos += v.ovrStep;
+        }
+
+        v.blockSamplePos = 0;
+        v.blockValid = true;
+
+        // Running out ends the voice the way a final block carrying End+Mute
+        // does, so it releases instead of falling back into the original ADPCM
+        // at the repeat address. Clearing the pointer means the block decoded
+        // after the release is the real (silent, enveloped-off) data again.
+        v.blockLoopEnd = ended;
+        v.forceReleaseOnBlockEnd = ended;
+        if (ended)
+        {
+            v.reachedLoopEnd = true;
+            v.ovrPcm = nullptr;
+        }
+        return;
+    }
+
     if (v.curAddr + kAdpcmBlockBytes > kSpuRamSize)
     {
         // Out-of-range: treat as silence rather than reading (and corrupting
