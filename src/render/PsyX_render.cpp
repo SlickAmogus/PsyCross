@@ -463,6 +463,17 @@ int g_cfg_affineTextures = 0;
 int g_cfg_psxDither = 1;
 int g_PsxDitherSuppressed = 0;
 
+/* 1 = this frame draws the 3D world in perspective (set by the game from the
+ * same test that decides Hor+ widening: InGame, not the paper map, not one of
+ * the fullscreen 2D background screens). On such a frame a POLY primitive is
+ * world geometry, so it seeds the per-primitive 3D marker that gates texture
+ * filtering. Without it the marker came only from the view-space shadow, which
+ * resolves ~82% of vertices, and a primitive whose vertices all missed rendered
+ * point-sampled next to filtered neighbours -- the blocky walls and tree quads
+ * in the filtering reports. SPRT and TILE never reach that marker, so in-game
+ * text stays sharp. */
+extern "C" { int g_PsxFrame3dClass = 0; }
+
 /* PC port: MSAA sample count for the default framebuffer. 0 = off (no
  * multisample requested), 2/4/8 = N-sample MSAA. Read in GR_InitialiseRender
  * BEFORE the GL context is created (SDL_GL_MULTISAMPLE* attributes), so the
