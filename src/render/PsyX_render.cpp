@@ -3675,9 +3675,68 @@ void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, 
 	}
 }
 
+/* [VOIDPROBE] one-shot readback, armed by the console command of that name.
+ * Records the exact bytes the clear was asked for, then on the next frame reads
+ * three rows across the top of BOTH the composed scene target and the window
+ * after the present blit, and prints the most common colours on each. That
+ * answers, in one run and without guesswork, whether the far void and fully
+ * fogged geometry are landing on the same value and at which stage they
+ * diverge. Fires once per arm; costs nothing otherwise. */
+extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = { 0, 0, 0 }; }
+
+static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
+{
+	struct Bin { unsigned char r, g, b; int n; } bins[16];
+	int nbins = 0, total = 0, row;
+	unsigned char* px = (unsigned char*)malloc((size_t)w * 4);
+
+	if (px == NULL) return;
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+	for (row = 0; row < 3; row++)
+	{
+		int y = (int)((float)h * (0.72f + 0.10f * (float)row)); /* GL y is bottom-up: top of screen */
+		int x, i;
+		if (y < 0 || y >= h) continue;
+		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+		for (x = 0; x < w; x += 3)
+		{
+			unsigned char r = px[x * 4], g = px[x * 4 + 1], b = px[x * 4 + 2];
+			if (r > 150 && g > 150 && b > 150) continue; /* snow specks */
+			total++;
+			for (i = 0; i < nbins; i++)
+				if (bins[i].r == r && bins[i].g == g && bins[i].b == b) { bins[i].n++; break; }
+			if (i == nbins && nbins < 16) { bins[nbins].r = r; bins[nbins].g = g; bins[nbins].b = b; bins[nbins].n = 1; nbins++; }
+		}
+	}
+	{
+		char line[512]; int len, i, j;
+		for (i = 0; i < nbins; i++)
+			for (j = i + 1; j < nbins; j++)
+				if (bins[j].n > bins[i].n) { struct Bin t = bins[i]; bins[i] = bins[j]; bins[j] = t; }
+		len = snprintf(line, sizeof(line), "[VOIDPROBE] %s %dx%d samples=%d:", tag, w, h, total);
+		for (i = 0; i < nbins && i < 6 && len < (int)sizeof(line) - 40; i++)
+			len += snprintf(line + len, sizeof(line) - (size_t)len, " (%d,%d,%d)x%d", bins[i].r, bins[i].g, bins[i].b, bins[i].n);
+		eprintf("%s\n", line);
+	}
+	free(px);
+}
+
+extern "C" void GR_VoidProbeScene(void)
+{
+	if (!g_PsxVoidProbeArmed) return;
+	eprintf("[VOIDPROBE] clear=(%d,%d,%d) fogColor=(%.2f,%.2f,%.2f)/255 fogStrength=%.3f msaa=%d internalFBO=%u\n",
+	        g_PsxLastClearRGB[0], g_PsxLastClearRGB[1], g_PsxLastClearRGB[2],
+	        g_PsyX_FogColor[0] * 255.0f, g_PsyX_FogColor[1] * 255.0f, g_PsyX_FogColor[2] * 255.0f,
+	        g_PsyX_FogStrength, s_internalSamples, (unsigned)g_internalFBO);
+	VoidProbeRows("scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
+}
+
 void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
 {
 	framebuffer_need_update = 1;
+	g_PsxLastClearRGB[0] = r; g_PsxLastClearRGB[1] = g; g_PsxLastClearRGB[2] = b;
 
 #if USE_OPENGL
 	/* PC port: when pillarboxing (4:3 content centered in a wider window), keep
@@ -5978,7 +6037,16 @@ void GR_SwapWindow()
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
 		                  dx, dy, dx + dw, dy + dh,
 		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		if (g_PsxVoidProbeArmed)
+		{
+			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
+			g_PsxVoidProbeArmed = 0;
+		}
 		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	}
+	else if (g_PsxVoidProbeArmed)
+	{
+		g_PsxVoidProbeArmed = 0;
 	}
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
