@@ -2289,6 +2289,25 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
+	/* Close the last of the curve smoothly.\
+	 *\
+	 * A fragment at 97% fog keeps 3% of its own colour. Against a dark texture\
+	 * that is 1-2/255, which PSX's 15-bit framebuffer could not represent and an\
+	 * 8-bit one shows plainly: far geometry reads as a faint shape a shade off\
+	 * the void it sits in, so lamp posts, wall tops and chunk seams stay legible\
+	 * at the draw distance (measured on a report: void 107,99,114 against fogged\
+	 * geometry 108,100,116).\
+	 *\
+	 * The old answer was a hard snap of everything past 31/32 to full, which\
+	 * removed the residue and replaced it with a discontinuity -- one distance\
+	 * where the whole scene collapses to flat fog, read as a wall, which is why\
+	 * it was dropped. Ease into full fog instead: identity below the knee, then\
+	 * a smoothstep that arrives at 1.0 with zero slope. Continuous in value AND\
+	 * derivative, so there is no distance where anything jumps, and by 97% the\
+	 * residue is under a tenth of a unit. The mid-range moves by about one unit\
+	 * of 255 at its worst, which is why interiors do not over-fog the way the\
+	 * 29/32 snap made them. */\
+	"		fogAmt += (1.0 - fogAmt) * smoothstep(0.8, 1.0, fogAmt);\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
