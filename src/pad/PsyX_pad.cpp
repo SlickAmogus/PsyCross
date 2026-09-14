@@ -71,6 +71,30 @@ int PsyX_Pad_InitSystem()
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
 
+	/* Steam Controller and Steam Deck. SDL ships hidapi drivers for both, but
+	 * the Steam Controller one defaults OFF on desktop because it fights the
+	 * Steam client: when Steam launched us, Steam Input already presents the
+	 * pad as a virtual XInput device and also holds the raw HID handle, so a
+	 * second reader gets nothing or doubles every press. Outside Steam nothing
+	 * else will ever open the device, and without the driver a Steam Controller
+	 * is not a game controller to SDL at all -- SDL_IsGameController says no
+	 * and PsyX_Pad_OpenController never sees it.
+	 *
+	 * So: raw driver on only when Steam did not launch us. Steam sets SteamAppId
+	 * and SteamGameId for every title it starts, non-Steam shortcuts included,
+	 * and Proton adds STEAM_COMPAT_APP_ID. The Deck hint is passed by name so
+	 * an SDL older than the one that added it just ignores it. */
+	{
+		const int underSteam = (SDL_getenv("SteamAppId") != NULL ||
+		                        SDL_getenv("SteamGameId") != NULL ||
+		                        SDL_getenv("STEAM_COMPAT_APP_ID") != NULL);
+		SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, underSteam ? "0" : "1");
+		SDL_SetHint("SDL_JOYSTICK_HIDAPI_STEAMDECK", "1");
+		eprintf("[PAD] Steam Controller raw driver %s (%s)\n",
+		        underSteam ? "off" : "on",
+		        underSteam ? "launched by Steam, Steam Input owns the pad" : "not launched by Steam");
+	}
+
 	memset(g_controllers, 0, sizeof(g_controllers));
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
 		g_controllers[i].instanceId = -1; /* memset zero is a VALID instance id */
