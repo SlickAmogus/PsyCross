@@ -55,6 +55,40 @@ static int PsyX_Pad_MergeAllControllers(LPPADRAW pad);
  * idle controller never buzzes. */
 static int g_activeControllerSlot = 0;
 
+/* The Steam Controller can be plugged in and still invisible to SDL: when the
+ * Steam client is running it holds the device for its own desktop
+ * configuration, so SDL's raw driver cannot open it and the pad behaves as a
+ * mouse. Nothing in this process can take it back. What we can do is notice
+ * the hardware is there while no joystick came of it, and say why, because the
+ * report that arrives is "the controller does nothing" with no hint that Steam
+ * was open in the background. 0x28DE is Valve; 0x1102 the wired controller,
+ * 0x1142 the wireless dongle (which enumerates even with no pad paired, so the
+ * message says "detected", not "connected"). */
+static void PsyX_Pad_SteamControllerOwnershipHint(void)
+{
+	SDL_hid_device_info* list = SDL_hid_enumerate(0x28DE, 0);
+	SDL_hid_device_info* it;
+	int steamHw = 0, steamJoy = 0, i;
+
+	for (it = list; it != NULL; it = it->next)
+		if (it->product_id == 0x1102 || it->product_id == 0x1142)
+			steamHw = 1;
+	SDL_hid_free_enumeration(list);
+	if (!steamHw)
+		return;
+
+	for (i = 0; i < SDL_NumJoysticks(); i++)
+		if (SDL_JoystickGetDeviceVendor(i) == 0x28DE)
+			steamJoy = 1;
+
+	if (steamJoy)
+		eprintf("[PAD] Steam Controller: hardware detected and opened by SDL\n");
+	else
+		eprintf("[PAD] Steam Controller: hardware detected but SDL could not open it. "
+		        "The Steam client is holding it (desktop configuration = mouse). "
+		        "Add the game to Steam and launch it from there, or exit Steam first.\n");
+}
+
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
 {
@@ -111,12 +145,16 @@ int PsyX_Pad_InitSystem()
 	// Add more controllers from custom file
 	SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
 
+	PsyX_Pad_SteamControllerOwnershipHint();
+
 	return 1;
 }
 
 // Prints controller list into console
 void PsyX_Pad_Debug_ListControllers()
 {
+	PsyX_Pad_SteamControllerOwnershipHint();
+
 	int numJoysticks = SDL_NumJoysticks();
 	int numHaptics = SDL_NumHaptics();
 
