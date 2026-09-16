@@ -1,6 +1,9 @@
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#include <map>
+#include <vector>
+#include <algorithm>
 #include <windows.h>
 #endif
 
@@ -2322,7 +2325,22 @@ int g_PsxFogToBlack = 0;
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
-	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"
+	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"\
+	/* A linear fog on an 8-bit target always ends in a last one-unit step, and
+	 * with the void cleared to the fog colour that step landed on every object
+	 * silhouette against it: fragments a fraction under full fog rounded one
+	 * below the clear and read as a distinct shape (measured: 107 against a 108
+	 * void, on three separate reports). Nothing in the curve can remove that
+	 * step; it can only move it. So put it where it does not draw an outline:
+	 * anything the fog has brought within a unit and a half of the fog colour is
+	 * written as the fog colour exactly. Silhouette and void become the same
+	 * byte; the residual step moves onto the object's own body, a soft contour
+	 * instead of an edge. Gated on the fog being past half so a near surface
+	 * that merely happens to match the fog colour is never touched. */\
+	"		if (u_fogToBlack == 0 && fogAmt > 0.5) {\n"\
+	"			vec3 dFog = abs(fragColor.rgb - u_fogColor);\n"\
+	"			if (max(dFog.r, max(dFog.g, dFog.b)) < (1.6 / 255.0)) fragColor.rgb = u_fogColor;\n"\
+	"		}\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
 	GPU_PACK_RG_FUNC\
@@ -3697,18 +3715,19 @@ extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = {
 
 static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 {
-	struct Bin { unsigned char r, g, b; int n; } bins[16];
-	int nbins = 0, total = 0, row;
+	std::map<unsigned int, int> hist;
+	int row, total = 0;
 	unsigned char* px = (unsigned char*)malloc((size_t)w * 4);
 
 	if (px == NULL) return;
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-	/* Nine rows from 10% to 90% of the height: the first run only sampled the
-	 * top band and missed objects sitting lower in the frame. */
+	/* Nine rows from 10% to 90% of the height, every pixel. A full map rather
+	 * than a handful of first-come bins: the bottom rows are noisy near ground
+	 * and filled 16 bins before the void was ever reached (second run). */
 	for (row = 0; row < 9; row++)
 	{
 		int y = (int)((float)h * (0.10f + 0.10f * (float)row));
-		int x, i;
+		int x;
 		if (y < 0 || y >= h) continue;
 		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
 		for (x = 0; x < w; x++)
@@ -3716,19 +3735,22 @@ static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 			unsigned char r = px[x * 4], g = px[x * 4 + 1], b = px[x * 4 + 2];
 			if (r > 150 && g > 150 && b > 150) continue; /* snow specks */
 			total++;
-			for (i = 0; i < nbins; i++)
-				if (bins[i].r == r && bins[i].g == g && bins[i].b == b) { bins[i].n++; break; }
-			if (i == nbins && nbins < 16) { bins[nbins].r = r; bins[nbins].g = g; bins[nbins].b = b; bins[nbins].n = 1; nbins++; }
+			hist[((unsigned)r << 16) | ((unsigned)g << 8) | b]++;
 		}
 	}
 	{
-		char line[512]; int len, i, j;
-		for (i = 0; i < nbins; i++)
-			for (j = i + 1; j < nbins; j++)
-				if (bins[j].n > bins[i].n) { struct Bin t = bins[i]; bins[i] = bins[j]; bins[j] = t; }
-		len = snprintf(line, sizeof(line), "[VOIDPROBE] %s %dx%d samples=%d:", tag, w, h, total);
-		for (i = 0; i < nbins && i < 6 && len < (int)sizeof(line) - 40; i++)
-			len += snprintf(line + len, sizeof(line) - (size_t)len, " (%d,%d,%d)x%d", bins[i].r, bins[i].g, bins[i].b, bins[i].n);
+		std::vector<std::pair<int, unsigned int> > top;
+		char line[512]; int len; size_t i;
+		for (std::map<unsigned int, int>::const_iterator it = hist.begin(); it != hist.end(); ++it)
+			top.push_back(std::make_pair(it->second, it->first));
+		std::sort(top.begin(), top.end());
+		len = snprintf(line, sizeof(line), "[VOIDPROBE] %s %dx%d samples=%d distinct=%u:", tag, w, h, total, (unsigned)hist.size());
+		for (i = 0; i < top.size() && i < 8 && len < (int)sizeof(line) - 40; i++)
+		{
+			const std::pair<int, unsigned int>& e = top[top.size() - 1 - i];
+			len += snprintf(line + len, sizeof(line) - (size_t)len, " (%u,%u,%u)x%d",
+			                (e.second >> 16) & 255, (e.second >> 8) & 255, e.second & 255, e.first);
+		}
 		eprintf("%s\n", line);
 	}
 	free(px);
