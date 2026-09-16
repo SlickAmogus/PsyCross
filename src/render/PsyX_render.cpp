@@ -3703,9 +3703,11 @@ static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 
 	if (px == NULL) return;
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
-	for (row = 0; row < 3; row++)
+	/* Nine rows from 10% to 90% of the height: the first run only sampled the
+	 * top band and missed objects sitting lower in the frame. */
+	for (row = 0; row < 9; row++)
 	{
-		int y = (int)((float)h * (0.72f + 0.10f * (float)row)); /* GL y is bottom-up: top of screen */
+		int y = (int)((float)h * (0.10f + 0.10f * (float)row));
 		int x, i;
 		if (y < 0 || y >= h) continue;
 		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
