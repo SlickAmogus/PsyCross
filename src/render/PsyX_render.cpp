@@ -2337,9 +2337,24 @@ int g_PsxFogToBlack = 0;
 	 * byte; the residual step moves onto the object's own body, a soft contour
 	 * instead of an edge. Gated on the fog being past half so a near surface
 	 * that merely happens to match the fog colour is never touched. */\
+	/* Second VOIDPROBE pass, after the nearest-vertex cull: the road ends were
+	 * gone, but wall tops and lamp posts standing against the sky at 9-13 m were
+	 * still (107,99,114) -- fog x 0.987. They are legitimately at 90-99% fog,
+	 * and PSX showed the same bytes; its 15-bit framebuffer just could not tell
+	 * 107 from 108, so a residue under one 5-bit step (8 units) never existed
+	 * there. Reproduce that visibility threshold without the banding: pull the
+	 * residual toward the fog colour with a dead zone. Anything within 6 units
+	 * becomes the fog colour exactly, anything past 24 units is untouched, and
+	 * the gain in between is a smoothstep, so there is no distance and no
+	 * contour where the picture jumps. The zone fades in between 60% and 90%
+	 * fog, so a near surface that happens to sit close to the fog colour keeps
+	 * its detail. The lower smoothstep edge is kept strictly below the upper
+	 * one; equal edges are undefined in GLSL. */\
 	"		if (u_fogToBlack == 0 && fogAmt > 0.5) {\n"\
-	"			vec3 dFog = abs(fragColor.rgb - u_fogColor);\n"\
-	"			if (max(dFog.r, max(dFog.g, dFog.b)) < (1.6 / 255.0)) fragColor.rgb = u_fogColor;\n"\
+	"			vec3 dFog = fragColor.rgb - u_fogColor;\n"\
+	"			float dMax = max(abs(dFog.r), max(abs(dFog.g), abs(dFog.b)));\n"\
+	"			float dead = (6.0 / 255.0) * smoothstep(0.6, 0.9, fogAmt) + 0.0001;\n"\
+	"			fragColor.rgb = u_fogColor + dFog * smoothstep(dead, dead * 4.0, dMax);\n"\
 	"		}\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
