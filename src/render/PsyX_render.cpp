@@ -3711,7 +3711,7 @@ static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 		int x, i;
 		if (y < 0 || y >= h) continue;
 		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-		for (x = 0; x < w; x += 3)
+		for (x = 0; x < w; x++)
 		{
 			unsigned char r = px[x * 4], g = px[x * 4 + 1], b = px[x * 4 + 2];
 			if (r > 150 && g > 150 && b > 150) continue; /* snow specks */
