@@ -2305,17 +2305,6 @@ int g_PsxFogToBlack = 0;
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
 	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"\
-	/* An 8-bit fade to a flat void always has a band where a surface is one unit
-	 * off it, and a contrast-boosted capture finds that band wherever it lands.
-	 * Trade it for a step instead: past 97% the fragment IS the void, and past
-	 * 90% anything already within 2.5 units of the void is written as the void.
-	 * The step is at most 3 units for a pure black surface, under 1.5 for an
-	 * ordinary texture. An earlier snap at 90% read as a wall; 97% does not. */\
-	"		if (u_fogToBlack == 0 && fogAmt > 0.9) {\n"\
-	"			vec3 dFog = abs(fragColor.rgb - u_fogColor);\n"\
-	"			if (fogAmt > 0.97 || max(dFog.r, max(dFog.g, dFog.b)) < (2.5 / 255.0))\n"\
-	"				fragColor.rgb = u_fogColor;\n"\
-	"		}\n"\
 	/* VOIDPROBE second frame: every fog-tail fragment is written as (fogAmt, is3d,
 	 * 200) so the histogram shows which fog levels the off-colour pixels carry, and
 	 * anything still at its real colour is proven to come from outside this tail. */\
@@ -2343,6 +2332,15 @@ int g_PsxFogToBlack = 0;
 	"			                                : BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	/* Untextured prims bind a 1x1 white placeholder, which decodes through the
+	 * 5-bit table like any VRAM texel: 0xFFFF -> 248/256, so every flat or
+	 * gouraud prim drew at 31/32 of its vertex colour. PSX draws them at the
+	 * vertex colour exactly. The visible case was the full-screen fog-colour
+	 * quad the game lays under the world: at 31/32, averaged with the clear, the
+	 * void came out (107,99,114) against fully fogged geometry at the exact fog
+	 * colour (108,100,116), so every building, tree and post stood out from it.
+	 * Alpha is kept, since it carries the semi-transparency. */\
+	"		if (u_untextured > 0) fragColor.rgb = vec3(1.0);\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
