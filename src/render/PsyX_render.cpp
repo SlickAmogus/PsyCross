@@ -1698,6 +1698,7 @@ typedef struct
 	GLint texOffsetLoc;
 	GLint hiresHalfLoc;
 	GLint fogColorLoc;
+	GLint voidProbeLoc;
 	GLint fogToBlackLoc;
 	GLint fogStrengthLoc;
 	GLint pgxpEnabledLoc;
@@ -1742,6 +1743,8 @@ GLint u_texelSizeLoc;
 GLint u_texOffsetLoc;
 GLint u_hiresHalfLoc;
 GLint u_fogColorLoc;
+GLint u_voidProbeLoc;
+extern "C" int g_PsxVoidProbeArmed;
 GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
@@ -2164,6 +2167,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform vec3 u_fogColor;\n"\
 	"	uniform int u_fogToBlack;\n"\
 	"	uniform float u_fogStrength;\n"\
+	"	uniform int u_voidProbe;\n"\
 	"	uniform int u_flashlightOn;\n"\
 	"	uniform int u_untextured;\n"\
 	"	uniform int u_flStyle;\n"\
@@ -2311,7 +2315,11 @@ int g_PsxFogToBlack = 0;
 	"			vec3 dFog = abs(fragColor.rgb - u_fogColor);\n"\
 	"			if (fogAmt > 0.97 || max(dFog.r, max(dFog.g, dFog.b)) < (2.5 / 255.0))\n"\
 	"				fragColor.rgb = u_fogColor;\n"\
-	"		}\n"
+	"		}\n"\
+	/* VOIDPROBE second frame: every fog-tail fragment is written as (fogAmt, is3d,
+	 * 200) so the histogram shows which fog levels the off-colour pixels carry, and
+	 * anything still at its real colour is proven to come from outside this tail. */\
+	"		if (u_voidProbe > 0) fragColor = vec4(fogAmt, v_is3d, 200.0 / 255.0, 1.0);\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
 	GPU_PACK_RG_FUNC\
@@ -2824,6 +2832,7 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->texOffsetLoc = glGetUniformLocation(sh->shader, "u_texOffset");
 	sh->hiresHalfLoc = glGetUniformLocation(sh->shader, "u_hiresHalf");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
+	sh->voidProbeLoc = glGetUniformLocation(sh->shader, "u_voidProbe");
 	sh->fogToBlackLoc = glGetUniformLocation(sh->shader, "u_fogToBlack");
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
@@ -3197,6 +3206,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3233,6 +3243,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3269,6 +3280,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3310,6 +3322,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = shader->texOffsetLoc;
 		u_hiresHalfLoc = shader->hiresHalfLoc;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3359,6 +3372,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
+	if (u_voidProbeLoc != -1)
+		glUniform1i(u_voidProbeLoc, g_PsxVoidProbeArmed == 2 ? 1 : 0);
 
 	if (u_fogToBlackLoc != -1)
 		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
@@ -3716,7 +3731,7 @@ static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 			top.push_back(std::make_pair(it->second, it->first));
 		std::sort(top.begin(), top.end());
 		len = snprintf(line, sizeof(line), "[VOIDPROBE] %s %dx%d samples=%d distinct=%u:", tag, w, h, total, (unsigned)hist.size());
-		for (i = 0; i < top.size() && i < 8 && len < (int)sizeof(line) - 40; i++)
+		for (i = 0; i < top.size() && i < 12 && len < (int)sizeof(line) - 40; i++)
 		{
 			const std::pair<int, unsigned int>& e = top[top.size() - 1 - i];
 			len += snprintf(line + len, sizeof(line) - (size_t)len, " (%u,%u,%u)x%d",
@@ -3737,9 +3752,9 @@ extern "C" void GR_VoidProbeScene(void)
 	/* With no internal target the scene IS the window: read framebuffer 0 at
 	 * the present size, or the read is 0x0 and says nothing (first run). */
 	if (g_internalFBO != 0)
-		VoidProbeRows("scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
+		VoidProbeRows(g_PsxVoidProbeArmed == 2 ? "classes" : "scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
 	else
-		VoidProbeRows("scene(window)", 0, g_windowWidth, g_windowHeight);
+		VoidProbeRows(g_PsxVoidProbeArmed == 2 ? "classes(window)" : "scene(window)", 0, g_windowWidth, g_windowHeight);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 }
@@ -6051,13 +6066,13 @@ void GR_SwapWindow()
 		if (g_PsxVoidProbeArmed)
 		{
 			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
-			g_PsxVoidProbeArmed = 0;
+			g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 		}
 		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
 	}
 	else if (g_PsxVoidProbeArmed)
 	{
-		g_PsxVoidProbeArmed = 0;
+		g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 	}
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
