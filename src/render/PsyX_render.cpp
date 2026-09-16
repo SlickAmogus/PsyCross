@@ -3715,16 +3715,12 @@ static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 			if (fp != NULL)
 			{
 				int yy, xx;
-				fprintf(fp, "P6
-%d %d
-255
-", w, h);
+				fprintf(fp, "P6\n%d %d\n255\n", w, h);
 				for (yy = h - 1; yy >= 0; yy--)
 					for (xx = 0; xx < w; xx++)
 						fwrite(fr + ((size_t)yy * w + xx) * 4, 1, 3, fp);
 				fclose(fp);
-				eprintf("[VOIDPROBE] frame dumped to %s
-", name);
+				eprintf("[VOIDPROBE] frame dumped to %s\n", name);
 			}
 			free(fr);
 		}
