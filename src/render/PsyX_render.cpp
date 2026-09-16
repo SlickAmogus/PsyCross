@@ -3701,6 +3701,34 @@ extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = {
 
 static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 {
+	/* Full frame to disk (PPM, bottom-up rows flipped) so the pixel POSITIONS can
+	 * be analysed offline; a histogram cannot say where on screen a colour sits. */
+	{
+		unsigned char* fr = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
+		if (fr != NULL)
+		{
+			char name[64]; FILE* fp;
+			snprintf(name, sizeof(name), "voidprobe_%s.ppm", (strstr(tag, "classes") != NULL) ? "classes" : "scene");
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, fr);
+			fp = fopen(name, "wb");
+			if (fp != NULL)
+			{
+				int yy, xx;
+				fprintf(fp, "P6
+%d %d
+255
+", w, h);
+				for (yy = h - 1; yy >= 0; yy--)
+					for (xx = 0; xx < w; xx++)
+						fwrite(fr + ((size_t)yy * w + xx) * 4, 1, 3, fp);
+				fclose(fp);
+				eprintf("[VOIDPROBE] frame dumped to %s
+", name);
+			}
+			free(fr);
+		}
+	}
 	std::map<unsigned int, int> hist;
 	int row, total = 0;
 	unsigned char* px = (unsigned char*)malloc((size_t)w * 4);
