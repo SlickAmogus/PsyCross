@@ -2307,7 +2307,18 @@ int g_PsxFogToBlack = 0;
 	 * residue is under a tenth of a unit. The mid-range moves by about one unit\
 	 * of 255 at its worst, which is why interiors do not over-fog the way the\
 	 * 29/32 snap made them. */\
-	"		fogAmt += (1.0 - fogAmt) * smoothstep(0.8, 1.0, fogAmt);\n"\
+	/* Measured after the first pass (VOIDPROBE run, 2026-09-16): the clear and
+	 * the fog uniform were byte-identical at 108,100,116, and the lamp posts and
+	 * wall tops against the void sat at 107. So the void was right and those
+	 * fragments were at ~0.99 fog, keeping one unit of their own colour -- the
+	 * knee at 0.8 left raw fog 0.83-0.87 with half a unit to four. Start the
+	 * ease earlier and land it by 0.95, then snap the last 0.2%: at that point
+	 * the residue is under half a unit against ANY texture (0.002 * 147 for a
+	 * white one on this fog), so the snap itself cannot show, while everything
+	 * past it is bit-identical to the void. Raw 0.85 and beyond now resolves to
+	 * exactly the clear; 0.5-0.7 is unchanged. */\
+	"		fogAmt += (1.0 - fogAmt) * smoothstep(0.75, 0.95, fogAmt);\n"\
+	"		if (fogAmt > 0.998) fogAmt = 1.0;\n"\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
@@ -3728,7 +3739,12 @@ extern "C" void GR_VoidProbeScene(void)
 	        g_PsxLastClearRGB[0], g_PsxLastClearRGB[1], g_PsxLastClearRGB[2],
 	        g_PsyX_FogColor[0] * 255.0f, g_PsyX_FogColor[1] * 255.0f, g_PsyX_FogColor[2] * 255.0f,
 	        g_PsyX_FogStrength, s_internalSamples, (unsigned)g_internalFBO);
-	VoidProbeRows("scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
+	/* With no internal target the scene IS the window: read framebuffer 0 at
+	 * the present size, or the read is 0x0 and says nothing (first run). */
+	if (g_internalFBO != 0)
+		VoidProbeRows("scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
+	else
+		VoidProbeRows("scene(window)", 0, g_windowWidth, g_windowHeight);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
 }
