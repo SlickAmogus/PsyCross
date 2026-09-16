@@ -2300,7 +2300,18 @@ int g_PsxFogToBlack = 0;
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
-	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"
+	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"\
+	/* An 8-bit fade to a flat void always has a band where a surface is one unit
+	 * off it, and a contrast-boosted capture finds that band wherever it lands.
+	 * Trade it for a step instead: past 97% the fragment IS the void, and past
+	 * 90% anything already within 2.5 units of the void is written as the void.
+	 * The step is at most 3 units for a pure black surface, under 1.5 for an
+	 * ordinary texture. An earlier snap at 90% read as a wall; 97% does not. */\
+	"		if (u_fogToBlack == 0 && fogAmt > 0.9) {\n"\
+	"			vec3 dFog = abs(fragColor.rgb - u_fogColor);\n"\
+	"			if (fogAmt > 0.97 || max(dFog.r, max(dFog.g, dFog.b)) < (2.5 / 255.0))\n"\
+	"				fragColor.rgb = u_fogColor;\n"\
+	"		}\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
 	GPU_PACK_RG_FUNC\
