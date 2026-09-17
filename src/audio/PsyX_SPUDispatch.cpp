@@ -205,20 +205,6 @@ void PsyX_SPUAL_SetXaMasterGain(double gain) { if (UseSoftware()) PsyX_SPUSoftwa
 void PsyX_SPUAL_SetXaPaused(int paused) { if (UseSoftware()) PsyX_SPUSoftware_SetXaPaused(paused); }
 u_int PsyX_SPUAL_GetQueuedXaFrames() { return UseSoftware() ? PsyX_SPUSoftware_GetQueuedXaFrames() : 0; }
 
-#if !defined(PSYX_NO_OPENAL)
-/* The game ends ambient loops through this on a scene teardown
- * (bodyprog_bgm_80087EA8.c). Both engines keep their own voices, so it has
- * to reach the live one; mobile has only the software engine, which defines
- * it directly. */
-void PsyX_SPULegacy_StopLoopingVoices(void);
-void PsyX_SPUSoftware_StopLoopingVoices(void);
-void Pc_SpuStopLoopingVoices(void)
-{
-	if (UseSoftware()) PsyX_SPUSoftware_StopLoopingVoices();
-	else PsyX_SPULegacy_StopLoopingVoices();
-}
-#endif
-
 int PsyX_AudioPushXaFrames(const int16_t* samples, uint32_t frames,
 	uint32_t sourceRate, uint32_t channels)
 {

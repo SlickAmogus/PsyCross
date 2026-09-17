@@ -1457,13 +1457,7 @@ void PsyX_SPUAL_SetKey(int on_off, u_int voice_bit)
 // Looping voices are also exactly the ones with no decay tail to lose, so
 // stopping only those ends the stuck ambience without reintroducing the
 // truncation that motivated disabling the blanket stop.
-// Named through the backend rename (PsyX_SPULegacy_StopLoopingVoices here);
-// the game-facing Pc_SpuStopLoopingVoices lives in PsyX_SPUDispatch.cpp and
-// routes to whichever engine is live. Defined here under that name, desktop
-// only ever stopped the AL voices, which are idle while the software engine
-// (the default) is playing, so a looping ambient bed still survived a
-// quickload there.
-extern "C" void PsyX_SPUAL_StopLoopingVoices(void)
+extern "C" void Pc_SpuStopLoopingVoices(void)
 {
 	SDL_LockMutex(g_SpuMutex);
 
