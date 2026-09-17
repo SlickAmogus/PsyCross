@@ -241,6 +241,9 @@ extern int PsyX_RawControllerBindHeld(int buttonOrAxis);
  * controller's SDL name / SDL_GameControllerType (NULL / -1 when none), the
  * bind name of a held button or trigger (NULL when none), and a signed stick
  * axis across all attached controllers. */
+/* The picture's rect in render pixels (pillarbox rule included), from the
+ * current display flags rather than the last GL_VIEWPORT. */
+extern void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* outH);
 extern const char* PsyX_Pad_ConnectedControllerName(void);
 extern int         PsyX_Pad_ConnectedControllerType(void);
 extern const char* PsyX_Pad_HeldBindName(void);

@@ -4030,6 +4030,31 @@ void GR_SetScissorState(int enable)
  * the game's 2D space. Returns 1 if the point is inside the viewport (0 = in the
  * black bars). Mirrors the viewport block near "Display viewport" below; keep in
  * sync if that math changes. */
+/* PC port: the rect the display viewport block picks for the picture (render
+ * pixels, the pillarbox rule included), computed from the current flags rather
+ * than from whatever GL_VIEWPORT the last draw left. A GL overlay that lays
+ * itself out against this stays the same size on frames that drew nothing and
+ * lines up with PsyX_MapWindowToViewport's pointer fractions. */
+extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* outH)
+{
+	int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
+	const bool wantPillarbox =
+		(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
+		(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+	if (wantPillarbox && g_windowHeight > 0) {
+		const float psxAspect = 4.0f / 3.0f;
+		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
+		if (winAspect > psxAspect) {
+			vpW = (int)(g_windowHeight * psxAspect + 0.5f);
+			vpX = (g_windowWidth - vpW) / 2;
+		}
+	}
+	if (outX) *outX = vpX;
+	if (outY) *outY = vpY;
+	if (outW) *outW = vpW;
+	if (outH) *outH = vpH;
+}
+
 extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* outFracY)
 {
 	int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
