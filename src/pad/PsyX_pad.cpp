@@ -698,6 +698,73 @@ extern "C" int PsyX_RawControllerBindHeld(int buttonOrAxis)
 	return 0;
 }
 
+/* PC port: the first attached controller, for the in-game controls panel.
+ * Name is SDL's display name; type is an SDL_GameControllerType so the panel
+ * can label buttons the way that pad prints them. NULL / -1 when none. */
+extern "C" const char* PsyX_Pad_ConnectedControllerName(void)
+{
+	for (int i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* gc = g_controllers[i].gc;
+		if (gc && SDL_GameControllerGetAttached(gc))
+			return SDL_GameControllerName(gc);
+	}
+	return NULL;
+}
+
+extern "C" int PsyX_Pad_ConnectedControllerType(void)
+{
+	for (int i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* gc = g_controllers[i].gc;
+		if (gc && SDL_GameControllerGetAttached(gc))
+			return (int)SDL_GameControllerGetType(gc);
+	}
+	return -1;
+}
+
+/* PC port: the bind name (what PsyX_LookupGameControllerMapping accepts) of a
+ * button or trigger held on any attached controller, or NULL. Limited to the
+ * launcher's bindable set -- face buttons, back/guide/start, stick clicks,
+ * shoulders, d-pad, triggers -- so anything captured in game is a value the
+ * launcher can show. Sticks are movement and never returned. */
+extern "C" const char* PsyX_Pad_HeldBindName(void)
+{
+	for (int i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* gc = g_controllers[i].gc;
+		if (!gc || !SDL_GameControllerGetAttached(gc))
+			continue;
+		for (int b = SDL_CONTROLLER_BUTTON_A; b <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT; b++)
+		{
+			if (SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)b))
+				return SDL_GameControllerGetStringForButton((SDL_GameControllerButton)b);
+		}
+		if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16384)
+			return SDL_GameControllerGetStringForAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+		if (SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384)
+			return SDL_GameControllerGetStringForAxis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+	}
+	return NULL;
+}
+
+/* PC port: signed stick axis, the largest magnitude across attached
+ * controllers (PsyX_RawControllerBindHeld folds the sign away). */
+extern "C" int PsyX_Pad_AxisValue(int sdlAxis)
+{
+	int best = 0;
+	for (int i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		SDL_GameController* gc = g_controllers[i].gc;
+		if (!gc || !SDL_GameControllerGetAttached(gc))
+			continue;
+		int v = SDL_GameControllerGetAxis(gc, (SDL_GameControllerAxis)sdlAxis);
+		if (abs(v) > abs(best))
+			best = v;
+	}
+	return best;
+}
+
 /* PC port: Schmitt-trigger digitization. An analog input (trigger/stick) mapped to a
    button presses only above HIGH and releases only below LOW, so a value wavering near a
    single 50% threshold can't chatter the digital bit -- that chatter double-fired the gun
