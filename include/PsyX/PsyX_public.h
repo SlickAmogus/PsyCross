@@ -237,6 +237,15 @@ extern int PsyX_LookupGameControllerMapping(const char* str, int default_value);
  * digital buttons — unlike PsyX_RawControllerButtonHeld, which is buttons only. */
 extern int PsyX_RawControllerBindHeld(int buttonOrAxis);
 
+/* In-game controls panel helpers (PsyX_pad.cpp): the first attached
+ * controller's SDL name / SDL_GameControllerType (NULL / -1 when none), the
+ * bind name of a held button or trigger (NULL when none), and a signed stick
+ * axis across all attached controllers. */
+extern const char* PsyX_Pad_ConnectedControllerName(void);
+extern int         PsyX_Pad_ConnectedControllerType(void);
+extern const char* PsyX_Pad_HeldBindName(void);
+extern int         PsyX_Pad_AxisValue(int sdlAxis);
+
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);
 
