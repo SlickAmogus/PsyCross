@@ -1,11 +1,17 @@
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
-#include <map>
-#include <vector>
-#include <algorithm>
 #include <windows.h>
 #endif
+
+/* Every platform, not just Windows: the VOIDPROBE readback builds its colour
+ * histogram with std::map, std::vector, std::pair and std::sort. MinGW's
+ * libstdc++ happens to pull these in through other headers, Apple's libc++
+ * does not, so inside the _WIN32 block the iOS build failed on them. */
+#include <map>
+#include <vector>
+#include <utility>
+#include <algorithm>
 
 #include "PsyX/PsyX_public.h"
 
