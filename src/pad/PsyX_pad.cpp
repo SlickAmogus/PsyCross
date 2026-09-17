@@ -64,6 +64,58 @@ extern "C" void Pc_Touch_GetPad(unsigned short* word,
                                 unsigned char* rightX, unsigned char* rightY,
                                 unsigned char* leftX,  unsigned char* leftY);
 
+/* Steam Controller support is desktop-only. A phone has no Steam client to
+ * hold the pad, and SDL's mobile HID layers reach a Steam Controller over
+ * Bluetooth instead: on iOS, the Steam driver hint being on is exactly what
+ * makes SDL create a CBCentralManager (src/hidapi/ios/hid.m), and enumerating
+ * Valve devices is what first asks for it. That raises a Bluetooth permission
+ * prompt at launch, and iOS terminates an app whose Info.plist carries no
+ * NSBluetoothAlwaysUsageDescription. Android's HID manager likewise starts
+ * Bluetooth only for that hint. Leaving the hint at SDL's default keeps both
+ * phones as they were. */
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if !((defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__ANDROID__))
+#define PSYX_STEAM_CONTROLLER 1
+#endif
+
+#if defined(PSYX_STEAM_CONTROLLER)
+/* The Steam Controller can be plugged in and still invisible to SDL: when the
+ * Steam client is running it holds the device for its own desktop
+ * configuration, so SDL's raw driver cannot open it and the pad behaves as a
+ * mouse. Nothing in this process can take it back. What we can do is notice
+ * the hardware is there while no joystick came of it, and say why, because the
+ * report that arrives is "the controller does nothing" with no hint that Steam
+ * was open in the background. 0x28DE is Valve; 0x1102 the wired controller,
+ * 0x1142 the wireless dongle (which enumerates even with no pad paired, so the
+ * message says "detected", not "connected"). */
+static void PsyX_Pad_SteamControllerOwnershipHint(void)
+{
+	SDL_hid_device_info* list = SDL_hid_enumerate(0x28DE, 0);
+	SDL_hid_device_info* it;
+	int steamHw = 0, steamJoy = 0, i;
+
+	for (it = list; it != NULL; it = it->next)
+		if (it->product_id == 0x1102 || it->product_id == 0x1142)
+			steamHw = 1;
+	SDL_hid_free_enumeration(list);
+	if (!steamHw)
+		return;
+
+	for (i = 0; i < SDL_NumJoysticks(); i++)
+		if (SDL_JoystickGetDeviceVendor(i) == 0x28DE)
+			steamJoy = 1;
+
+	if (steamJoy)
+		eprintf("[PAD] Steam Controller: hardware detected and opened by SDL\n");
+	else
+		eprintf("[PAD] Steam Controller: hardware detected but SDL could not open it. "
+		        "The Steam client is holding it (desktop configuration = mouse). "
+		        "Add the game to Steam and launch it from there, or exit Steam first.\n");
+}
+#endif /* PSYX_STEAM_CONTROLLER */
+
 // Initializes SDL controllers
 int PsyX_Pad_InitSystem()
 {
@@ -79,6 +131,32 @@ int PsyX_Pad_InitSystem()
 	// which is what leaves Steam Input's overrides working.
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
 	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5, "1");
+
+	/* Steam Controller and Steam Deck. SDL ships hidapi drivers for both, but
+	 * the Steam Controller one defaults OFF on desktop because it fights the
+	 * Steam client: when Steam launched us, Steam Input already presents the
+	 * pad as a virtual XInput device and also holds the raw HID handle, so a
+	 * second reader gets nothing or doubles every press. Outside Steam nothing
+	 * else will ever open the device, and without the driver a Steam Controller
+	 * is not a game controller to SDL at all -- SDL_IsGameController says no
+	 * and PsyX_Pad_OpenController never sees it.
+	 *
+	 * So: raw driver on only when Steam did not launch us. Steam sets SteamAppId
+	 * and SteamGameId for every title it starts, non-Steam shortcuts included,
+	 * and Proton adds STEAM_COMPAT_APP_ID. The Deck hint is passed by name so
+	 * an SDL older than the one that added it just ignores it. */
+#if defined(PSYX_STEAM_CONTROLLER)
+	{
+		const int underSteam = (SDL_getenv("SteamAppId") != NULL ||
+		                        SDL_getenv("SteamGameId") != NULL ||
+		                        SDL_getenv("STEAM_COMPAT_APP_ID") != NULL);
+		SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, underSteam ? "0" : "1");
+		SDL_SetHint("SDL_JOYSTICK_HIDAPI_STEAMDECK", "1");
+		eprintf("[PAD] Steam Controller raw driver %s (%s)\n",
+		        underSteam ? "off" : "on",
+		        underSteam ? "launched by Steam, Steam Input owns the pad" : "not launched by Steam");
+	}
+#endif
 
 	memset(g_controllers, 0, sizeof(g_controllers));
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
@@ -115,12 +193,20 @@ int PsyX_Pad_InitSystem()
 		}
 	}
 
+#if defined(PSYX_STEAM_CONTROLLER)
+	PsyX_Pad_SteamControllerOwnershipHint();
+#endif
+
 	return 1;
 }
 
 // Prints controller list into console
 void PsyX_Pad_Debug_ListControllers()
 {
+#if defined(PSYX_STEAM_CONTROLLER)
+	PsyX_Pad_SteamControllerOwnershipHint();
+#endif
+
 	int numJoysticks = SDL_NumJoysticks();
 	int numHaptics = SDL_NumHaptics();
 

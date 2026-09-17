@@ -13,6 +13,8 @@
 #include "psx/gtereg.h"
 
 extern "C" int GR_NeedViewSpaceData(void);
+/* 1 = this frame draws the 3D world in perspective; see PsyX_render.cpp. */
+extern "C" int g_PsxFrame3dClass;
 
 #define GET_TPAGE_FORMAT(tpage) ((TexFormat)((tpage >> 7) & 0x3))
 #define GET_TPAGE_BLEND(tpage)  ((BlendMode)(((tpage >> 5) & 3) + 1))
@@ -1805,6 +1807,18 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 
 	vertex[0].z = vertex[1].z = vertex[2].z = g_otBucketDepth;
 
+	/* On a frame that draws the 3D world, a POLY primitive IS world geometry.
+	 * The 2D content the game puts through the ordering table is SPRT and TILE,
+	 * neither of which reaches this function, and the fullscreen 2D screens that
+	 * do use POLY are exactly the frames g_PsxFrame3dClass excludes. Seeding the
+	 * marker here is what stops a primitive whose vertices all missed the shadow
+	 * lookup from rendering point-sampled beside filtered neighbours: walls and
+	 * tree quads coming out blocky at 16x anisotropic. The lookup below still
+	 * runs and still sets the marker; this only removes the dependency on it
+	 * resolving, which it does for ~82% of vertices. */
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth)
+		vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
+
 	/* Before the PGXP block: the near-clip eligibility test below reads the
 	 * view-space data these fill. Skipped for the isolated item model — it must
 	 * not join the world's per-pixel flashlight (it doesn't cross the near plane,
@@ -1868,6 +1882,13 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 	vertex[3].y = p3[1] + ofsY;
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
+
+	/* Frame-class 3D marker, same reasoning as MakeVertexTriangle. */
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth)
+	{
+		vertex[0].geom3d = vertex[1].geom3d =
+		vertex[2].geom3d = vertex[3].geom3d = 1.0f;
+	}
 
 	/* Before the PGXP block: near-clip eligibility reads the view-space data.
 	 * Skipped for the isolated item model so it stays out of the world's per-pixel
@@ -3574,8 +3595,19 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
 
-			// Copy per-vertex fog factor from pad bytes
-			firstVertex[0]._p0 = poly->p1;  // v0: shares v1's fog (code byte occupies v0's pad)
+			/* Per-vertex fog. v1 and v2 ride their colour-word pad; v0's pad IS
+			 * the GPU command code, so its fog travels in the unused trailing
+			 * pad2 short, exactly as the GT4 case below already does. The game
+			 * marks that short with bit 15 so a triangle from a path that does
+			 * not carry v0's fog still falls back to the old behaviour instead
+			 * of reading whatever the reused prim buffer left there.
+			 *
+			 * Without v0's own value every textured triangle had one corner
+			 * fogged as if it were at its neighbour's distance, which is the
+			 * skewed fog gradient on large receding surfaces. The quad path was
+			 * fixed for this; triangles were missed. */
+			firstVertex[0]._p0 = (poly->pad2 & 0x8000u) ? (char)(poly->pad2 & 0x7F)
+			                                            : poly->p1;
 			firstVertex[1]._p0 = poly->p1;  // v1
 			firstVertex[2]._p0 = poly->p2;  // v2
 

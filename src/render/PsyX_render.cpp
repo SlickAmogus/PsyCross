@@ -1,6 +1,9 @@
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#include <map>
+#include <vector>
+#include <algorithm>
 #include <windows.h>
 #endif
 
@@ -539,6 +542,17 @@ int g_cfg_affineTextures = 0;
  * primitives that don't request dither at the prim-tag level. */
 int g_cfg_psxDither = 1;
 int g_PsxDitherSuppressed = 0;
+
+/* 1 = this frame draws the 3D world in perspective (set by the game from the
+ * same test that decides Hor+ widening: InGame, not the paper map, not one of
+ * the fullscreen 2D background screens). On such a frame a POLY primitive is
+ * world geometry, so it seeds the per-primitive 3D marker that gates texture
+ * filtering. Without it the marker came only from the view-space shadow, which
+ * resolves ~82% of vertices, and a primitive whose vertices all missed rendered
+ * point-sampled next to filtered neighbours -- the blocky walls and tree quads
+ * in the filtering reports. SPRT and TILE never reach that marker, so in-game
+ * text stays sharp. */
+extern "C" { int g_PsxFrame3dClass = 0; }
 
 /* PC port: MSAA sample count for the default framebuffer. 0 = off (no
  * multisample requested), 2/4/8 = N-sample MSAA. Read in GR_InitialiseRender
@@ -1853,6 +1867,7 @@ typedef struct
 	GLint texOffsetLoc;
 	GLint hiresHalfLoc;
 	GLint fogColorLoc;
+	GLint voidProbeLoc;
 	GLint fogToBlackLoc;
 	GLint fogStrengthLoc;
 	GLint pgxpEnabledLoc;
@@ -1897,6 +1912,8 @@ GLint u_texelSizeLoc;
 GLint u_texOffsetLoc;
 GLint u_hiresHalfLoc;
 GLint u_fogColorLoc;
+GLint u_voidProbeLoc;
+extern "C" int g_PsxVoidProbeArmed;
 GLint u_fogToBlackLoc;
 GLint u_fogStrengthLoc;
 GLint u_pgxpEnabledLoc;
@@ -2319,6 +2336,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform vec3 u_fogColor;\n"\
 	"	uniform int u_fogToBlack;\n"\
 	"	uniform float u_fogStrength;\n"\
+	"	uniform int u_voidProbe;\n"\
 	"	uniform int u_flashlightOn;\n"\
 	"	uniform int u_untextured;\n"\
 	"	uniform int u_flStyle;\n"\
@@ -2447,10 +2465,19 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
+	/* Plain PSX fog: the ramp reaches full fog at the map's fog distance and the
+	 * world is culled on its nearest vertex past it, so nothing drawn sits short
+	 * of full fog against the void. An easing curve was tried here and removed: it
+	 * pushed everything past ~70% of the fog distance to 99%+, a metres-deep band
+	 * where every building and post sat within one unit of the void as a ghost. */\
 	"		if (u_fogToBlack > 0)\n"\
 	"			fragColor.rgb *= (1.0 - fogAmt);\n"\
 	"		else\n"\
-	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"
+	"			fragColor.rgb = mix(fragColor.rgb, u_fogColor, fogAmt);\n"\
+	/* VOIDPROBE second frame: every fog-tail fragment is written as (fogAmt, is3d,
+	 * 200) so the histogram shows which fog levels the off-colour pixels carry, and
+	 * anything still at its real colour is proven to come from outside this tail. */\
+	"		if (u_voidProbe > 0) fragColor = vec4(fogAmt, v_is3d, 200.0 / 255.0, 1.0);\n"
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
 	GPU_PACK_RG_FUNC\
@@ -2474,6 +2501,15 @@ int g_PsxFogToBlack = 0;
 	"			                                : BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
 	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	/* Untextured prims bind a 1x1 white placeholder, which decodes through the
+	 * 5-bit table like any VRAM texel: 0xFFFF -> 248/256, so every flat or
+	 * gouraud prim drew at 31/32 of its vertex colour. PSX draws them at the
+	 * vertex colour exactly. The visible case was the full-screen fog-colour
+	 * quad the game lays under the world: at 31/32, averaged with the clear, the
+	 * void came out (107,99,114) against fully fogged geometry at the exact fog
+	 * colour (108,100,116), so every building, tree and post stood out from it.
+	 * Alpha is kept, since it carries the semi-transparency. */\
+	"		if (u_untextured > 0) fragColor.rgb = vec3(1.0);\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
@@ -3005,6 +3041,7 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->texOffsetLoc = glGetUniformLocation(sh->shader, "u_texOffset");
 	sh->hiresHalfLoc = glGetUniformLocation(sh->shader, "u_hiresHalf");
 	sh->fogColorLoc = glGetUniformLocation(sh->shader, "u_fogColor");
+	sh->voidProbeLoc = glGetUniformLocation(sh->shader, "u_voidProbe");
 	sh->fogToBlackLoc = glGetUniformLocation(sh->shader, "u_fogToBlack");
 	sh->fogStrengthLoc = glGetUniformLocation(sh->shader, "u_fogStrength");
 	sh->pgxpEnabledLoc = glGetUniformLocation(sh->shader, "u_pgxpEnabled");
@@ -3398,6 +3435,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3434,6 +3472,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3470,6 +3509,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = -1;
 		u_hiresHalfLoc = -1;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3511,6 +3551,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_texOffsetLoc = shader->texOffsetLoc;
 		u_hiresHalfLoc = shader->hiresHalfLoc;
 		u_fogColorLoc = shader->fogColorLoc;
+		u_voidProbeLoc = shader->voidProbeLoc;
 		u_fogToBlackLoc = shader->fogToBlackLoc;
 		u_fogStrengthLoc = shader->fogStrengthLoc;
 		u_pgxpEnabledLoc = shader->pgxpEnabledLoc;
@@ -3560,6 +3601,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 	if (u_fogColorLoc != -1)
 		glUniform3fv(u_fogColorLoc, 1, g_PsyX_FogColor);
+	if (u_voidProbeLoc != -1)
+		glUniform1i(u_voidProbeLoc, g_PsxVoidProbeArmed == 2 ? 1 : 0);
 
 	if (u_fogToBlackLoc != -1)
 		glUniform1i(u_fogToBlackLoc, g_PsxFogToBlack);
@@ -3876,9 +3919,103 @@ void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, 
 	}
 }
 
+/* [VOIDPROBE] one-shot readback, armed by the console command of that name.
+ * Records the exact bytes the clear was asked for, then on the next frame reads
+ * three rows across the top of BOTH the composed scene target and the window
+ * after the present blit, and prints the most common colours on each. That
+ * answers, in one run and without guesswork, whether the far void and fully
+ * fogged geometry are landing on the same value and at which stage they
+ * diverge. Fires once per arm; costs nothing otherwise. */
+extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = { 0, 0, 0 }; }
+
+static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
+{
+	/* Full frame to disk (PPM, bottom-up rows flipped) so the pixel POSITIONS can
+	 * be analysed offline; a histogram cannot say where on screen a colour sits. */
+	{
+		unsigned char* fr = (unsigned char*)malloc((size_t)w * (size_t)h * 4);
+		if (fr != NULL)
+		{
+			char name[64]; FILE* fp;
+			snprintf(name, sizeof(name), "voidprobe_%s.ppm", (strstr(tag, "classes") != NULL) ? "classes" : "scene");
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, fr);
+			fp = fopen(name, "wb");
+			if (fp != NULL)
+			{
+				int yy, xx;
+				fprintf(fp, "P6\n%d %d\n255\n", w, h);
+				for (yy = h - 1; yy >= 0; yy--)
+					for (xx = 0; xx < w; xx++)
+						fwrite(fr + ((size_t)yy * w + xx) * 4, 1, 3, fp);
+				fclose(fp);
+				eprintf("[VOIDPROBE] frame dumped to %s\n", name);
+			}
+			free(fr);
+		}
+	}
+	std::map<unsigned int, int> hist;
+	int row, total = 0;
+	unsigned char* px = (unsigned char*)malloc((size_t)w * 4);
+
+	if (px == NULL) return;
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+	/* Nine rows from 10% to 90% of the height, every pixel. A full map rather
+	 * than a handful of first-come bins: the bottom rows are noisy near ground
+	 * and filled 16 bins before the void was ever reached (second run). */
+	for (row = 0; row < 9; row++)
+	{
+		int y = (int)((float)h * (0.10f + 0.10f * (float)row));
+		int x;
+		if (y < 0 || y >= h) continue;
+		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+		for (x = 0; x < w; x++)
+		{
+			unsigned char r = px[x * 4], g = px[x * 4 + 1], b = px[x * 4 + 2];
+			if (r > 150 && g > 150 && b > 150) continue; /* snow specks */
+			total++;
+			hist[((unsigned)r << 16) | ((unsigned)g << 8) | b]++;
+		}
+	}
+	{
+		std::vector<std::pair<int, unsigned int> > top;
+		char line[512]; int len; size_t i;
+		for (std::map<unsigned int, int>::const_iterator it = hist.begin(); it != hist.end(); ++it)
+			top.push_back(std::make_pair(it->second, it->first));
+		std::sort(top.begin(), top.end());
+		len = snprintf(line, sizeof(line), "[VOIDPROBE] %s %dx%d samples=%d distinct=%u:", tag, w, h, total, (unsigned)hist.size());
+		for (i = 0; i < top.size() && i < 12 && len < (int)sizeof(line) - 40; i++)
+		{
+			const std::pair<int, unsigned int>& e = top[top.size() - 1 - i];
+			len += snprintf(line + len, sizeof(line) - (size_t)len, " (%u,%u,%u)x%d",
+			                (e.second >> 16) & 255, (e.second >> 8) & 255, e.second & 255, e.first);
+		}
+		eprintf("%s\n", line);
+	}
+	free(px);
+}
+
+extern "C" void GR_VoidProbeScene(void)
+{
+	if (!g_PsxVoidProbeArmed) return;
+	eprintf("[VOIDPROBE] clear=(%d,%d,%d) fogColor=(%.2f,%.2f,%.2f)/255 fogStrength=%.3f msaa=%d internalFBO=%u\n",
+	        g_PsxLastClearRGB[0], g_PsxLastClearRGB[1], g_PsxLastClearRGB[2],
+	        g_PsyX_FogColor[0] * 255.0f, g_PsyX_FogColor[1] * 255.0f, g_PsyX_FogColor[2] * 255.0f,
+	        g_PsyX_FogStrength, s_internalSamples, (unsigned)g_internalFBO);
+	/* With no internal target the scene IS the window: read framebuffer 0 at
+	 * the present size, or the read is 0x0 and says nothing (first run). */
+	if (g_internalFBO != 0)
+		VoidProbeRows(g_PsxVoidProbeArmed == 2 ? "classes" : "scene", GR_ScreenReadFBO(), s_internalW, s_internalH);
+	else
+		VoidProbeRows(g_PsxVoidProbeArmed == 2 ? "classes(window)" : "scene(window)", 0, g_windowWidth, g_windowHeight);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GR_ScreenFBO());
+}
+
 void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
 {
 	framebuffer_need_update = 1;
+	g_PsxLastClearRGB[0] = r; g_PsxLastClearRGB[1] = g; g_PsxLastClearRGB[2] = b;
 
 #if USE_OPENGL
 
@@ -6319,7 +6456,16 @@ void GR_SwapWindow()
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
 		                  dx, dy, dx + dw, dy + dh,
 		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		if (g_PsxVoidProbeArmed)
+		{
+			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
+			g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
+		}
 		glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+	}
+	else if (g_PsxVoidProbeArmed)
+	{
+		g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 	}
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)

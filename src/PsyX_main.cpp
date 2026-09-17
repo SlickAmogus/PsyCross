@@ -149,6 +149,7 @@ extern void GR_ResetDevice();
 extern void GR_Shutdown();
 extern void GR_BeginScene();
 extern void GR_EndScene();
+extern "C" void GR_VoidProbeScene(void);
 extern void GR_UpdateSwapIntervalState(int swapInterval);
 
 /* Default NTSC: the USA disc never calls SetVideoMode, so g_vmode stayed -1
@@ -1147,6 +1148,7 @@ void PsyX_EndScene()
 	{
 		extern void GR_CaptureLastFrame(void);
 		GR_CaptureLastFrame();
+		GR_VoidProbeScene();
 	}
 
 	/* PC port: draw overlays that must NOT be baked into the freeze-frame (the dev
