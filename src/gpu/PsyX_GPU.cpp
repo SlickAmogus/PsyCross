@@ -388,7 +388,7 @@ extern "C" void PGXP_CoverageTick(void)
 	if (++s_pgxpFrames >= 60)
 	{
 		unsigned int tot = s_pgxpDet + s_pgxpMiss;
-		if (tot)
+		if (tot && g_PsxPgxpDepthStats)
 			eprintinfo("[PGXP] cov %uf: det=%u(%.0f%%) miss=%u(%.0f%%) clip=%u spikeclamp=%u oversize=%u\n",
 				s_pgxpFrames,
 				s_pgxpDet,  100.0 * (double)s_pgxpDet  / (double)tot,
