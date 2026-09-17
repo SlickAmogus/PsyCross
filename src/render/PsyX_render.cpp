@@ -1964,6 +1964,14 @@ int g_PsxFogToBlack = 0;
 	 * identifier"), which is what garbled characters -- the whole program was
 	 * dead, not just the filtering. */\
 	"	uniform float u_anisoTaps; // >1 = anisotropic tap budget\n"\
+	/* Texture coverage of the last filtered sample: opaque tap weight over total
+	 * tap weight. main() uses it to fade the EDGE of an additive/subtractive
+	 * sprite, where a partly covered fragment should add proportionally less
+	 * light instead of all or nothing. Globals rather than out params so the
+	 * sampler signatures (and the aniso loop) stay as they are. Left at 1.0 by
+	 * the unfiltered path, so nearest sampling behaves exactly as before. */\
+	"	float g_tapCov;\n"\
+	"	float g_tapWt;\n"\
 	/* One tap, weighted by its own opacity. PSX CLUT entry 0 is transparent;
 	 * blending its colour like any other tap drags black into every edge, so
 	 * a transparent tap contributes nothing and only adds to coverage when
@@ -1980,6 +1988,7 @@ int g_PsxFogToBlack = 0;
 	"		vec2 rg = samplePSX(idx);\n"\
 	"		float o = (rg.x + rg.y > 0.0) ? w : 0.0;\n"\
 	"		cov += o;\n"\
+	"		g_tapWt += w;\n"\
 	"		return lut(rg) * o;\n"\
 	"	}\n"\
 	/* Bilinear as premultiplied colour plus coverage, WITHOUT discarding.
@@ -1999,8 +2008,10 @@ int g_PsxFogToBlack = 0;
 	"	}\n"\
 	"	vec4 BilinearTextureSample(vec2 P) {\n"\
 	"		float cov = 0.0;\n"\
+	"		g_tapWt = 0.0;\n"\
 	"		vec4 c = BilinearCov(P, cov);\n"\
 	"		if (cov <= 0.0) { discard; }\n"\
+	"		g_tapCov = cov;\n"\
 	"		return c / cov;\n"\
 	"	}\n"\
 	/* Anisotropic for CLUT textures: several bilinear taps along the major
@@ -2026,6 +2037,7 @@ int g_PsxFogToBlack = 0;
 	"		if (span > 4.0) { major *= 4.0 / span; }\n"\
 	"		vec4 acc = vec4(0.0);\n"\
 	"		float cov = 0.0;\n"\
+	"		g_tapWt = 0.0;\n"\
 	/* GLSL ES needs a constant loop bound; unused iterations are skipped.
 	 * GLSL ES needs a constant loop bound; unused iterations are skipped. */\
 	"		for (int i = 0; i < 16; i++) {\n"\
@@ -2034,6 +2046,7 @@ int g_PsxFogToBlack = 0;
 	"			acc += BilinearCov(P + major * t, cov);\n"\
 	"		}\n"\
 	"		if (cov <= 0.0) { discard; }\n"\
+	"		g_tapCov = cov;\n"\
 	"		return acc / cov;\n"\
 	"	}\n"
 
@@ -2324,6 +2337,8 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
+	"		g_tapCov = 1.0;\n"\
+	"		g_tapWt = 1.0;\n"\
 	/* bilinearFilter is the GATE (0 = off, 1 = 3D geometry only, 2 = this whole
 	 * frame); u_anisoTaps chooses HOW to filter once it passes. Keeping the two
 	 * separate is why anisotropic needs no new gate logic. */\
@@ -2341,6 +2356,17 @@ int g_PsxFogToBlack = 0;
 	 * colour (108,100,116), so every building, tree and post stood out from it.
 	 * Alpha is kept, since it carries the semi-transparency. */\
 	"		if (u_untextured > 0) fragColor.rgb = vec3(1.0);\n"\
+	/* Additive and subtractive prims fade their edges by texture coverage.
+	 * TapWeighted divides the filtered colour by the OPAQUE tap weight, so a
+	 * fragment with one opaque tap out of four comes out at full brightness and
+	 * the sprite keeps a hard edge however far it is magnified -- correct for a
+	 * character or a font, where a soft edge would be a dark fringe, but wrong
+	 * for light being added: half-covered should add half as much. That hard cut
+	 * is what makes a 2x2-texel snow flake a white square on a PC screen instead
+	 * of the round dot the same two pixels were on a TV. Colour only; alpha
+	 * keeps its meaning for BM_AVERAGE and for the cutout discard. */\
+	"		if (u_fogToBlack > 0 && g_tapWt > 0.0)\n"\
+	"			fragColor.rgb *= clamp(g_tapCov / g_tapWt, 0.0, 1.0);\n"\
 	GPU_LIT_TAIL\
 	GPU_DITHERING_NO_VCOLOR\
 	"	}\n"
