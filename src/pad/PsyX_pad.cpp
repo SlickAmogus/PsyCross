@@ -525,10 +525,22 @@ void PsyX_Pad_InternalPadUpdates()
 				Pc_Touch_GetPad(&tw, &rx, &ry, &lx, &ly);
 
 				*(u_short*)pad->buttons &= tw;
-				pad->analog[0] = rx;
-				pad->analog[1] = ry;
-				pad->analog[2] = lx;
-				pad->analog[3] = ly;
+				/* Only the sticks a finger is on. A centred value means "not
+				 * driving", and writing those over an attached controller's
+				 * sticks left it with d-pad movement only (reported with
+				 * touch_controls on Automatic). With no controller attached
+				 * the read above leaves nothing worth keeping, so the neutral
+				 * values still go in. */
+				if (!anyAttached || rx != 128 || ry != 128)
+				{
+					pad->analog[0] = rx;
+					pad->analog[1] = ry;
+				}
+				if (!anyAttached || lx != 128 || ly != 128)
+				{
+					pad->analog[2] = lx;
+					pad->analog[3] = ly;
+				}
 				pad->id        = 0x73;
 				pad->status    = 0;
 			}
