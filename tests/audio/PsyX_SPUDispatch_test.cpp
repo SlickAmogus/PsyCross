@@ -78,6 +78,9 @@ int PsyX_SPUSoftware_IsXaDrained() { return 0; }
 void PsyX_SPUSoftware_SetXaMasterGain(double) {}
 void PsyX_SPUSoftware_SetXaPaused(int) {}
 u_int PsyX_SPUSoftware_GetQueuedXaFrames() { return 23; }
+void PsyX_SPUSoftware_ConfigureSpatial(int, int) {}
+void PsyX_SPULegacy_StopLoopingVoices() {}
+void PsyX_SPUSoftware_StopLoopingVoices() {}
 
 }
 
