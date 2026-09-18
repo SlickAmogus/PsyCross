@@ -3742,10 +3742,15 @@ typedef struct
 	int endFbo, endVp[4], endSc;
 	unsigned char clearRGB[3];
 	int tag[6];
+	int probe[6];   /* [PANELMISS] active, window x, y, expected rgb */
+	int pstate[16]; /* [PANELMISS] the panel's GL state at its draw */
 } GreyFrameSnap;
 
 static GreyFrameSnap s_gf;
 extern "C" { int g_PsxGreyTag[6] = { 0, 0, 0, 0, 0, 0 }; }
+/* [PANELMISS] armed each frame by an overlay that wants its presence checked in
+ * the presented image (pc_bind_panel.c); consumed at the swap. */
+extern "C" { int g_PsxPanelProbe[6] = { 0 }; int g_PsxPanelState[16] = { 0 }; }
 
 static void GreyFrame_FirstDraw(void)
 {
@@ -6417,7 +6422,7 @@ static void GreyFrame_Present(int w, int h)
 	static GLuint        s_pbo[4];
 	static int           s_pboW[4];
 	static GreyFrameSnap s_ring[4];
-	static int           s_idx = 0, s_filled = 0, s_logs = 0;
+	static int           s_idx = 0, s_filled = 0, s_logs = 0, s_plogs = 0;
 	static unsigned      s_frame = 0;
 	GLint                prevRead = 0, prevPack = 0, fbo = 0;
 	const int            slot = s_idx;
@@ -6432,6 +6437,9 @@ static void GreyFrame_Present(int w, int h)
 	s_gf.glerr  = (int)glGetError();
 	s_gf.frame  = ++s_frame;
 	memcpy(s_gf.tag, g_PsxGreyTag, sizeof(s_gf.tag));
+	memcpy(s_gf.probe, g_PsxPanelProbe, sizeof(s_gf.probe));
+	memcpy(s_gf.pstate, g_PsxPanelState, sizeof(s_gf.pstate));
+	g_PsxPanelProbe[0] = 0;
 
 	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
 	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prevPack);
@@ -6440,23 +6448,42 @@ static void GreyFrame_Present(int w, int h)
 		glGenBuffers(4, s_pbo);
 
 	/* The slot about to be reused holds the frame presented four swaps ago. */
-	if (s_filled >= 4 && s_logs < 40)
+	if (s_filled >= 4 && (s_logs < 40 || s_plogs < 40))
 	{
 		const GreyFrameSnap* g = &s_ring[slot];
 		const int            n = s_pboW[slot] * 3;
 		const unsigned char* px;
 
 		glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
-		px = (const unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, n * 4, GL_MAP_READ_BIT);
+		px = (const unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, n * 4 + 4, GL_MAP_READ_BIT);
 		if (px)
 		{
 			int i, flat = 1;
+
+			/* [PANELMISS] the overlay's own title-band pixel, in the image that
+			 * was presented. */
+			if (g->probe[0] && s_plogs < 40)
+			{
+				const unsigned char* q = px + n * 4;
+				const int dr = (int)q[0] - g->probe[3], dg = (int)q[1] - g->probe[4], db = (int)q[2] - g->probe[5];
+				if (dr * dr + dg * dg + db * db > 3 * 10 * 10)
+				{
+					const int* st = g->pstate;
+					s_plogs++;
+					eprintinfo("[PANELMISS] frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d) | draw fbo=%d sc=%d box=%d,%d,%d,%d stencil=%d func=0x%x ref=%d mask=0x%x vp=%dx%d prog=%d tex=%d glerr=0x%x phase=%d | end fbo=%d vp=%d,%d,%d,%d sc=%d glerr=0x%x | game=%d sys=%d vbl=%d world=%d freeze=%d\n",
+						g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2], g->probe[3], g->probe[4], g->probe[5],
+						st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11],
+						st[12], st[13], st[14], st[15],
+						g->endFbo, g->endVp[0], g->endVp[1], g->endVp[2], g->endVp[3], g->endSc, g->glerr,
+						g->tag[0], g->tag[1], g->tag[2], g->tag[3], g->tag[5]);
+				}
+			}
 			for (i = 1; i < n && flat; i++)
 				flat = px[i * 4] == px[0] && px[i * 4 + 1] == px[1] && px[i * 4 + 2] == px[2];
 
 			/* Black is every fade and loading gap; only a flat NON-black frame
 			 * that is exactly its own clear is the flash. */
-			if (flat && (px[0] | px[1] | px[2]) > 8 &&
+			if (s_logs < 40 && flat && (px[0] | px[1] | px[2]) > 8 &&
 			    px[0] == g->clearRGB[0] && px[1] == g->clearRGB[1] && px[2] == g->clearRGB[2])
 			{
 				s_logs++;
@@ -6477,13 +6504,15 @@ static void GreyFrame_Present(int w, int h)
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
 	if (s_pboW[slot] != w)
 	{
-		glBufferData(GL_PIXEL_PACK_BUFFER, w * 3 * 4, NULL, GL_STREAM_READ);
+		glBufferData(GL_PIXEL_PACK_BUFFER, w * 3 * 4 + 4, NULL, GL_STREAM_READ);
 		s_pboW[slot] = w;
 	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glReadPixels(0, h / 4,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)0);
 	glReadPixels(0, h / 2,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 4));
 	glReadPixels(0, h * 3 / 4, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 8));
+	if (s_gf.probe[0])
+		glReadPixels(s_gf.probe[1], s_gf.probe[2], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 12));
 
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prevPack);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
