@@ -847,9 +847,10 @@ GLuint		g_glBlitFramebuffer;
  *
  * Everything in this renderer that means "the screen" binds framebuffer 0, so
  * the whole scene is redirected simply by handing those sites GR_ScreenFBO()
- * instead. It returns 0 whenever the target is inactive, which is every mode
- * except borderless-with-a-different-resolution -- so the stock path is
- * bit-identical and a failed allocation degrades to it automatically.
+ * instead. It returns 0 whenever the target is inactive: always on the ES and
+ * ANGLE backends unless borderless picked a different resolution, never on
+ * native GL (GR_SceneAlwaysOffscreen). A failed allocation degrades to
+ * framebuffer 0 automatically.
  *
  * g_windowWidth/Height stay the RENDER size (all viewport, scissor and aspect
  * maths already key off them and need no changes); g_presentWidth/Height are
@@ -1466,6 +1467,25 @@ int GR_InitialiseGLExt()
  * present". Called after window creation, on every SDL resize, and whenever the
  * resolution is changed at runtime -- the resize event is what used to silently
  * overwrite the chosen resolution with the desktop size in borderless. */
+/* Native desktop OpenGL draws the scene into the internal target even at the
+ * window's own size, and the window's back buffer is written once per frame,
+ * by the present blit.
+ *
+ * The frame reads its own image back mid-frame -- the freeze capture, the
+ * framebuffer-feedback store, the VRAM readback -- and with the scene in the
+ * window's back buffer those were reads of the default framebuffer. On
+ * NVIDIA's OpenGL present path the screen then showed those intermediate
+ * states for a refresh or two: the fog-coloured clear before the world was
+ * drawn (the whole-screen grey flash) and the world before the overlays (the
+ * controls panel blinking out). A present-time readback proved every image
+ * handed to the swap was complete, and the same build through ANGLE's D3D11
+ * never did it. With the target, nothing but the final blit touches the
+ * window. ES and ANGLE keep their existing path. */
+static int GR_SceneAlwaysOffscreen(void)
+{
+	return g_grActiveBackend == PSYX_BACKEND_GL && !g_grIsGLES;
+}
+
 extern "C" void GR_ApplyPresentSize(int realW, int realH)
 {
 	if (realW <= 0 || realH <= 0)
@@ -1480,6 +1500,14 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 	{
 		g_windowWidth  = g_cfgRenderWidth;
 		g_windowHeight = g_cfgRenderHeight;
+
+		return;
+	}
+
+	if (GR_SceneAlwaysOffscreen() && GR_SetInternalResolution(realW, realH))
+	{
+		g_windowWidth  = realW;
+		g_windowHeight = realH;
 
 		return;
 	}
@@ -1540,6 +1568,13 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	/* Before any GL attribute that depends on the context type, and before the
 	 * window: picks GL vs ES and points ANGLE at D3D11/Vulkan if asked. */
 	GR_ResolveBackend();
+
+	/* Native GL always renders through the internal target (see
+	 * GR_SceneAlwaysOffscreen), and the present blit cannot write a
+	 * multisample window: antialiasing moves onto the target, as it already
+	 * does for a borderless render resolution. */
+	if (GR_SceneAlwaysOffscreen() && g_cfg_msaaSamples > 0)
+		s_suppressWindowMsaa = 1;
 
 	/* MSAA is not survivable on the ES backends. Confirmed by bisect:
 	 * renderer=gles renders a completely black frame with MSAA on and works
