@@ -5357,7 +5357,7 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
  * screen show a trail of Harry rather than an opaque black rectangle. */
 /* Feedback-loop gain, pushed to the pack shader every store. 0.5 is the shipped
  * steady-state value; the door out-fade wants it near identity. Console: FBDAMP. */
-extern "C" { float g_PsxFeedbackDamp = 0.5f; }
+extern "C" { float g_PsxFeedbackDamp = 0.65f; } /* loading-trail ghost strength, matched by eye to a real PS1 */
 /* Loop gain for a BLENDING reader (the per-map dream overlays). Unity: the
  * overlay's own 50/50 composite is the decay. Console FBDAMP takes it as a
  * second argument. */
@@ -5496,7 +5496,7 @@ static const char* s_fbPackShaderSrc =
 	 * with the NEAREST capture keeping it pixel-sharp. The old /31 requantize did
 	 * not match that decode and a LINEAR capture smeared every pass.
 	 *
-	 * Persistence is then set by the gain, u_feedbackDamp (FBDAMP, 0.5): each
+	 * Persistence is then set by the gain, u_feedbackDamp (FBDAMP, 0.65): each
 	 * pass keeps that fraction of the level. It is NOT unity. Real hardware shows
 	 * a faint ghost on the hands and feet only while Harry jogs in place at
 	 * normal speed -- a short-lived ghost, which only shows where the pose moves
