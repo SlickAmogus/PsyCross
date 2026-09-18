@@ -287,7 +287,8 @@ extern void			GR_RepackFrameToVramBuffers(void);
  * record which ortho pass will redraw the capture. Called for any 16bpp tpage
  * in the left 320 VRAM columns. g_cfg_dreamFeedback = 0 leaves the per-map
  * overlays switched off (the rects stay blanked, so they draw nothing). */
-extern void			GR_NoteFeedbackSamplerPrim(int semiTrans);
+extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
+extern int			g_PsxFeedbackExact;
 extern int			g_cfg_dreamFeedback;
 
 /* Widescreen feedback: how far past the 320-wide display buffer the UI ortho

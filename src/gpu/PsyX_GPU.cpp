@@ -663,6 +663,10 @@ static int s_curPrimSemiTrans = 0;
  * Cleared per primitive in ParsePrimitive. */
 static int s_curPrimIsFeedback = 0;
 
+/* Red modulation of the primitive being parsed (the loading trail alternates
+ * 127/128, and 127 is a PS1 decay frame for its copy loop). */
+static int s_curPrimR0 = 128;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
@@ -676,7 +680,7 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	if (((tpage >> 7) & 0x3) >= 2 && ((tpage & 0xF) * 64) < 320)
 	{
 		s_curPrimIsFeedback = 1;
-		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans);
+		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans, s_curPrimR0);
 	}
 
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
@@ -4073,6 +4077,7 @@ int ParsePrimitive(P_TAG* polyTag)
 	 * instead of nothing. */
 	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
 	s_curPrimIsFeedback = 0;
+	s_curPrimR0         = polyTag->pad0; /* r0 in every prim struct */
 
 	switch (primType)
 	{

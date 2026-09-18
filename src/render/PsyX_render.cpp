@@ -4195,10 +4195,25 @@ extern "C" { int g_cfg_dreamFeedback = 1; }
  * decay and its loop has to be damped or it diverges. */
 static int g_fbSamplerSemiTrans = 0;
 
-extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans)
+/* The reader's modulation this frame was below 128: a PS1 decay frame, where the
+ * copy loses one 5-bit step. The loading trail alternates 127/128 on the game's
+ * own vblank cadence; the exact pack applies the step only then. */
+static int g_fbSamplerDecay = 0;
+
+/* What the last per-present store was packed with, so a repack after a full
+ * vram[] re-upload reproduces it instead of re-deciding. */
+static int g_fbLastStoreDecay = 0;
+static int g_fbLastStoreSemi  = 0;
+
+/* 1 = opaque readers use the exact PS1 loop (see the pack shader), 0 = the old
+ * damped loop. Console FBEXACT. */
+extern "C" { int g_PsxFeedbackExact = 1; }
+
+extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour)
 {
 	g_fbSamplerUiPass    = g_PsxUIOrthoPass;
 	g_fbSamplerSemiTrans = semiTrans;
+	g_fbSamplerDecay     = (modColour < 128) ? 1 : 0;
 
 	if (g_cfg_dreamFeedback)
 		g_PsxFeedbackStoreAllowed = 2;
@@ -5473,8 +5488,34 @@ static const char* s_fbPackShaderSrc =
 	 * rather than the transparent word 0 the sampler discards, and the trail
 	 * would be a black rectangle. Word 0 stays word 0 either way. */
 	"	uniform float u_packMaskBit;\n"
+	/* EXACT loop, for an OPAQUE reader (the loading trail and door fade). PS1
+	 * copies the other display buffer solid, texel level L -> floor(L*mod/128)
+	 * with mod = 127 on the game's decay frames and 128 otherwise, so the trail
+	 * holds full brightness and loses one 5-bit step per decay frame -- long and
+	 * sharp. The damped path below cannot reproduce that: its gain shortens the
+	 * trail (0.5 kept ~3 px of a 28 px PS1 trail), and its /31 requantize does
+	 * not match the LUT's L*8 decode, so even unity lost a level EVERY frame.
+	 * Here the level is recovered exactly -- the LUT wrote L*8, the shader's
+	 * mod*2/255 moves that by under half a step -- and the PS1 decay is applied
+	 * only when the strip that drew it this frame was a decay frame. Matches the
+	 * PS1 loop to within one level (the freshest pixels start decaying a frame
+	 * early). Needs the NEAREST capture: a filtered downscale diffuses every
+	 * pass, which is the grey haze a unity loop was once blamed for. */
+	"	uniform float u_packExact;\n"
+	"	uniform float u_packDecay;\n"
 	"void main() {\n"
-	"	vec3 c = texture2D(s_texture, v_uv).rgb * u_feedbackDamp;\n"
+	"	vec3 src = texture2D(s_texture, v_uv).rgb;\n"
+	"	if (u_packExact > 0.5) {\n"
+	"		vec3 L = clamp(floor(src * 31.875 + 0.5), 0.0, 31.0);\n"
+	"		L = max(L - vec3(u_packDecay), vec3(0.0));\n"
+	"		float e16 = L.r + L.g * 32.0 + L.b * 1024.0;\n"
+	"		if (u_packMaskBit > 0.5 && e16 > 0.0) e16 += 32768.0;\n"
+	"		float ehi = floor(e16 / 256.0);\n"
+	"		float elo = e16 - ehi * 256.0;\n"
+	"		fragColor = vec4(elo / 255.0, ehi / 255.0, 0.0, 1.0);\n"
+	"		return;\n"
+	"	}\n"
+	"	vec3 c = src * u_feedbackDamp;\n"
 	/* TRUNCATE, do not round. Retail's decay does not come from the gain -- at
 	 * 127/128 over ~60 frames the frame would only reach ~0.61 -- it comes from
 	 * this requantize dropping exactly one 5-bit level per pass, 31 passes to
@@ -5551,12 +5592,19 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 
 	glUseProgram(g_fbPackShader);
 	{
-		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
-		const GLint maskLoc = glGetUniformLocation(g_fbPackShader, "u_packMaskBit");
+		const GLint dampLoc  = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
+		const GLint maskLoc  = glGetUniformLocation(g_fbPackShader, "u_packMaskBit");
+		const GLint exactLoc = glGetUniformLocation(g_fbPackShader, "u_packExact");
+		const GLint decayLoc = glGetUniformLocation(g_fbPackShader, "u_packDecay");
+		const int   exact    = (!g_fbSamplerSemiTrans && g_PsxFeedbackExact) ? 1 : 0;
 		if (dampLoc != -1)
 			glUniform1f(dampLoc, gain);
 		if (maskLoc != -1)
 			glUniform1f(maskLoc, g_fbSamplerSemiTrans ? 1.0f : 0.0f);
+		if (exactLoc != -1)
+			glUniform1f(exactLoc, exact ? 1.0f : 0.0f);
+		if (decayLoc != -1)
+			glUniform1f(decayLoc, (exact && g_fbSamplerDecay) ? 1.0f : 0.0f);
 	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
@@ -5784,11 +5832,18 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 
 		if (sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0)
 		{
+			/* NEAREST for the exact loop. The stored frame is redrawn as blocks of
+			 * one PSX pixel each, and a point sample from the centre of each block
+			 * lands back on that same block, so the round trip is lossless. A
+			 * filtered downscale mixes neighbours on every pass, and over a door
+			 * load that diffusion is a grey haze. The blending dream overlays keep
+			 * LINEAR: their loop halves every frame, so diffusion never builds. */
+			const int exact = (!g_fbSamplerSemiTrans && g_PsxFeedbackExact) ? 1 : 0;
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
 			glBlitFramebuffer((int)(sx0 + 0.5f), (int)(sy0 + 0.5f),
 			                  (int)(sx1 + 0.5f), (int)(sy1 + 0.5f),
 			                  dx0, dy0, dx1, dy1,
-			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+			                  GL_COLOR_BUFFER_BIT, exact ? GL_NEAREST : GL_LINEAR);
 		}
 	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
@@ -5849,6 +5904,8 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	GR_CaptureFrameToPackTex(g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 
 	GR_PackFrameToAllFeedbackRects();
+	g_fbLastStoreDecay = g_fbSamplerDecay;
+	g_fbLastStoreSemi  = g_fbSamplerSemiTrans;
 	GR_SceneRedirectTick();
 #endif
 }
@@ -5870,16 +5927,20 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	 * no widening, whatever the last display-buffer sampler happened to be. */
 	const int savedUiPass  = g_fbSamplerUiPass;
 	const int savedSemi    = g_fbSamplerSemiTrans;
+	const int savedExact   = g_PsxFeedbackExact;
 
 	if (w <= 0 || h <= 0)
 		return;
 
+	/* A one-shot copy, not a loop: keep the path this scene was verified on. */
 	g_fbSamplerUiPass    = 0;
 	g_fbSamplerSemiTrans = 0;
+	g_PsxFeedbackExact   = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
 	g_fbSamplerUiPass    = savedUiPass;
 	g_fbSamplerSemiTrans = savedSemi;
+	g_PsxFeedbackExact   = savedExact;
 #endif
 }
 
@@ -5902,7 +5963,20 @@ extern "C" void GR_RepackFrameToVramBuffers(void)
 	if (!g_fbPackValid)
 		return;
 
-	GR_PackFrameToAllFeedbackRects();
+	/* Restore exactly what the last store wrote, from the same capture and with
+	 * the same flags. This runs whenever a LoadImage re-uploads vram[], which a
+	 * loading screen does constantly; packing with THIS frame's decay flag would
+	 * take the trail down an extra step on every such frame. */
+	{
+		const int savedDecay = g_fbSamplerDecay;
+		const int savedSemi  = g_fbSamplerSemiTrans;
+
+		g_fbSamplerDecay     = g_fbLastStoreDecay;
+		g_fbSamplerSemiTrans = g_fbLastStoreSemi;
+		GR_PackFrameToAllFeedbackRects();
+		g_fbSamplerDecay     = savedDecay;
+		g_fbSamplerSemiTrans = savedSemi;
+	}
 }
 
 /* Legacy raw-blit scene-redirect helper, superseded by the packed path above.
