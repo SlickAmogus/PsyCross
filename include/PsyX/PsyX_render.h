@@ -290,6 +290,13 @@ extern void			GR_RepackFrameToVramBuffers(void);
 extern void			GR_NoteFeedbackSamplerPrim(int semiTrans);
 extern int			g_cfg_dreamFeedback;
 
+/* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
+ * reaches, and about which point. The effect's primitives are stretched by this
+ * and the capture is stretched with them, so the blur fills the window at any
+ * aspect instead of blurring a 4:3 box with sharp margins. 1.0 = 4:3, no-op. */
+extern float		g_PsxFeedbackWideScale;
+extern float		g_PsxFeedbackWideCenter;
+
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */

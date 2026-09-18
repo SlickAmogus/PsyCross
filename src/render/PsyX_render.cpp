@@ -4154,6 +4154,18 @@ static int   g_psxUiAreaVpValid = 0;
  * capture below knows which of the two rects to read. */
 static int   g_fbSamplerUiPass = 0;
 
+/* Widescreen feedback. The effect's primitives are 320 PSX pixels wide, so on a
+ * widened ortho they cover the 4:3 core and leave the margins sharp -- a blurred
+ * letterbox with two hard seams. Both ends are stretched instead: the capture
+ * reads the WHOLE picture rect into the same 320-wide store, and the primitives
+ * are scaled about the ortho centre to span it again. The store is a blur, so
+ * spreading its 320 columns over a wider window costs nothing that matters, and
+ * because both ends move together the loop stays exactly 1:1 -- the one thing a
+ * feedback effect cannot tolerate getting wrong. Scale is 1.0 in 4:3, where this
+ * is a no-op and the proven path is untouched. */
+extern "C" { float g_PsxFeedbackWideScale  = 1.0f; }
+extern "C" { float g_PsxFeedbackWideCenter = 160.0f; }
+
 /* A prim is sampling a display buffer this frame, so the store has work to do.
  * Called from the one place every textured prim passes through, keyed on the
  * signature of the whole effect family: a 16bpp tpage addressing the left 320
@@ -4396,7 +4408,16 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				dst[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
 
 				if (g_PsxUIOrthoPass)
+				{
 					g_psxUiAreaVpValid = 1;
+
+					/* How far past the 320-wide buffer this ortho reaches, and
+					 * about which point. Symmetric in every mode, but derived
+					 * rather than assumed. */
+					g_PsxFeedbackWideCenter = (fbOrthoL + fbOrthoR) * 0.5f;
+					g_PsxFeedbackWideScale  = (fbPsxW > 0.0f)
+					                        ? ((fbOrthoR - fbOrthoL) / fbPsxW) : 1.0f;
+				}
 				else
 					g_psxAreaVpValid = 1;
 			}
@@ -5689,6 +5710,16 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 		int dx0, dy0, dx1, dy1;
 
 		if (vw <= 0 || vh <= 0) { vx = 0; vy = 0; vw = g_windowWidth; vh = g_windowHeight; }
+
+		/* Widened ortho: the primitives are stretched to span it, so the store
+		 * has to hold the whole picture rect rather than its 4:3 core. The ortho
+		 * is fitted to the viewport, so that rect IS the viewport. */
+		if (useUi && g_PsxFeedbackWideScale > 1.001f)
+		{
+			ax0 = (float)vx;          ay0 = (float)vy;
+			ax1 = (float)(vx + vw);   ay1 = (float)(vy + vh);
+		}
+
 		if (!areaValid || ax1 <= ax0 || ay1 <= ay0)
 		{
 			ax0 = (float)vx; ay0 = (float)vy;
@@ -5715,6 +5746,20 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 			glClear(GL_COLOR_BUFFER_BIT);
 			glClearColor(cc[0], cc[1], cc[2], cc[3]);
+		}
+
+		/* [FBGEOM] one-shot companion to the strip line in MakeVertexRect: the
+		 * window rect the capture reads and the sub-rect it lands on. The two
+		 * together say whether the sliver is missing capture or short geometry. */
+		{
+			static int s_fbGeomSrcLogged = 0;
+			if (s_fbGeomSrcLogged < 2)
+			{
+				s_fbGeomSrcLogged++;
+				eprintinfo("[FBGEOM] capture src %.1f,%.1f..%.1f,%.1f of vp %d,%d %dx%d -> dst %d,%d..%d,%d of %dx%d (ui=%d wide=%.4f)\n",
+					sx0, sy0, sx1, sy1, vx, vy, vw, vh, dx0, dy0, dx1, dy1, w, h,
+					useUi, g_PsxFeedbackWideScale);
+			}
 		}
 
 		if (sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0)
@@ -5800,10 +5845,21 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	/* The scene scratch-redirect is its own consumer: the game redraws this rect
+	 * with world-pass prims at PSX coordinates, so it wants the world mapping and
+	 * no widening, whatever the last display-buffer sampler happened to be. */
+	const int savedUiPass  = g_fbSamplerUiPass;
+	const int savedSemi    = g_fbSamplerSemiTrans;
+
 	if (w <= 0 || h <= 0)
 		return;
+
+	g_fbSamplerUiPass    = 0;
+	g_fbSamplerSemiTrans = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
+	g_fbSamplerUiPass    = savedUiPass;
+	g_fbSamplerSemiTrans = savedSemi;
 #endif
 }
 

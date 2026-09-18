@@ -658,6 +658,11 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
  * for the feedback detector below. */
 static int s_curPrimSemiTrans = 0;
 
+/* Set by that detector for the primitive currently being built, so the rect
+ * builder can stretch it across a widened ortho (see g_PsxFeedbackWideScale).
+ * Cleared per primitive in ParsePrimitive. */
+static int s_curPrimIsFeedback = 0;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
@@ -669,7 +674,10 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	 * which pass will redraw the capture, and whether that reader blends. Same
 	 * test hires_override.c uses to refuse an override for these prims. */
 	if (((tpage >> 7) & 0x3) >= 2 && ((tpage & 0xF) * 64) < 320)
+	{
+		s_curPrimIsFeedback = 1;
 		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans);
+	}
 
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
 	if (hi != 0) {
@@ -1960,6 +1968,38 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	vertex[3].y = vertex[0].y;
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
+
+	/* Widescreen feedback: the effect's strips are authored 320 wide and would
+	 * otherwise blur the 4:3 core and leave the margins sharp, with a hard seam
+	 * down each side. Stretch them across the widened ortho; the capture is
+	 * stretched to match, so the loop stays 1:1. No-op at 4:3. */
+	if (s_curPrimIsFeedback && g_PsxFeedbackWideScale > 1.001f)
+	{
+		int i;
+		for (i = 0; i < 4; i++)
+		{
+			const float fx = g_PsxFeedbackWideCenter +
+			                 ((float)vertex[i].x - g_PsxFeedbackWideCenter) * g_PsxFeedbackWideScale;
+			vertex[i].x = (short)floorf(fx + 0.5f);
+		}
+	}
+
+	/* [FBGEOM] one-shot: where a feedback strip actually lands, in PSX display
+	 * coordinates, against the ortho it is drawn under. Chasing the unblurred
+	 * sliver along the bottom edge -- the strips are authored 224 tall, so if
+	 * they stop short of the ortho's bottom this line says by how much and
+	 * whether the draw-env offset or the display height is responsible. */
+	if (s_curPrimIsFeedback)
+	{
+		static int s_fbGeomLogged = 0;
+		if (s_fbGeomLogged < 2)
+		{
+			s_fbGeomLogged++;
+			eprintinfo("[FBGEOM] strip x %d..%d y %d..%d  ofs %.1f,%.1f  wide %.4f about %.1f\n",
+				(int)vertex[0].x, (int)vertex[2].x, (int)vertex[0].y, (int)vertex[2].y,
+				ofsX, ofsY, g_PsxFeedbackWideScale, g_PsxFeedbackWideCenter);
+		}
+	}
 
 	ScreenCoordsToEmulator(vertex, 4);
 }
@@ -3967,7 +4007,8 @@ int ParsePrimitive(P_TAG* polyTag)
 	 * so its texels read back as semi-transparent; the loading trail draws
 	 * opaque and needs it clear, or its black packs to an opaque black rect
 	 * instead of nothing. */
-	s_curPrimSemiTrans = (polyTag->code & 2) ? 1 : 0;
+	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
+	s_curPrimIsFeedback = 0;
 
 	switch (primType)
 	{
