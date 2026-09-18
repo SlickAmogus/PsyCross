@@ -612,15 +612,19 @@ int g_PsxSkipFramebufferStore = 0;
 extern "C" { int g_dbg_glDiag = 0; }
 void GR_DiagGLError(const char* where);
 
-/* PC port: framebuffer feedback is LOADING-SCREEN ONLY for now. The generic
- * store also drives the per-map dream/ghosting overlays (map6 otherworld,
- * cutscene ghosts, the rifle scene, ...), which were never made correct on PC
- * and corrupt (striping / ghosted subtitles). Screen_BackgroundMotionBlur — the
- * only loading/transition blur — arms this to 2 each frame it draws (a short
- * trailing window so a 1-frame gap doesn't flip it off). While it is 0,
- * GR_StoreFrameBufferPsx stamps the feedback rects BLACK (word 0 → the samplers
- * discard → draw nothing) instead of leaving a real/stale frame for those
- * overlays to ghost. Re-enable per-scene once their geometry is fixed. */
+/* PC port: how long the framebuffer-feedback store keeps running. Armed to 2 by
+ * GR_NoteFeedbackSamplerPrim whenever a prim samples a display buffer, and by
+ * Screen_BackgroundMotionBlur for the loading trail's first frame; the store
+ * decrements it each present. While it is 0, GR_StoreFrameBufferPsx stamps the
+ * feedback rects BLACK (word 0 → the samplers discard → draw nothing) rather
+ * than leaving a real or stale frame for some unrelated prim to sample.
+ *
+ * It was long pinned to the loading screen alone because the per-map dream and
+ * ghosting overlays (map6 otherworld, the Lisa scene, after Split Head) read
+ * their capture back under the UI ortho while the capture was taken through the
+ * world one, and a feedback loop turns that mismatch into striping and doubled
+ * subtitles within a few frames. Both rects are recorded now, so the capture
+ * matches whichever pass redraws it. */
 int g_PsxFeedbackStoreAllowed = 0;
 
 /* PC port: freeze-frame presentation for pause/console/message states.
@@ -4136,6 +4140,48 @@ static int g_presentVp[4] = { 0, 0, 0, 0 };
 static float g_psxAreaVp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 static int   g_psxAreaVpValid = 0;
 
+/* The same rect under the 2D UI ortho (OT2). The two passes put the PSX display
+ * buffer in DIFFERENT window rects -- the world pass carries the Hor+ widening
+ * and the g_PsxWorldVScale crop, the UI pass carries neither -- so a capture
+ * read through one and redrawn under the other is rescaled every iteration.
+ * Which one a feedback prim needs is decided by the pass it is drawn in:
+ * the loading blur draws with the world ortho, the per-map dream overlays are
+ * OT2 prims. */
+static float g_psxUiAreaVp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static int   g_psxUiAreaVpValid = 0;
+
+/* Set when a prim sampling a display buffer was drawn in the UI pass, so the
+ * capture below knows which of the two rects to read. */
+static int   g_fbSamplerUiPass = 0;
+
+/* A prim is sampling a display buffer this frame, so the store has work to do.
+ * Called from the one place every textured prim passes through, keyed on the
+ * signature of the whole effect family: a 16bpp tpage addressing the left 320
+ * VRAM columns, where the display buffers live (real 16bpp game textures sit at
+ * x >= 512 in every session log). That is also what tells the store WHICH pass
+ * will redraw the capture, so no scene has to declare itself.
+ *
+ * The count is a short trailing window rather than a bool: the store runs at
+ * the end of the frame that armed it, and one frame where the overlay happens
+ * not to draw should not blank the rect underneath a running effect. */
+extern "C" { int g_cfg_dreamFeedback = 1; }
+
+/* Does the reader BLEND the stored frame (per-map dream overlay) or replace it
+ * (loading trail)? Decides the mask bit the frame is packed with, and the loop
+ * gain: a blending reader composites 0.5*stored + 0.5*live, which is itself the
+ * decay PSX relies on, so its store runs at unity. An opaque reader has no such
+ * decay and its loop has to be damped or it diverges. */
+static int g_fbSamplerSemiTrans = 0;
+
+extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans)
+{
+	g_fbSamplerUiPass    = g_PsxUIOrthoPass;
+	g_fbSamplerSemiTrans = semiTrans;
+
+	if (g_cfg_dreamFeedback)
+		g_PsxFeedbackStoreAllowed = 2;
+}
+
 void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 {
 	if (enable)
@@ -4338,15 +4384,21 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			 * GR_StoreFrameBufferPsx. Recorded from the WORLD pass only, because
 			 * that is the ortho the blur's OT0 prims are drawn under.
 			 * GL window coords, origin bottom-left: ortho y=orthoTop is the TOP. */
-			if (!g_PsxUIOrthoPass && fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
+			if (fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
 			{
-				const float sx = (float)vpW / (fbOrthoR - fbOrthoL);
-				const float sy = (float)vpH / (fbOrthoB - fbOrthoT);
-				g_psxAreaVp[0] = (float)vpX + (0.0f    - fbOrthoL) * sx;
-				g_psxAreaVp[2] = (float)vpX + (fbPsxW  - fbOrthoL) * sx;
-				g_psxAreaVp[3] = (float)(vpY + vpH) - (0.0f   - fbOrthoT) * sy;
-				g_psxAreaVp[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
-				g_psxAreaVpValid = 1;
+				const float sx  = (float)vpW / (fbOrthoR - fbOrthoL);
+				const float sy  = (float)vpH / (fbOrthoB - fbOrthoT);
+				float*      dst = g_PsxUIOrthoPass ? g_psxUiAreaVp : g_psxAreaVp;
+
+				dst[0] = (float)vpX + (0.0f    - fbOrthoL) * sx;
+				dst[2] = (float)vpX + (fbPsxW  - fbOrthoL) * sx;
+				dst[3] = (float)(vpY + vpH) - (0.0f   - fbOrthoT) * sy;
+				dst[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
+
+				if (g_PsxUIOrthoPass)
+					g_psxUiAreaVpValid = 1;
+				else
+					g_psxAreaVpValid = 1;
 			}
 		}
 
@@ -5250,6 +5302,10 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 /* Feedback-loop gain, pushed to the pack shader every store. 0.5 is the shipped
  * steady-state value; the door out-fade wants it near identity. Console: FBDAMP. */
 extern "C" { float g_PsxFeedbackDamp = 0.5f; }
+/* Loop gain for a BLENDING reader (the per-map dream overlays). Unity: the
+ * overlay's own 50/50 composite is the decay. Console FBDAMP takes it as a
+ * second argument. */
+extern "C" { float g_PsxFeedbackDampBlend = 1.0f; }
 
 static ShaderID g_fbPackShader = (ShaderID)-1;
 static GLuint   g_fbPackVAO = 0;
@@ -5366,6 +5422,16 @@ static const char* s_fbPackShaderSrc =
 	 * it toward 1.0 without first neutralising the blur SPRT's 2x modulation is
 	 * what produced the flat mid-grey field recorded above. */
 	"	uniform float u_feedbackDamp;\n"
+	/* PSX mask bit. A 16bpp texel carries it as bit 15, and it is what decides
+	 * whether a SEMI-TRANSPARENT primitive blends that texel or draws it solid.
+	 * The per-map dream overlays are semi-transparent prims (RECT_BLEND) and
+	 * expect the stored frame to blend 50/50 with the live one; packing without
+	 * the bit made every texel read opaque, so the overlay replaced the frame
+	 * instead of ghosting over it. The loading trail is an OPAQUE prim and must
+	 * pack WITHOUT it: its black would otherwise become opaque black (0x8000)
+	 * rather than the transparent word 0 the sampler discards, and the trail
+	 * would be a black rectangle. Word 0 stays word 0 either way. */
+	"	uniform float u_packMaskBit;\n"
 	"void main() {\n"
 	"	vec3 c = texture2D(s_texture, v_uv).rgb * u_feedbackDamp;\n"
 	/* TRUNCATE, do not round. Retail's decay does not come from the gain -- at
@@ -5377,7 +5443,8 @@ static const char* s_fbPackShaderSrc =
 	"	float r5 = floor(c.r * 31.0 + 0.002);\n"
 	"	float g5 = floor(c.g * 31.0 + 0.002);\n"
 	"	float b5 = floor(c.b * 31.0 + 0.002);\n"
-	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"  /* mask bit left 0 */
+	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"
+	"	if (u_packMaskBit > 0.5 && w16 > 0.0) w16 += 32768.0;\n"
 	"	float hi  = floor(w16 / 256.0);\n"
 	"	float lo  = w16 - hi * 256.0;\n"
 	"	fragColor = vec4(lo / 255.0, hi / 255.0, 0.0, 1.0);\n"
@@ -5444,8 +5511,11 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 	glUseProgram(g_fbPackShader);
 	{
 		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
+		const GLint maskLoc = glGetUniformLocation(g_fbPackShader, "u_packMaskBit");
 		if (dampLoc != -1)
 			glUniform1f(dampLoc, gain);
+		if (maskLoc != -1)
+			glUniform1f(maskLoc, g_fbSamplerSemiTrans ? 1.0f : 0.0f);
 	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
@@ -5469,7 +5539,13 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 
 static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 {
-	GR_PackFrameToVramRectGain(x, y, w, h, g_PsxFeedbackDamp);
+	/* Unity for a blending reader: the 50/50 composite it performs IS the decay,
+	 * exactly as on hardware, where the draw buffer is cleared every frame and
+	 * the overlay sums to a total weight of 1. Damping that loop as well only
+	 * darkens the scene. g_PsxFeedbackDamp stays for the opaque loading trail,
+	 * which has no such decay of its own. */
+	GR_PackFrameToVramRectGain(x, y, w, h,
+		g_fbSamplerSemiTrans ? g_PsxFeedbackDampBlend : g_PsxFeedbackDamp);
 }
 
 /* Pack the captured frame into every rect the game may read back: both PSX
@@ -5598,15 +5674,22 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 	 * armed). Rows the ortho crops are left black: the frame simply has no pixels
 	 * there, and leaving them black keeps the redraw scale-exact. */
 	{
-		float ax0 = g_psxAreaVp[0], ay0 = g_psxAreaVp[1];
-		float ax1 = g_psxAreaVp[2], ay1 = g_psxAreaVp[3];
+		/* Read through the ortho of the pass that will REDRAW this capture. The
+		 * per-map dream overlays are OT2 prims and the loading blur is not, and
+		 * the two passes map the display buffer to different window rects. */
+		const int useUi = (g_fbSamplerUiPass && g_psxUiAreaVpValid);
+		const float* area = useUi ? g_psxUiAreaVp : g_psxAreaVp;
+		const int areaValid = useUi ? g_psxUiAreaVpValid : g_psxAreaVpValid;
+
+		float ax0 = area[0], ay0 = area[1];
+		float ax1 = area[2], ay1 = area[3];
 		int vx = g_presentVp[0], vy = g_presentVp[1];
 		int vw = g_presentVp[2], vh = g_presentVp[3];
 		float sx0, sy0, sx1, sy1;
 		int dx0, dy0, dx1, dy1;
 
 		if (vw <= 0 || vh <= 0) { vx = 0; vy = 0; vw = g_windowWidth; vh = g_windowHeight; }
-		if (!g_psxAreaVpValid || ax1 <= ax0 || ay1 <= ay0)
+		if (!areaValid || ax1 <= ax0 || ay1 <= ay0)
 		{
 			ax0 = (float)vx; ay0 = (float)vy;
 			ax1 = (float)(vx + vw); ay1 = (float)(vy + vh);

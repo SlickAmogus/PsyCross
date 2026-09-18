@@ -283,6 +283,13 @@ extern void			GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int
 extern void			GR_StoreFrameBufferPsx(void);
 extern void			GR_RepackFrameToVramBuffers(void);
 
+/* A prim sampling a display buffer was just drawn: keep the store running and
+ * record which ortho pass will redraw the capture. Called for any 16bpp tpage
+ * in the left 320 VRAM columns. g_cfg_dreamFeedback = 0 leaves the per-map
+ * overlays switched off (the rects stay blanked, so they draw nothing). */
+extern void			GR_NoteFeedbackSamplerPrim(int semiTrans);
+extern int			g_cfg_dreamFeedback;
+
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */

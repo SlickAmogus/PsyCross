@@ -654,9 +654,23 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
  * UVs restart at each tpage — without it every chunk showed the image
  * from x=0). On a miss the DR_PSYX_TEX packet state is restored, so that
  * path keeps its original semantics. */
+/* Semi-transparency flag of the primitive being parsed; set by ParsePrimitive
+ * for the feedback detector below. */
+static int s_curPrimSemiTrans = 0;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
+
+	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
+	 * addressing the left 320 VRAM columns is the display-buffer band, which is
+	 * the whole effect family's signature and nothing else's -- real 16bpp game
+	 * textures live at x >= 512. The store then knows it has a reader this frame,
+	 * which pass will redraw the capture, and whether that reader blends. Same
+	 * test hires_override.c uses to refuse an override for these prims. */
+	if (((tpage >> 7) & 0x3) >= 2 && ((tpage & 0xF) * 64) < 320)
+		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans);
+
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
 	if (hi != 0) {
 		overrideTexture        = (TextureID)hi;
@@ -3946,6 +3960,14 @@ int ParsePrimitive(P_TAG* polyTag)
 	const int primType = polyTag->code & 0xF0;
 
 	int primLength = 0;
+
+	/* For the framebuffer-feedback detector in ApplyHiresOverride, which sees
+	 * the tpage but not the primitive. A feedback overlay that blends (the
+	 * per-map dream shots) needs the stored frame packed with the mask bit set
+	 * so its texels read back as semi-transparent; the loading trail draws
+	 * opaque and needs it clear, or its black packs to an opaque black rect
+	 * instead of nothing. */
+	s_curPrimSemiTrans = (polyTag->code & 2) ? 1 : 0;
 
 	switch (primType)
 	{
