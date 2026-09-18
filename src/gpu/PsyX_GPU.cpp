@@ -2204,9 +2204,23 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 {
 	assert(uv);
 
-	// sim overflow
-	if (int(uv[0]) + w > 255) w = 255 - uv[0];
-	if (int(uv[1]) + h > 255) h = 255 - uv[1];
+	/* A sprite whose far edge lands EXACTLY on the page edge (u+w or v+h == 256)
+	 * is not an overflow: its last texel is 255, and PSX reads 0..255 exactly.
+	 * Only the edge coordinate, one past the last texel, fails to fit in the u8
+	 * vertex field. Clamping w/h to 255-uv there kept the full screen size but
+	 * sampled one texel fewer, stretching the sprite by a texel -- and a
+	 * framebuffer-feedback strip (256 wide from u=0; 224 tall from v=32 on
+	 * buffer 0) then rescales the stored frame on EVERY pass: the smear and the
+	 * lost bottom line on the dream blur, the sideways stretch on the loading
+	 * trail. Store 255 and carry the missing texel in the per-vertex texcoord
+	 * offset instead (a_extra.xy * 0.5 in the vertex shader, so 2 = +1 texel).
+	 * Genuine overflows past 256 keep the old clamp. */
+	int extendU = 0, extendV = 0;
+
+	if (int(uv[0]) + w == 256)     { w = 255 - uv[0]; extendU = 1; }
+	else if (int(uv[0]) + w > 255) { w = 255 - uv[0]; }
+	if (int(uv[1]) + h == 256)     { h = 255 - uv[1]; extendV = 1; }
+	else if (int(uv[1]) + h > 255) { h = 255 - uv[1]; }
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
@@ -2240,6 +2254,19 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	vertex[3].dither = dither;
 	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
+
+	/* Vertex order matches MakeVertexRect: 0 top-left, 1 bottom-left,
+	 * 2 bottom-right, 3 top-right. */
+	if (extendU)
+	{
+		vertex[2].tcx = 2;
+		vertex[3].tcx = 2;
+	}
+	if (extendV)
+	{
+		vertex[1].tcy = 2;
+		vertex[2].tcy = 2;
+	}
 
 	/* An upstream half-texel UV nudge used to sit here, applied to every RECT
 	 * whenever filtering was enabled: tcx/tcy reach the vertex shader as
