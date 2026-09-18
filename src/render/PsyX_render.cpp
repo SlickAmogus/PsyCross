@@ -1624,6 +1624,17 @@ void GR_Shutdown()
 void GR_UpdateSwapIntervalState(int swapInterval)
 {
 #if defined(RENDERER_OGL)
+	/* Only on a change. This runs every frame from PsyX_BeginScene, and SDL
+	 * hands every call straight to wglSwapIntervalEXT / eglSwapInterval, which
+	 * on NVIDIA's DXGI-layered OpenGL present reconfigures presentation even
+	 * for the same value. GR_ResetDevice drops it to 0 and the next frame puts
+	 * it back, so a device reset still re-applies it. */
+	static int s_applied = -1000;
+
+	if (swapInterval == s_applied)
+		return;
+	s_applied = swapInterval;
+
 	if (PsyX_Angle_Active())
 		PsyX_Angle_SetSwapInterval(swapInterval);
 	else
@@ -6465,6 +6476,20 @@ static void GreyFrame_Present(int w, int h)
 			if (g->probe[0] && s_plogs < 40)
 			{
 				const unsigned char* q = px + n * 4;
+
+				/* One line proving the check is live, so a session with no
+				 * misses reads as "every frame had the panel", not "the probe
+				 * never ran". */
+				{
+					static int s_live = 0;
+					if (!s_live)
+					{
+						s_live = 1;
+						eprintinfo("[PANELMISS] check live: frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d)\n",
+							g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2],
+							g->probe[3], g->probe[4], g->probe[5]);
+					}
+				}
 				const int dr = (int)q[0] - g->probe[3], dg = (int)q[1] - g->probe[4], db = (int)q[2] - g->probe[5];
 				if (dr * dr + dg * dg + db * db > 3 * 10 * 10)
 				{
