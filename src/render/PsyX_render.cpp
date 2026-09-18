@@ -1,11 +1,13 @@
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 #include <map>
 #include <vector>
 #include <algorithm>
-#include <windows.h>
-#endif
+#include <utility>
 
 #include "PsyX/PsyX_public.h"
 
