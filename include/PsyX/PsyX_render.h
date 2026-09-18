@@ -297,6 +297,15 @@ extern int			g_cfg_dreamFeedback;
 extern float		g_PsxFeedbackWideScale;
 extern float		g_PsxFeedbackWideCenter;
 
+/* The WORLD pass's ortho (L, R, T, B, display coordinates) and the display size
+ * it was built for. Full-frame flat fills drawn in OT0 are remapped onto it so
+ * they cover the picture instead of a cropped 4:3 box. g_PsxUIOrthoPass tells
+ * the prim builder which pass it is in. */
+extern float		g_PsxWorldOrtho[4];
+extern float		g_PsxWorldDisp[2];
+extern int			g_PsxWorldOrthoValid;
+extern int			g_PsxUIOrthoPass;
+
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map
  * TIM-protect helper to defeat any unfound framebuffer→GPU-texture path. */

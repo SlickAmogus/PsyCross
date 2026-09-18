@@ -1989,13 +1989,17 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	 * sliver along the bottom edge -- the strips are authored 224 tall, so if
 	 * they stop short of the ortho's bottom this line says by how much and
 	 * whether the draw-env offset or the display height is responsible. */
+	/* One line per ortho pass, so the loading screen (world pass) cannot use up
+	 * the budget before an in-scene overlay (UI pass) is ever drawn. */
 	if (s_curPrimIsFeedback)
 	{
-		static int s_fbGeomLogged = 0;
-		if (s_fbGeomLogged < 2)
+		static int s_fbGeomLogged[2] = { 0, 0 };
+		const int  pass = g_PsxUIOrthoPass ? 1 : 0;
+		if (!s_fbGeomLogged[pass])
 		{
-			s_fbGeomLogged++;
-			eprintinfo("[FBGEOM] strip x %d..%d y %d..%d  ofs %.1f,%.1f  wide %.4f about %.1f\n",
+			s_fbGeomLogged[pass] = 1;
+			eprintinfo("[FBGEOM] %s strip x %d..%d y %d..%d  ofs %.1f,%.1f  wide %.4f about %.1f\n",
+				pass ? "ui" : "world",
 				(int)vertex[0].x, (int)vertex[2].x, (int)vertex[0].y, (int)vertex[2].y,
 				ofsX, ofsY, g_PsxFeedbackWideScale, g_PsxFeedbackWideCenter);
 		}
@@ -2004,6 +2008,59 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
+
+/* A flat fill authored to cover the whole PSX frame -- a scene tint, a flash --
+ * drawn in the WORLD pass. That pass's ortho is widened for Hor+ and cropped
+ * vertically by g_PsxWorldVScale, both of which exist for 3D geometry, so the
+ * fill came out as a 4:3 box that stopped short of the bottom: the blue wash in
+ * the carousel's Flauros scene (map6_s04 func_800E74C4, a 320x224 TILE in OT0).
+ * Remap it onto the world ortho's own extent, which is exactly the picture.
+ *
+ * Untextured only, and only a rect that covers the entire display: a flat
+ * colour has no aspect to distort, whereas a full-frame TEXTURED sprite may be a
+ * picture authored for 4:3 and must not be stretched. Identity in 4:3, in the UI
+ * pass (whose ortho is already the picture) and on 2D screens. */
+static inline void StretchFullFrameFillToWorldOrtho(GrVertex* v)
+{
+	float x0, x1, y0, y1;
+	float L, R, T, B, W, H;
+	int   i;
+
+	if (g_PsxUIOrthoPass || !g_PsxWorldOrthoValid)
+		return;
+
+	L = g_PsxWorldOrtho[0]; R = g_PsxWorldOrtho[1];
+	T = g_PsxWorldOrtho[2]; B = g_PsxWorldOrtho[3];
+	W = g_PsxWorldDisp[0];  H = g_PsxWorldDisp[1];
+
+	if (W <= 0.0f || H <= 0.0f || R <= L || B <= T)
+		return;
+	if (fabsf(L) < 0.01f && fabsf(R - W) < 0.01f && fabsf(T) < 0.01f && fabsf(B - H) < 0.01f)
+		return;
+
+	x0 = x1 = (float)v[0].x;
+	y0 = y1 = (float)v[0].y;
+	for (i = 1; i < 4; i++)
+	{
+		if (v[i].x < x0) x0 = (float)v[i].x;
+		if (v[i].x > x1) x1 = (float)v[i].x;
+		if (v[i].y < y0) y0 = (float)v[i].y;
+		if (v[i].y > y1) y1 = (float)v[i].y;
+	}
+
+	if (!(x0 <= 0.0f && x1 >= W && y0 <= 0.0f && y1 >= H))
+		return;
+
+	/* Round OUTWARD: the ortho edges are fractional (-57.4 at 16:9), and rounding
+	 * a corner inward leaves a column of unfilled pixels down the frame edge. */
+	for (i = 0; i < 4; i++)
+	{
+		const float fx = L + (float)v[i].x * (R - L) / W;
+		const float fy = T + (float)v[i].y * (B - T) / H;
+		v[i].x = (short)(((float)v[i].x <= x0) ? floorf(fx) : ceilf(fx));
+		v[i].y = (short)(((float)v[i].y <= y0) ? floorf(fy) : ceilf(fy));
+	}
+}
 
 /* Stamp the polygon's UV bounding box on every vertex (see GrVertex.ulo). */
 static inline void SetUvLimits(GrVertex* vertex, int count)
@@ -3688,6 +3745,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+		StretchFullFrameFillToWorldOrtho(firstVertex);
 		MakeTexcoordQuadZero(firstVertex, 0);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 

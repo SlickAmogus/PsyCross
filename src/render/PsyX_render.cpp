@@ -4166,6 +4166,16 @@ static int   g_fbSamplerUiPass = 0;
 extern "C" { float g_PsxFeedbackWideScale  = 1.0f; }
 extern "C" { float g_PsxFeedbackWideCenter = 160.0f; }
 
+/* The WORLD pass's ortho in display coordinates (L, R, T, B) and the display
+ * size it was built for. A flat fill authored to cover the whole 320x224 frame
+ * (a scene tint, a flash) is drawn in OT0, so it inherits the Hor+ widening and
+ * the g_PsxWorldVScale crop that exist for 3D geometry, and comes out as a 4:3
+ * box that stops short of the bottom. The rect builder remaps such prims onto
+ * this rect, which is exactly the picture. Valid once a world pass has run. */
+extern "C" { float g_PsxWorldOrtho[4]  = { 0.0f, 320.0f, 0.0f, 224.0f }; }
+extern "C" { float g_PsxWorldDisp[2]   = { 320.0f, 224.0f }; }
+extern "C" { int   g_PsxWorldOrthoValid = 0; }
+
 /* A prim is sampling a display buffer this frame, so the store has work to do.
  * Called from the one place every textured prim passes through, keyed on the
  * signature of the whole effect family: a 16bpp tpage addressing the left 320
@@ -4419,7 +4429,17 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 					                        ? ((fbOrthoR - fbOrthoL) / fbPsxW) : 1.0f;
 				}
 				else
+				{
 					g_psxAreaVpValid = 1;
+
+					g_PsxWorldOrtho[0]   = fbOrthoL;
+					g_PsxWorldOrtho[1]   = fbOrthoR;
+					g_PsxWorldOrtho[2]   = fbOrthoT;
+					g_PsxWorldOrtho[3]   = fbOrthoB;
+					g_PsxWorldDisp[0]    = fbPsxW;
+					g_PsxWorldDisp[1]    = fbPsxH;
+					g_PsxWorldOrthoValid = 1;
+				}
 			}
 		}
 
@@ -5752,10 +5772,10 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 		 * window rect the capture reads and the sub-rect it lands on. The two
 		 * together say whether the sliver is missing capture or short geometry. */
 		{
-			static int s_fbGeomSrcLogged = 0;
-			if (s_fbGeomSrcLogged < 2)
+			static int s_fbGeomSrcLogged[2] = { 0, 0 };
+			if (!s_fbGeomSrcLogged[useUi ? 1 : 0])
 			{
-				s_fbGeomSrcLogged++;
+				s_fbGeomSrcLogged[useUi ? 1 : 0] = 1;
 				eprintinfo("[FBGEOM] capture src %.1f,%.1f..%.1f,%.1f of vp %d,%d %dx%d -> dst %d,%d..%d,%d of %dx%d (ui=%d wide=%.4f)\n",
 					sx0, sy0, sx1, sy1, vx, vy, vw, vh, dx0, dy0, dx1, dy1, w, h,
 					useUi, g_PsxFeedbackWideScale);
