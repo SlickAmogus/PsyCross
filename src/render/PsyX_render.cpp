@@ -5488,25 +5488,29 @@ static const char* s_fbPackShaderSrc =
 	 * rather than the transparent word 0 the sampler discards, and the trail
 	 * would be a black rectangle. Word 0 stays word 0 either way. */
 	"	uniform float u_packMaskBit;\n"
-	/* EXACT loop, for an OPAQUE reader (the loading trail and door fade). PS1
-	 * copies the other display buffer solid, texel level L -> floor(L*mod/128)
-	 * with mod = 127 on the game's decay frames and 128 otherwise, so the trail
-	 * holds full brightness and loses one 5-bit step per decay frame -- long and
-	 * sharp. The damped path below cannot reproduce that: its gain shortens the
-	 * trail (0.5 kept ~3 px of a 28 px PS1 trail), and its /31 requantize does
-	 * not match the LUT's L*8 decode, so even unity lost a level EVERY frame.
-	 * Here the level is recovered exactly -- the LUT wrote L*8, the shader's
-	 * mod*2/255 moves that by under half a step -- and the PS1 decay is applied
-	 * only when the strip that drew it this frame was a decay frame. Matches the
-	 * PS1 loop to within one level (the freshest pixels start decaying a frame
-	 * early). Needs the NEAREST capture: a filtered downscale diffuses every
-	 * pass, which is the grey haze a unity loop was once blamed for. */
+	/* EXACT loop, for an OPAQUE reader (the loading trail and door fade).
+	 *
+	 * The level each pixel was stored at is recovered exactly -- the LUT decodes
+	 * a level as L*8, and the shader's mod*2/255 modulation moves that by under
+	 * half a step -- so the round trip through the 320x224 store is lossless,
+	 * with the NEAREST capture keeping it pixel-sharp. The old /31 requantize did
+	 * not match that decode and a LINEAR capture smeared every pass.
+	 *
+	 * Persistence is then set by the gain, u_feedbackDamp (FBDAMP, 0.5): each
+	 * pass keeps that fraction of the level. It is NOT unity. Real hardware shows
+	 * a faint ghost on the hands and feet only while Harry jogs in place at
+	 * normal speed -- a short-lived ghost, which only shows where the pose moves
+	 * most. A unity copy with the 127/128 one-step fade keeps every limb position
+	 * for about a second and smears the whole body sideways; that was tried and
+	 * rejected against a real PS1. The one-step fade on the game's 127 frames
+	 * still applies on top. */
 	"	uniform float u_packExact;\n"
 	"	uniform float u_packDecay;\n"
 	"void main() {\n"
 	"	vec3 src = texture2D(s_texture, v_uv).rgb;\n"
 	"	if (u_packExact > 0.5) {\n"
 	"		vec3 L = clamp(floor(src * 31.875 + 0.5), 0.0, 31.0);\n"
+	"		L = floor(L * u_feedbackDamp + 0.001);\n"
 	"		L = max(L - vec3(u_packDecay), vec3(0.0));\n"
 	"		float e16 = L.r + L.g * 32.0 + L.b * 1024.0;\n"
 	"		if (u_packMaskBit > 0.5 && e16 > 0.0) e16 += 32768.0;\n"
