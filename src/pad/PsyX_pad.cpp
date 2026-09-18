@@ -250,7 +250,7 @@ static void PsyX_Pad_ProbeRawInput(int slot, SDL_GameController* gc)
 	SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
 	int           nb, na, nh, k;
 
-	if (!js || s_logs >= 40)
+	if (!js || s_logs >= 16)
 		return;
 
 	nb = SDL_JoystickNumButtons(js); if (nb > 32) nb = 32;
@@ -260,7 +260,7 @@ static void PsyX_Pad_ProbeRawInput(int slot, SDL_GameController* gc)
 	for (k = 0; k < nb; k++)
 	{
 		const Uint8 v = SDL_JoystickGetButton(js, k);
-		if (s_init[slot] && v != s_btn[slot][k] && s_logs < 40)
+		if (s_init[slot] && v != s_btn[slot][k] && s_logs < 16)
 		{
 			s_logs++;
 			eprintinfo("[PADPROBE] slot %d raw button %d = %d\n", slot, k, (int)v);
@@ -270,7 +270,7 @@ static void PsyX_Pad_ProbeRawInput(int slot, SDL_GameController* gc)
 	for (k = 0; k < na; k++)
 	{
 		const Sint16 v = SDL_JoystickGetAxis(js, k);
-		if (s_init[slot] && abs((int)v - (int)s_axis[slot][k]) > 12000 && s_logs < 40)
+		if (s_init[slot] && abs((int)v - (int)s_axis[slot][k]) > 12000 && s_logs < 16)
 		{
 			s_logs++;
 			eprintinfo("[PADPROBE] slot %d raw axis %d = %d\n", slot, k, (int)v);
@@ -281,7 +281,7 @@ static void PsyX_Pad_ProbeRawInput(int slot, SDL_GameController* gc)
 	for (k = 0; k < nh; k++)
 	{
 		const Uint8 v = SDL_JoystickGetHat(js, k);
-		if (s_init[slot] && v != s_hat[slot][k] && s_logs < 40)
+		if (s_init[slot] && v != s_hat[slot][k] && s_logs < 16)
 		{
 			s_logs++;
 			eprintinfo("[PADPROBE] slot %d raw hat %d = 0x%x\n", slot, k, (unsigned)v);
