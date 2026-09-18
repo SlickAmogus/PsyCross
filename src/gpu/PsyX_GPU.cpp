@@ -1972,8 +1972,14 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	/* Widescreen feedback: the effect's strips are authored 320 wide and would
 	 * otherwise blur the 4:3 core and leave the margins sharp, with a hard seam
 	 * down each side. Stretch them across the widened ortho; the capture is
-	 * stretched to match, so the loop stays 1:1. No-op at 4:3. */
-	if (s_curPrimIsFeedback && g_PsxFeedbackWideScale > 1.001f)
+	 * stretched to match, so the loop stays 1:1. No-op at 4:3.
+	 *
+	 * UI pass only. The scale is the UI ortho's, and the capture widens only for
+	 * a UI-pass reader. The loading trail draws in the WORLD pass and also runs
+	 * at room transitions, where the UI ortho is widened: stretching its strips
+	 * over an unstretched capture rescales the loop every frame, which is the
+	 * vertical-streak class this store has hit before. */
+	if (s_curPrimIsFeedback && g_PsxUIOrthoPass && g_PsxFeedbackWideScale > 1.001f)
 	{
 		int i;
 		for (i = 0; i < 4; i++)
