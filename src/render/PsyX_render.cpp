@@ -4209,6 +4209,10 @@ static int g_fbLastStoreSemi  = 0;
  * damped loop. Console FBEXACT. */
 extern "C" { int g_PsxFeedbackExact = 1; }
 
+/* Set by a scene that steps slower than the present rate (the loading screen)
+ * on each frame between its steps: that present takes no feedback pass. */
+extern "C" { int g_PsxFeedbackHoldFrame = 0; }
+
 extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour)
 {
 	g_fbSamplerUiPass    = g_PsxUIOrthoPass;
@@ -5881,6 +5885,11 @@ static void GR_SceneRedirectTick(void)
 extern "C" void GR_StoreFrameBufferPsx(void)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	/* Consumed here, before any early return, so a hold set on a frame the
+	 * store stands down for cannot leak into the next frame. */
+	const int holdFrame = g_PsxFeedbackHoldFrame;
+	g_PsxFeedbackHoldFrame = 0;
+
 	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
 		return;
 
@@ -5904,6 +5913,17 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 		return;
 	}
 	g_PsxFeedbackStoreAllowed--;
+
+	/* A HOLD frame: the scene is between two of its own steps and must not take
+	 * a loop pass, or the ghost keeps fading at the present rate instead of the
+	 * scene's. The rects keep the last store, which is what the scene redraws;
+	 * a vram[] re-upload in the meantime still repacks it (GR_RepackFrameTo-
+	 * VramBuffers does not look at this flag). */
+	if (holdFrame)
+	{
+		GR_SceneRedirectTick();
+		return;
+	}
 
 	GR_CaptureFrameToPackTex(g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 
