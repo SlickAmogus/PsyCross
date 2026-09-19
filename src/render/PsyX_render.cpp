@@ -6108,15 +6108,40 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
 	if (g_PsxScratchDbgFrames > 0)
 	{
-		unsigned char rg[2] = { 0, 0 };
-		GLint         prevRead = 0;
-		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glVRAMFramebuffer);
-		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
-		glReadPixels(x + w / 2, y + h / 2, 1, 1, GL_RG, GL_UNSIGNED_BYTE, rg);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
-		eprintinfo("[SCRATCHDBG]   packed (%d,%d %dx%d) centre word=0x%04X packValid=%d vram=%u\n",
-			x, y, w, h, (unsigned)(rg[0] | (rg[1] << 8)), g_fbPackValid, (unsigned)g_vramTexture);
+		/* Whole-rect counts: one centre sample landed on the black doorway. */
+		const int      n   = w * h;
+		unsigned char* buf = (unsigned char*)malloc((size_t)n * 4);
+		GLint          prevRead = 0;
+		int            i, nzPack = 0, nzVram = 0, stp = 0;
+		unsigned       maxc = 0;
+
+		if (buf != NULL)
+		{
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbPackFBO);
+			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+			for (i = 0; i < n; i++)
+			{
+				const unsigned c = (unsigned)buf[i * 4] + buf[i * 4 + 1] + buf[i * 4 + 2];
+				if (c > 0) nzPack++;
+				if (c > maxc) maxc = c;
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glVRAMFramebuffer);
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+			glReadPixels(x, y, w, h, GL_RG, GL_UNSIGNED_BYTE, buf);
+			for (i = 0; i < n; i++)
+			{
+				const unsigned wd = (unsigned)buf[i * 2] | ((unsigned)buf[i * 2 + 1] << 8);
+				if (wd) nzVram++;
+				if (wd & 0x8000) stp++;
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+			free(buf);
+		}
+		eprintinfo("[SCRATCHDBG]   packed (%d,%d %dx%d): capture nonzero=%d/%d maxRGBsum=%u | vram nonzero=%d stp=%d | area=%.0f,%.0f..%.0f,%.0f valid=%d vp=%d,%d %dx%d msaa=%d\n",
+			x, y, w, h, nzPack, n, maxc, nzVram, stp,
+			g_psxAreaVp[0], g_psxAreaVp[1], g_psxAreaVp[2], g_psxAreaVp[3], g_psxAreaVpValid,
+			g_presentVp[0], g_presentVp[1], g_presentVp[2], g_presentVp[3], g_cfg_msaaSamples);
 	}
 	g_fbSamplerUiPass    = savedUiPass;
 	g_fbSamplerSemiTrans = savedSemi;
