@@ -894,11 +894,28 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 {
 	if (s_internalSamples > 0 && s_resolveFBO != 0)
 	{
+		/* The resolve must leave the caller's DRAW binding alone. Callers
+		 * bind their destination first and then ask for this as the source
+		 * (the freeze capture binds its FBO, then reads the scene), and a
+		 * mid-frame read is followed by more scene drawing. Left pointing at
+		 * the mirror, the capture blitted the mirror onto itself -- the frozen
+		 * frame stayed black -- and everything drawn after a read landed in
+		 * the mirror and was resolved over at present: black pickup and save
+		 * prompts with MSAA on native GL. Scissor would clip the resolve. */
+		GLint           prevDraw = 0;
+		const GLboolean scissor  = glIsEnabled(GL_SCISSOR_TEST);
+
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+		if (scissor)
+			glDisable(GL_SCISSOR_TEST);
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
 		                  0, 0, s_internalW, s_internalH,
 		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
+		if (scissor)
+			glEnable(GL_SCISSOR_TEST);
 		return s_resolveFBO;
 	}
 
