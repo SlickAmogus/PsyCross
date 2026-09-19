@@ -667,6 +667,7 @@ static int s_curPrimIsFeedback = 0;
  * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
 static int s_curPrimIsScratch = 0;
 extern "C" int GR_SceneFbRedirectCovers(int x, int y);
+extern "C" float g_PsxFeedbackDampBlend;
 
 /* Red modulation of the primitive being parsed (the loading trail alternates
  * 127/128, and 127 is a PS1 decay frame for its copy loop). */
@@ -2807,6 +2808,8 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
 
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
+	if (s_curPrimIsScratch && !semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+		blendMode = BM_CONSTANT_ALPHA;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
 
@@ -3839,6 +3842,31 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 			MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
 			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
 			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+
+			/* dream_blur_strength: every soft-focus layer lerps from what is
+			 * under it toward its hardware result, so 1.0 is the PS1 image and 0
+			 * the plain scene, at unchanged brightness. The average layers scale
+			 * their 0.5 weight, the additive layer its colour, and the opaque
+			 * base layer is BM_CONSTANT_ALPHA (AddSplit). */
+			if (s_curPrimIsScratch && semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+			{
+				const float s = g_PsxFeedbackDampBlend;
+				const bool  avg = GET_TPAGE_BLEND(activeDrawEnv.tpage) == BM_AVERAGE;
+				int i;
+				for (i = 0; i < 4; i++)
+				{
+					if (avg)
+					{
+						firstVertex[i].a = (unsigned char)(firstVertex[i].a * s + 0.5f);
+					}
+					else
+					{
+						firstVertex[i].r = (unsigned char)(firstVertex[i].r * s + 0.5f);
+						firstVertex[i].g = (unsigned char)(firstVertex[i].g * s + 0.5f);
+						firstVertex[i].b = (unsigned char)(firstVertex[i].b * s + 0.5f);
+					}
+				}
+			}
 
 			TriangulateQuad();
 

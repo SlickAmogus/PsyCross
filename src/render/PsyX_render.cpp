@@ -6869,6 +6869,11 @@ void GR_SetBlendMode(BlendMode blendMode)
 		return;
 
 #if USE_OPENGL
+	/* BM_ADD_QUATER_SOURCE reads the constant set when blending is enabled,
+	 * which a direct switch out of BM_CONSTANT_ALPHA never passes through. */
+	if (g_PreviousBlendMode == BM_CONSTANT_ALPHA)
+		glBlendColor(0.25f, 0.25f, 0.25f, 0.5f);
+
 	/* Fog mode for this blend: additive/subtractive prims (blood, muzzle flash) must fade
 	 * toward black under fog, not blend toward the light fog color (which whitened their
 	 * edges/faded pixels in daytime). Push now — the fog shader is the bound program here —
@@ -6915,7 +6920,13 @@ void GR_SetBlendMode(BlendMode blendMode)
 		glBlendFunc(GL_ONE, GL_ONE);
 		break;
 	case BM_ADD_QUATER_SOURCE:
-		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE); 
+		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE);
+		break;
+	case BM_CONSTANT_ALPHA:
+		glBlendColor(0.25f, 0.25f, 0.25f, g_PsxFeedbackDampBlend);
+		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+		break;
+	default:
 		break;
 	}
 #endif

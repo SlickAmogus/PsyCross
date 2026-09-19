@@ -232,7 +232,10 @@ typedef enum
 	BM_AVERAGE,
 	BM_ADD,
 	BM_SUBTRACT,
-	BM_ADD_QUATER_SOURCE
+	BM_ADD_QUATER_SOURCE,
+	/* PC only: an opaque prim faded in at dream_blur_strength (the scene-scratch
+	 * soft focus base layer). */
+	BM_CONSTANT_ALPHA
 } BlendMode;
 
 typedef enum
