@@ -6087,9 +6087,18 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	if (w <= 0 || h <= 0)
 		return;
 
-	/* A one-shot copy, not a loop: keep the path this scene was verified on. */
+	/* A one-shot copy, not a loop: unity gain, filtered.
+	 *
+	 * Packed WITH the mask bit. These scenes render into the rect under
+	 * DR_STP(1) (queued at the far bucket, ahead of the whole scene -- see
+	 * map3_s02_2.c / map4_s04_2.c), so on PS1 every texel the strips read
+	 * carries STP, and that bit is what lets their semi-transparent layers
+	 * blend: 50/50 on the average strips, where a clear bit draws the texel
+	 * solid. PC strips the DR_STP packets, so the capture has to set it. Left
+	 * clear, the two average layers stamped solid over each other and the
+	 * four-tap soft focus came out as one offset, darkened copy. */
 	g_fbSamplerUiPass    = 0;
-	g_fbSamplerSemiTrans = 0;
+	g_fbSamplerSemiTrans = 1;
 	g_PsxFeedbackExact   = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
