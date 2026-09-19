@@ -5438,6 +5438,8 @@ void GR_PresentLastFrame(void)
 static RECT16 g_sceneFbRedirect = { 0, 0, 0, 0 };
 static int    g_sceneFbRedirectTtl = 0;
 static int    s_sceneFbRedirectArms = 0;
+/* [SCRATCHDBG] presents left to report after an arm (see DrawAllSplits). */
+extern "C" { int g_PsxScratchDbgFrames = 0; }
 
 extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 {
@@ -5457,6 +5459,8 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 	{
 		s_sceneFbRedirectArms++;
 		eprintinfo("[FBSCRATCH] redirect ARMED (%d,%d %dx%d) - feedback blit live\n", x, y, w, h);
+		if (s_sceneFbRedirectArms <= 2)
+			g_PsxScratchDbgFrames = 3;
 	}
 
 	g_sceneFbRedirectTtl = 3;
@@ -6102,6 +6106,18 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	g_PsxFeedbackExact   = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
+	if (g_PsxScratchDbgFrames > 0)
+	{
+		unsigned char rg[2] = { 0, 0 };
+		GLint         prevRead = 0;
+		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glVRAMFramebuffer);
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
+		glReadPixels(x + w / 2, y + h / 2, 1, 1, GL_RG, GL_UNSIGNED_BYTE, rg);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+		eprintinfo("[SCRATCHDBG]   packed (%d,%d %dx%d) centre word=0x%04X packValid=%d vram=%u\n",
+			x, y, w, h, (unsigned)(rg[0] | (rg[1] << 8)), g_fbPackValid, (unsigned)g_vramTexture);
+	}
 	g_fbSamplerUiPass    = savedUiPass;
 	g_fbSamplerSemiTrans = savedSemi;
 	g_PsxFeedbackExact   = savedExact;
@@ -6625,6 +6641,8 @@ static void GreyFrame_Present(int w, int h)
 
 void GR_SwapWindow()
 {
+	if (g_PsxScratchDbgFrames > 0)
+		g_PsxScratchDbgFrames--;
 	{
 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
 		g_PsxLastFrameVerts = g_PsxFrameVerts;

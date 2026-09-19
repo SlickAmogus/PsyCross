@@ -3106,6 +3106,37 @@ void DrawAllSplits()
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
 
+	/* [SCRATCHDBG] the scene-scratch soft focus arms ([FBSCRATCH]) yet nothing
+	 * shows. For three presents after it arms: does this pass hold the capture,
+	 * and what are the splits that follow it (the strips) -- blend, texture,
+	 * clip/offset and where their first vertex lands. */
+	{
+		extern int g_PsxScratchDbgFrames;
+		if (g_PsxScratchDbgFrames > 0 && g_splitIndex > 0)
+		{
+			int cap = -1, i;
+			for (i = 1; i <= g_splitIndex; i++)
+				if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE) { cap = i; break; }
+			eprintinfo("[SCRATCHDBG] pass splits=%d capture=%d ui=%d\n", g_splitIndex, cap, g_PsxUIOrthoPass);
+			if (cap > 0)
+			{
+				const GPUDrawSplit& c = g_splits[cap];
+				eprintinfo("[SCRATCHDBG]   capture rect (%d,%d %dx%d)\n",
+					c.drawenv.clip.x, c.drawenv.clip.y, c.drawenv.clip.w, c.drawenv.clip.h);
+				for (i = cap + 1; i <= g_splitIndex && i <= cap + 8; i++)
+				{
+					const GPUDrawSplit& s  = g_splits[i];
+					const GrVertex&     v0 = g_vertexBuffer[s.startVertex];
+					eprintinfo("[SCRATCHDBG]   +%d kind=%d blend=%d fmt=%d tex=%u verts=%u clip=(%d,%d %dx%d) ofs=(%d,%d) dfe=%d depth=%d v0=(%d,%d) uv=(%d,%d) page=%d a=%d\n",
+						i - cap, (int)s.kind, (int)s.blendMode, (int)s.texFormat, (unsigned)s.textureId, s.numVerts,
+						s.drawenv.clip.x, s.drawenv.clip.y, s.drawenv.clip.w, s.drawenv.clip.h,
+						s.drawenv.ofs[0], s.drawenv.ofs[1], (int)s.drawenv.dfe, s.depthMode,
+						(int)v0.x, (int)v0.y, (int)v0.u, (int)v0.v, (int)v0.page, (int)v0.a);
+				}
+			}
+		}
+	}
+
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
