@@ -5438,8 +5438,16 @@ void GR_PresentLastFrame(void)
 static RECT16 g_sceneFbRedirect = { 0, 0, 0, 0 };
 static int    g_sceneFbRedirectTtl = 0;
 static int    s_sceneFbRedirectArms = 0;
-/* [SCRATCHDBG] presents left to report after an arm (see DrawAllSplits). */
-extern "C" { int g_PsxScratchDbgFrames = 0; }
+
+/* Does a 16bpp tpage at VRAM (x, y) sample the live scene-scratch rect? Those
+ * are the soft-focus composite strips (map3_s02 Alessa, map4_s04 Lisa,
+ * map7_s02): widened with the world ortho, and dropped when dream_blur is off. */
+extern "C" int GR_SceneFbRedirectCovers(int x, int y)
+{
+	return g_sceneFbRedirectTtl > 0 &&
+	       x >= g_sceneFbRedirect.x && x < g_sceneFbRedirect.x + g_sceneFbRedirect.w &&
+	       y >= g_sceneFbRedirect.y && y < g_sceneFbRedirect.y + g_sceneFbRedirect.h;
+}
 
 extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 {
@@ -5459,8 +5467,6 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 	{
 		s_sceneFbRedirectArms++;
 		eprintinfo("[FBSCRATCH] redirect ARMED (%d,%d %dx%d) - feedback blit live\n", x, y, w, h);
-		if (s_sceneFbRedirectArms <= 2)
-			g_PsxScratchDbgFrames = 3;
 	}
 
 	g_sceneFbRedirectTtl = 3;
@@ -5500,6 +5506,8 @@ static GLuint   g_fbPackTex = 0;   /* captured frame, RGBA8 */
 static GLuint   g_fbPackFBO = 0;
 static int      g_fbPackW = 0, g_fbPackH = 0;
 static int      g_fbPackValid = 0; /* a frame has been captured this session */
+/* Set around the scene-scratch capture while the world ortho is widened. */
+static int      g_fbCaptureWorldWide = 0;
 
 /* PSX display-buffer rects recorded from GsDefDispBuff2 (SH: (0,32)/(0,256),
  * 320x224). The PC libgs stub collapses both display envs to (0,0) because there
@@ -5930,6 +5938,15 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 			ax0 = (float)vx;          ay0 = (float)vy;
 			ax1 = (float)(vx + vw);   ay1 = (float)(vy + vh);
 		}
+		/* The scene-scratch strips are stretched across the WORLD ortho's width
+		 * (MakeVertexRect), which the Hor+ world ortho fits to the viewport, so
+		 * the capture spans the viewport horizontally too. Vertical stays the
+		 * 224-line buffer: that is all the strips cover. */
+		else if (!useUi && g_fbCaptureWorldWide)
+		{
+			ax0 = (float)vx;
+			ax1 = (float)(vx + vw);
+		}
 
 		if (!areaValid || ax1 <= ax0 || ay1 <= ay0)
 		{
@@ -6094,10 +6111,14 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	 * anything else behind the capture in the pass, were never rasterized. */
 	GLint     savedVao     = 0;
 
-	if (w <= 0 || h <= 0)
+	/* dream_blur off: no capture. The strips that would composite it are
+	 * dropped at parse (GR_SceneFbRedirectCovers), so the scene draws plain. */
+	if (w <= 0 || h <= 0 || !g_cfg_dreamFeedback)
 		return;
 
 	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVao);
+	g_fbCaptureWorldWide = g_PsxWorldOrthoValid && g_PsxWorldDisp[0] > 0.0f &&
+	                       (g_PsxWorldOrtho[1] - g_PsxWorldOrtho[0]) / g_PsxWorldDisp[0] > 1.001f;
 
 	/* A one-shot copy, not a loop: unity gain, filtered.
 	 *
@@ -6114,46 +6135,10 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	g_PsxFeedbackExact   = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
-	if (g_PsxScratchDbgFrames > 0)
-	{
-		/* Whole-rect counts: one centre sample landed on the black doorway. */
-		const int      n   = w * h;
-		unsigned char* buf = (unsigned char*)malloc((size_t)n * 4);
-		GLint          prevRead = 0;
-		int            i, nzPack = 0, nzVram = 0, stp = 0;
-		unsigned       maxc = 0;
-
-		if (buf != NULL)
-		{
-			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbPackFBO);
-			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-			for (i = 0; i < n; i++)
-			{
-				const unsigned c = (unsigned)buf[i * 4] + buf[i * 4 + 1] + buf[i * 4 + 2];
-				if (c > 0) nzPack++;
-				if (c > maxc) maxc = c;
-			}
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, g_glVRAMFramebuffer);
-			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_vramTexture, 0);
-			glReadPixels(x, y, w, h, GL_RG, GL_UNSIGNED_BYTE, buf);
-			for (i = 0; i < n; i++)
-			{
-				const unsigned wd = (unsigned)buf[i * 2] | ((unsigned)buf[i * 2 + 1] << 8);
-				if (wd) nzVram++;
-				if (wd & 0x8000) stp++;
-			}
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
-			free(buf);
-		}
-		eprintinfo("[SCRATCHDBG]   packed (%d,%d %dx%d): capture nonzero=%d/%d maxRGBsum=%u | vram nonzero=%d stp=%d | area=%.0f,%.0f..%.0f,%.0f valid=%d vp=%d,%d %dx%d msaa=%d\n",
-			x, y, w, h, nzPack, n, maxc, nzVram, stp,
-			g_psxAreaVp[0], g_psxAreaVp[1], g_psxAreaVp[2], g_psxAreaVp[3], g_psxAreaVpValid,
-			g_presentVp[0], g_presentVp[1], g_presentVp[2], g_presentVp[3], g_cfg_msaaSamples);
-	}
 	g_fbSamplerUiPass    = savedUiPass;
 	g_fbSamplerSemiTrans = savedSemi;
 	g_PsxFeedbackExact   = savedExact;
+	g_fbCaptureWorldWide = 0;
 	glBindVertexArray((GLuint)savedVao);
 #endif
 }
@@ -6675,8 +6660,6 @@ static void GreyFrame_Present(int w, int h)
 
 void GR_SwapWindow()
 {
-	if (g_PsxScratchDbgFrames > 0)
-		g_PsxScratchDbgFrames--;
 	{
 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
 		g_PsxLastFrameVerts = g_PsxFrameVerts;

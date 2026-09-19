@@ -663,6 +663,11 @@ static int s_curPrimSemiTrans = 0;
  * Cleared per primitive in ParsePrimitive. */
 static int s_curPrimIsFeedback = 0;
 
+/* The primitive samples the live scene-scratch rect: a soft-focus composite
+ * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
+static int s_curPrimIsScratch = 0;
+extern "C" int GR_SceneFbRedirectCovers(int x, int y);
+
 /* Red modulation of the primitive being parsed (the loading trail alternates
  * 127/128, and 127 is a PS1 decay frame for its copy loop). */
 static int s_curPrimR0 = 128;
@@ -681,6 +686,11 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	{
 		s_curPrimIsFeedback = 1;
 		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans, s_curPrimR0);
+	}
+	else if (((tpage >> 7) & 0x3) >= 2 &&
+	         GR_SceneFbRedirectCovers((tpage & 0xF) * 64, ((tpage >> 4) & 1) * 256))
+	{
+		s_curPrimIsScratch = 1;
 	}
 
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
@@ -1983,6 +1993,22 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	 * at room transitions, where the UI ortho is widened: stretching its strips
 	 * over an unstretched capture rescales the loop every frame, which is the
 	 * vertical-streak class this store has hit before. */
+	/* The scene-scratch soft focus (Alessa, Lisa) is the same idea in the WORLD
+	 * pass: its strips are 320 wide and would soften only the 4:3 core. Stretch
+	 * them across the world ortho; GR_CaptureFrameToVramRect captures the full
+	 * width to match, so the composite stays 1:1 with the scene under it. */
+	if (s_curPrimIsScratch && !g_PsxUIOrthoPass && g_PsxWorldOrthoValid && g_PsxWorldDisp[0] > 0.0f)
+	{
+		const float c = (g_PsxWorldOrtho[0] + g_PsxWorldOrtho[1]) * 0.5f;
+		const float k = (g_PsxWorldOrtho[1] - g_PsxWorldOrtho[0]) / g_PsxWorldDisp[0];
+		if (k > 1.001f)
+		{
+			int i;
+			for (i = 0; i < 4; i++)
+				vertex[i].x = (short)floorf(c + ((float)vertex[i].x - c) * k + 0.5f);
+		}
+	}
+
 	if (s_curPrimIsFeedback && g_PsxUIOrthoPass && g_PsxFeedbackWideScale > 1.001f)
 	{
 		int i;
@@ -3106,37 +3132,6 @@ void DrawAllSplits()
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
 
-	/* [SCRATCHDBG] the scene-scratch soft focus arms ([FBSCRATCH]) yet nothing
-	 * shows. For three presents after it arms: does this pass hold the capture,
-	 * and what are the splits that follow it (the strips) -- blend, texture,
-	 * clip/offset and where their first vertex lands. */
-	{
-		extern int g_PsxScratchDbgFrames;
-		if (g_PsxScratchDbgFrames > 0 && g_splitIndex > 0)
-		{
-			int cap = -1, i;
-			for (i = 1; i <= g_splitIndex; i++)
-				if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE) { cap = i; break; }
-			eprintinfo("[SCRATCHDBG] pass splits=%d capture=%d ui=%d\n", g_splitIndex, cap, g_PsxUIOrthoPass);
-			if (cap > 0)
-			{
-				const GPUDrawSplit& c = g_splits[cap];
-				eprintinfo("[SCRATCHDBG]   capture rect (%d,%d %dx%d)\n",
-					c.drawenv.clip.x, c.drawenv.clip.y, c.drawenv.clip.w, c.drawenv.clip.h);
-				for (i = cap + 1; i <= g_splitIndex && i <= cap + 8; i++)
-				{
-					const GPUDrawSplit& s  = g_splits[i];
-					const GrVertex&     v0 = g_vertexBuffer[s.startVertex];
-					eprintinfo("[SCRATCHDBG]   +%d kind=%d blend=%d fmt=%d tex=%u verts=%u clip=(%d,%d %dx%d) ofs=(%d,%d) dfe=%d depth=%d v0=(%d,%d) uv=(%d,%d) page=%d a=%d\n",
-						i - cap, (int)s.kind, (int)s.blendMode, (int)s.texFormat, (unsigned)s.textureId, s.numVerts,
-						s.drawenv.clip.x, s.drawenv.clip.y, s.drawenv.clip.w, s.drawenv.clip.h,
-						s.drawenv.ofs[0], s.drawenv.ofs[1], (int)s.drawenv.dfe, s.depthMode,
-						(int)v0.x, (int)v0.y, (int)v0.u, (int)v0.v, (int)v0.page, (int)v0.a);
-				}
-			}
-		}
-	}
-
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
@@ -3833,6 +3828,11 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		{
 			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
+			/* dream_blur off: the soft-focus composite is not drawn at all (its
+			 * capture is skipped too), leaving the plain scene. */
+			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
+				return 4;
+
 			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -4135,6 +4135,7 @@ int ParsePrimitive(P_TAG* polyTag)
 	 * instead of nothing. */
 	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
 	s_curPrimIsFeedback = 0;
+	s_curPrimIsScratch  = 0;
 	s_curPrimR0         = polyTag->pad0; /* r0 in every prim struct */
 
 	switch (primType)
