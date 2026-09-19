@@ -6087,9 +6087,17 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	const int savedUiPass  = g_fbSamplerUiPass;
 	const int savedSemi    = g_fbSamplerSemiTrans;
 	const int savedExact   = g_PsxFeedbackExact;
+	/* This runs MID-PASS, between splits that DrawAllSplits draws from the
+	 * vertex array it bound once at the top. The pack leaves VAO 0 bound
+	 * (harmless at end of frame, where it was written for), and on a core
+	 * context every draw after that is an error: the soft-focus strips, and
+	 * anything else behind the capture in the pass, were never rasterized. */
+	GLint     savedVao     = 0;
 
 	if (w <= 0 || h <= 0)
 		return;
+
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVao);
 
 	/* A one-shot copy, not a loop: unity gain, filtered.
 	 *
@@ -6146,6 +6154,7 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 	g_fbSamplerUiPass    = savedUiPass;
 	g_fbSamplerSemiTrans = savedSemi;
 	g_PsxFeedbackExact   = savedExact;
+	glBindVertexArray((GLuint)savedVao);
 #endif
 }
 
