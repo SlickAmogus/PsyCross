@@ -5874,6 +5874,14 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 		readFBO = g_postFBO;
 	}
 #endif
+	/* Otherwise the scene target itself. Framebuffer 0 is the window, which
+	 * holds the scene only when nothing renders offscreen: since native GL
+	 * always does (GR_SceneAlwaysOffscreen), reading 0 captured the last
+	 * PRESENTED frame, not this one, and every feedback effect -- the scene
+	 * soft-focus (map3_s02 Alessa, map4_s04 Lisa), the dream overlays, the
+	 * loading trail -- composited a stale or empty image. */
+	if (readFBO == 0)
+		readFBO = GR_ScreenReadFBO();
 
 	/* Unflipped downscale of the window rect the PSX DISPLAY BUFFER occupies into
 	 * the 320x224 capture; the pack shader does the one flip needed to land
@@ -6182,6 +6190,8 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 			storeReadFBO = g_postFBO;
 		}
 #endif
+		if (storeReadFBO == 0)
+			storeReadFBO = GR_ScreenReadFBO();	/* the scene target, not the window */
 		// setup draw and read framebuffers
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, storeReadFBO);		// backbuffer, or resolved MSAA copy
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glBlitFramebuffer);
