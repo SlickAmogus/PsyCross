@@ -700,15 +700,19 @@ int g_PsxSkipFramebufferStore = 0;
 extern "C" { int g_dbg_glDiag = 0; }
 void GR_DiagGLError(const char* where);
 
-/* PC port: framebuffer feedback is LOADING-SCREEN ONLY for now. The generic
- * store also drives the per-map dream/ghosting overlays (map6 otherworld,
- * cutscene ghosts, the rifle scene, ...), which were never made correct on PC
- * and corrupt (striping / ghosted subtitles). Screen_BackgroundMotionBlur — the
- * only loading/transition blur — arms this to 2 each frame it draws (a short
- * trailing window so a 1-frame gap doesn't flip it off). While it is 0,
- * GR_StoreFrameBufferPsx stamps the feedback rects BLACK (word 0 → the samplers
- * discard → draw nothing) instead of leaving a real/stale frame for those
- * overlays to ghost. Re-enable per-scene once their geometry is fixed. */
+/* PC port: how long the framebuffer-feedback store keeps running. Armed to 2 by
+ * GR_NoteFeedbackSamplerPrim whenever a prim samples a display buffer, and by
+ * Screen_BackgroundMotionBlur for the loading trail's first frame; the store
+ * decrements it each present. While it is 0, GR_StoreFrameBufferPsx stamps the
+ * feedback rects BLACK (word 0 → the samplers discard → draw nothing) rather
+ * than leaving a real or stale frame for some unrelated prim to sample.
+ *
+ * It was long pinned to the loading screen alone because the per-map dream and
+ * ghosting overlays (map6 otherworld, the Lisa scene, after Split Head) read
+ * their capture back under the UI ortho while the capture was taken through the
+ * world one, and a feedback loop turns that mismatch into striping and doubled
+ * subtitles within a few frames. Both rects are recorded now, so the capture
+ * matches whichever pass redraws it. */
 int g_PsxFeedbackStoreAllowed = 0;
 
 /* PC port: freeze-frame presentation for pause/console/message states.
@@ -936,9 +940,10 @@ GLuint		g_glBlitFramebuffer;
  *
  * Everything in this renderer that means "the screen" binds framebuffer 0, so
  * the whole scene is redirected simply by handing those sites GR_ScreenFBO()
- * instead. It returns 0 whenever the target is inactive, which is every mode
- * except borderless-with-a-different-resolution -- so the stock path is
- * bit-identical and a failed allocation degrades to it automatically.
+ * instead. It returns 0 whenever the target is inactive: always on the ES and
+ * ANGLE backends unless borderless picked a different resolution, never on
+ * native GL (GR_SceneAlwaysOffscreen). A failed allocation degrades to
+ * framebuffer 0 automatically.
  *
  * g_windowWidth/Height stay the RENDER size (all viewport, scissor and aspect
  * maths already key off them and need no changes); g_presentWidth/Height are
@@ -988,11 +993,28 @@ extern "C" GLuint GR_ScreenReadFBO(void)
 {
 	if (s_internalSamples > 0 && s_resolveFBO != 0)
 	{
+		/* The resolve must leave the caller's DRAW binding alone. Callers
+		 * bind their destination first and then ask for this as the source
+		 * (the freeze capture binds its FBO, then reads the scene), and a
+		 * mid-frame read is followed by more scene drawing. Left pointing at
+		 * the mirror, the capture blitted the mirror onto itself -- the frozen
+		 * frame stayed black -- and everything drawn after a read landed in
+		 * the mirror and was resolved over at present: black pickup and save
+		 * prompts with MSAA on native GL. Scissor would clip the resolve. */
+		GLint           prevDraw = 0;
+		const GLboolean scissor  = glIsEnabled(GL_SCISSOR_TEST);
+
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+		if (scissor)
+			glDisable(GL_SCISSOR_TEST);
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_resolveFBO);
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
 		                  0, 0, s_internalW, s_internalH,
 		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prevDraw);
+		if (scissor)
+			glEnable(GL_SCISSOR_TEST);
 		return s_resolveFBO;
 	}
 
@@ -1606,6 +1628,25 @@ int GR_InitialiseGLExt()
  * present". Called after window creation, on every SDL resize, and whenever the
  * resolution is changed at runtime -- the resize event is what used to silently
  * overwrite the chosen resolution with the desktop size in borderless. */
+/* Native desktop OpenGL draws the scene into the internal target even at the
+ * window's own size, and the window's back buffer is written once per frame,
+ * by the present blit.
+ *
+ * The frame reads its own image back mid-frame -- the freeze capture, the
+ * framebuffer-feedback store, the VRAM readback -- and with the scene in the
+ * window's back buffer those were reads of the default framebuffer. On
+ * NVIDIA's OpenGL present path the screen then showed those intermediate
+ * states for a refresh or two: the fog-coloured clear before the world was
+ * drawn (the whole-screen grey flash) and the world before the overlays (the
+ * controls panel blinking out). A present-time readback proved every image
+ * handed to the swap was complete, and the same build through ANGLE's D3D11
+ * never did it. With the target, nothing but the final blit touches the
+ * window. ES and ANGLE keep their existing path. */
+static int GR_SceneAlwaysOffscreen(void)
+{
+	return g_grActiveBackend == PSYX_BACKEND_GL && !g_grIsGLES;
+}
+
 extern "C" void GR_ApplyPresentSize(int realW, int realH)
 {
 #if defined(PSYX_IOS)
@@ -1657,6 +1698,14 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 		return;
 	}
 #endif
+
+	if (GR_SceneAlwaysOffscreen() && GR_SetInternalResolution(realW, realH))
+	{
+		g_windowWidth  = realW;
+		g_windowHeight = realH;
+
+		return;
+	}
 
 	GR_DestroyInternalTarget();
 	g_windowWidth  = realW;
@@ -1715,6 +1764,13 @@ int GR_InitialiseRender(char* windowName, int width, int height, int fullscreen)
 	/* Before any GL attribute that depends on the context type, and before the
 	 * window: picks GL vs ES and points ANGLE at D3D11/Vulkan if asked. */
 	GR_ResolveBackend();
+
+	/* Native GL always renders through the internal target (see
+	 * GR_SceneAlwaysOffscreen), and the present blit cannot write a
+	 * multisample window: antialiasing moves onto the target, as it already
+	 * does for a borderless render resolution. */
+	if (GR_SceneAlwaysOffscreen() && g_cfg_msaaSamples > 0)
+		s_suppressWindowMsaa = 1;
 
 	/* MSAA is not survivable on the ES backends. Confirmed by bisect:
 	 * renderer=gles renders a completely black frame with MSAA on and works
@@ -1799,6 +1855,17 @@ void GR_Shutdown()
 void GR_UpdateSwapIntervalState(int swapInterval)
 {
 #if defined(RENDERER_OGL)
+	/* Only on a change. This runs every frame from PsyX_BeginScene, and SDL
+	 * hands every call straight to wglSwapIntervalEXT / eglSwapInterval, which
+	 * on NVIDIA's DXGI-layered OpenGL present reconfigures presentation even
+	 * for the same value. GR_ResetDevice drops it to 0 and the next frame puts
+	 * it back, so a device reset still re-applies it. */
+	static int s_applied = -1000;
+
+	if (swapInterval == s_applied)
+		return;
+	s_applied = swapInterval;
+
 	if (PsyX_Angle_Active())
 		PsyX_Angle_SetSwapInterval(swapInterval);
 	else
@@ -3964,6 +4031,50 @@ void GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, 
  * diverge. Fires once per arm; costs nothing otherwise. */
 extern "C" { int g_PsxVoidProbeArmed = 0; unsigned char g_PsxLastClearRGB[3] = { 0, 0, 0 }; }
 
+/* [GREYFRAME] -- the whole-screen grey flash: a presented frame that is exactly
+ * the clear colour everywhere, while the world WAS submitted (the old
+ * [GREYFLASH] vertex tally stayed normal through a recorded run of them, so the
+ * geometry is drawn and lost, not missing). This watches the symptom itself:
+ * three rows of the image actually presented are read back asynchronously each
+ * swap, and a frame whose rows are one flat colour equal to its clear is
+ * logged with the state it drew under. Silent otherwise; capped. */
+typedef struct
+{
+	unsigned frame;
+	int draws, tris, clears, clearsAfterDraw, clearFbo, offscreen, glerr;
+	int firstFbo, firstVp[4], firstSc, firstBox[4], firstMask[4], firstDTest, firstDFunc, firstProg, firstBlend;
+	int endFbo, endVp[4], endSc;
+	unsigned char clearRGB[3];
+	int tag[6];
+	int probe[6];   /* [PANELMISS] active, window x, y, expected rgb */
+	int pstate[16]; /* [PANELMISS] the panel's GL state at its draw */
+} GreyFrameSnap;
+
+static GreyFrameSnap s_gf;
+extern "C" { int g_PsxGreyTag[6] = { 0, 0, 0, 0, 0, 0 }; }
+/* [PANELMISS] armed each frame by an overlay that wants its presence checked in
+ * the presented image (pc_bind_panel.c); consumed at the swap. */
+extern "C" { int g_PsxPanelProbe[6] = { 0 }; int g_PsxPanelState[16] = { 0 }; }
+
+static void GreyFrame_FirstDraw(void)
+{
+#if USE_OPENGL
+	GLboolean m[4] = { 1, 1, 1, 1 };
+	GLint     iv = 0;
+
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &iv); s_gf.firstFbo = iv;
+	glGetIntegerv(GL_VIEWPORT, s_gf.firstVp);
+	s_gf.firstSc = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
+	glGetIntegerv(GL_SCISSOR_BOX, s_gf.firstBox);
+	glGetBooleanv(GL_COLOR_WRITEMASK, m);
+	s_gf.firstMask[0] = m[0]; s_gf.firstMask[1] = m[1]; s_gf.firstMask[2] = m[2]; s_gf.firstMask[3] = m[3];
+	s_gf.firstDTest = glIsEnabled(GL_DEPTH_TEST) ? 1 : 0;
+	glGetIntegerv(GL_DEPTH_FUNC, &iv); s_gf.firstDFunc = iv;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &iv); s_gf.firstProg = iv;
+	s_gf.firstBlend = glIsEnabled(GL_BLEND) ? 1 : 0;
+#endif
+}
+
 static void VoidProbeRows(const char* tag, GLuint readFbo, int w, int h)
 {
 	/* Full frame to disk (PPM, bottom-up rows flipped) so the pixel POSITIONS can
@@ -4052,6 +4163,18 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 {
 	framebuffer_need_update = 1;
 	g_PsxLastClearRGB[0] = r; g_PsxLastClearRGB[1] = g; g_PsxLastClearRGB[2] = b;
+
+	s_gf.clears++;
+	if (s_gf.draws > 0)
+		s_gf.clearsAfterDraw++;
+	s_gf.clearRGB[0] = r; s_gf.clearRGB[1] = g; s_gf.clearRGB[2] = b;
+#if USE_OPENGL
+	{
+		GLint fbo = 0;
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+		s_gf.clearFbo = fbo;
+	}
+#endif
 
 #if USE_OPENGL
 
@@ -4370,6 +4493,89 @@ static int g_presentVp[4] = { 0, 0, 0, 0 };
 static float g_psxAreaVp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 static int   g_psxAreaVpValid = 0;
 
+/* The same rect under the 2D UI ortho (OT2). The two passes put the PSX display
+ * buffer in DIFFERENT window rects -- the world pass carries the Hor+ widening
+ * and the g_PsxWorldVScale crop, the UI pass carries neither -- so a capture
+ * read through one and redrawn under the other is rescaled every iteration.
+ * Which one a feedback prim needs is decided by the pass it is drawn in:
+ * the loading blur draws with the world ortho, the per-map dream overlays are
+ * OT2 prims. */
+static float g_psxUiAreaVp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+static int   g_psxUiAreaVpValid = 0;
+
+/* Set when a prim sampling a display buffer was drawn in the UI pass, so the
+ * capture below knows which of the two rects to read. */
+static int   g_fbSamplerUiPass = 0;
+
+/* Widescreen feedback. The effect's primitives are 320 PSX pixels wide, so on a
+ * widened ortho they cover the 4:3 core and leave the margins sharp -- a blurred
+ * letterbox with two hard seams. Both ends are stretched instead: the capture
+ * reads the WHOLE picture rect into the same 320-wide store, and the primitives
+ * are scaled about the ortho centre to span it again. The store is a blur, so
+ * spreading its 320 columns over a wider window costs nothing that matters, and
+ * because both ends move together the loop stays exactly 1:1 -- the one thing a
+ * feedback effect cannot tolerate getting wrong. Scale is 1.0 in 4:3, where this
+ * is a no-op and the proven path is untouched. */
+extern "C" { float g_PsxFeedbackWideScale  = 1.0f; }
+extern "C" { float g_PsxFeedbackWideCenter = 160.0f; }
+
+/* The WORLD pass's ortho in display coordinates (L, R, T, B) and the display
+ * size it was built for. A flat fill authored to cover the whole 320x224 frame
+ * (a scene tint, a flash) is drawn in OT0, so it inherits the Hor+ widening and
+ * the g_PsxWorldVScale crop that exist for 3D geometry, and comes out as a 4:3
+ * box that stops short of the bottom. The rect builder remaps such prims onto
+ * this rect, which is exactly the picture. Valid once a world pass has run. */
+extern "C" { float g_PsxWorldOrtho[4]  = { 0.0f, 320.0f, 0.0f, 224.0f }; }
+extern "C" { float g_PsxWorldDisp[2]   = { 320.0f, 224.0f }; }
+extern "C" { int   g_PsxWorldOrthoValid = 0; }
+
+/* A prim is sampling a display buffer this frame, so the store has work to do.
+ * Called from the one place every textured prim passes through, keyed on the
+ * signature of the whole effect family: a 16bpp tpage addressing the left 320
+ * VRAM columns, where the display buffers live (real 16bpp game textures sit at
+ * x >= 512 in every session log). That is also what tells the store WHICH pass
+ * will redraw the capture, so no scene has to declare itself.
+ *
+ * The count is a short trailing window rather than a bool: the store runs at
+ * the end of the frame that armed it, and one frame where the overlay happens
+ * not to draw should not blank the rect underneath a running effect. */
+extern "C" { int g_cfg_dreamFeedback = 1; }
+
+/* Does the reader BLEND the stored frame (per-map dream overlay) or replace it
+ * (loading trail)? Decides the mask bit the frame is packed with, and the loop
+ * gain: a blending reader composites 0.5*stored + 0.5*live, which is itself the
+ * decay PSX relies on, so its store runs at unity. An opaque reader has no such
+ * decay and its loop has to be damped or it diverges. */
+static int g_fbSamplerSemiTrans = 0;
+
+/* The reader's modulation this frame was below 128: a PS1 decay frame, where the
+ * copy loses one 5-bit step. The loading trail alternates 127/128 on the game's
+ * own vblank cadence; the exact pack applies the step only then. */
+static int g_fbSamplerDecay = 0;
+
+/* What the last per-present store was packed with, so a repack after a full
+ * vram[] re-upload reproduces it instead of re-deciding. */
+static int g_fbLastStoreDecay = 0;
+static int g_fbLastStoreSemi  = 0;
+
+/* 1 = opaque readers use the exact PS1 loop (see the pack shader), 0 = the old
+ * damped loop. Console FBEXACT. */
+extern "C" { int g_PsxFeedbackExact = 1; }
+
+/* Set by a scene that steps slower than the present rate (the loading screen)
+ * on each frame between its steps: that present takes no feedback pass. */
+extern "C" { int g_PsxFeedbackHoldFrame = 0; }
+
+extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour)
+{
+	g_fbSamplerUiPass    = g_PsxUIOrthoPass;
+	g_fbSamplerSemiTrans = semiTrans;
+	g_fbSamplerDecay     = (modColour < 128) ? 1 : 0;
+
+	if (g_cfg_dreamFeedback)
+		g_PsxFeedbackStoreAllowed = 2;
+}
+
 void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 {
 	if (enable)
@@ -4578,15 +4784,40 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			 * GR_StoreFrameBufferPsx. Recorded from the WORLD pass only, because
 			 * that is the ortho the blur's OT0 prims are drawn under.
 			 * GL window coords, origin bottom-left: ortho y=orthoTop is the TOP. */
-			if (!g_PsxUIOrthoPass && fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
+			if (fbOrthoR > fbOrthoL && fbOrthoB > fbOrthoT)
 			{
-				const float sx = (float)vpW / (fbOrthoR - fbOrthoL);
-				const float sy = (float)vpH / (fbOrthoB - fbOrthoT);
-				g_psxAreaVp[0] = (float)vpX + (0.0f    - fbOrthoL) * sx;
-				g_psxAreaVp[2] = (float)vpX + (fbPsxW  - fbOrthoL) * sx;
-				g_psxAreaVp[3] = (float)(vpY + vpH) - (0.0f   - fbOrthoT) * sy;
-				g_psxAreaVp[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
-				g_psxAreaVpValid = 1;
+				const float sx  = (float)vpW / (fbOrthoR - fbOrthoL);
+				const float sy  = (float)vpH / (fbOrthoB - fbOrthoT);
+				float*      dst = g_PsxUIOrthoPass ? g_psxUiAreaVp : g_psxAreaVp;
+
+				dst[0] = (float)vpX + (0.0f    - fbOrthoL) * sx;
+				dst[2] = (float)vpX + (fbPsxW  - fbOrthoL) * sx;
+				dst[3] = (float)(vpY + vpH) - (0.0f   - fbOrthoT) * sy;
+				dst[1] = (float)(vpY + vpH) - (fbPsxH - fbOrthoT) * sy;
+
+				if (g_PsxUIOrthoPass)
+				{
+					g_psxUiAreaVpValid = 1;
+
+					/* How far past the 320-wide buffer this ortho reaches, and
+					 * about which point. Symmetric in every mode, but derived
+					 * rather than assumed. */
+					g_PsxFeedbackWideCenter = (fbOrthoL + fbOrthoR) * 0.5f;
+					g_PsxFeedbackWideScale  = (fbPsxW > 0.0f)
+					                        ? ((fbOrthoR - fbOrthoL) / fbPsxW) : 1.0f;
+				}
+				else
+				{
+					g_psxAreaVpValid = 1;
+
+					g_PsxWorldOrtho[0]   = fbOrthoL;
+					g_PsxWorldOrtho[1]   = fbOrthoR;
+					g_PsxWorldOrtho[2]   = fbOrthoT;
+					g_PsxWorldOrtho[3]   = fbOrthoB;
+					g_PsxWorldDisp[0]    = fbPsxW;
+					g_PsxWorldDisp[1]    = fbPsxH;
+					g_PsxWorldOrthoValid = 1;
+				}
 			}
 		}
 
@@ -4596,6 +4827,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		return;
 
 	g_PreviousOffscreenState = enable;
+	if (enable)
+		s_gf.offscreen++;
 
 #if USE_OPENGL
 	if (enable)
@@ -5583,6 +5816,16 @@ static RECT16 g_sceneFbRedirect = { 0, 0, 0, 0 };
 static int    g_sceneFbRedirectTtl = 0;
 static int    s_sceneFbRedirectArms = 0;
 
+/* Does a 16bpp tpage at VRAM (x, y) sample the live scene-scratch rect? Those
+ * are the soft-focus composite strips (map3_s02 Alessa, map4_s04 Lisa,
+ * map7_s02): widened with the world ortho, and dropped when dream_blur is off. */
+extern "C" int GR_SceneFbRedirectCovers(int x, int y)
+{
+	return g_sceneFbRedirectTtl > 0 &&
+	       x >= g_sceneFbRedirect.x && x < g_sceneFbRedirect.x + g_sceneFbRedirect.w &&
+	       y >= g_sceneFbRedirect.y && y < g_sceneFbRedirect.y + g_sceneFbRedirect.h;
+}
+
 extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
 {
 	g_sceneFbRedirect.x = x;
@@ -5628,7 +5871,11 @@ extern "C" void GR_SetSceneFbRedirect(int x, int y, int w, int h)
  * screen show a trail of Harry rather than an opaque black rectangle. */
 /* Feedback-loop gain, pushed to the pack shader every store. 0.5 is the shipped
  * steady-state value; the door out-fade wants it near identity. Console: FBDAMP. */
-extern "C" { float g_PsxFeedbackDamp = 0.5f; }
+extern "C" { float g_PsxFeedbackDamp = 0.7f; } /* loading-trail ghost strength, matched by eye to a real PS1 */
+/* Loop gain for a BLENDING reader (the per-map dream overlays). Unity: the
+ * overlay's own 50/50 composite is the decay. Console FBDAMP takes it as a
+ * second argument. */
+extern "C" { float g_PsxFeedbackDampBlend = 1.0f; }
 
 static ShaderID g_fbPackShader = (ShaderID)-1;
 static GLuint   g_fbPackVAO = 0;
@@ -5636,6 +5883,8 @@ static GLuint   g_fbPackTex = 0;   /* captured frame, RGBA8 */
 static GLuint   g_fbPackFBO = 0;
 static int      g_fbPackW = 0, g_fbPackH = 0;
 static int      g_fbPackValid = 0; /* a frame has been captured this session */
+/* Set around the scene-scratch capture while the world ortho is widened. */
+static int      g_fbCaptureWorldWide = 0;
 
 /* PSX display-buffer rects recorded from GsDefDispBuff2 (SH: (0,32)/(0,256),
  * 320x224). The PC libgs stub collapses both display envs to (0,0) because there
@@ -5745,8 +5994,48 @@ static const char* s_fbPackShaderSrc =
 	 * it toward 1.0 without first neutralising the blur SPRT's 2x modulation is
 	 * what produced the flat mid-grey field recorded above. */
 	"	uniform float u_feedbackDamp;\n"
+	/* PSX mask bit. A 16bpp texel carries it as bit 15, and it is what decides
+	 * whether a SEMI-TRANSPARENT primitive blends that texel or draws it solid.
+	 * The per-map dream overlays are semi-transparent prims (RECT_BLEND) and
+	 * expect the stored frame to blend 50/50 with the live one; packing without
+	 * the bit made every texel read opaque, so the overlay replaced the frame
+	 * instead of ghosting over it. The loading trail is an OPAQUE prim and must
+	 * pack WITHOUT it: its black would otherwise become opaque black (0x8000)
+	 * rather than the transparent word 0 the sampler discards, and the trail
+	 * would be a black rectangle. Word 0 stays word 0 either way. */
+	"	uniform float u_packMaskBit;\n"
+	/* EXACT loop, for an OPAQUE reader (the loading trail and door fade).
+	 *
+	 * The level each pixel was stored at is recovered exactly -- the LUT decodes
+	 * a level as L*8, and the shader's mod*2/255 modulation moves that by under
+	 * half a step -- so the round trip through the 320x224 store is lossless,
+	 * with the NEAREST capture keeping it pixel-sharp. The old /31 requantize did
+	 * not match that decode and a LINEAR capture smeared every pass.
+	 *
+	 * Persistence is then set by the gain, u_feedbackDamp (FBDAMP, 0.7): each
+	 * pass keeps that fraction of the level. It is NOT unity. Real hardware shows
+	 * a faint ghost on the hands and feet only while Harry jogs in place at
+	 * normal speed -- a short-lived ghost, which only shows where the pose moves
+	 * most. A unity copy with the 127/128 one-step fade keeps every limb position
+	 * for about a second and smears the whole body sideways; that was tried and
+	 * rejected against a real PS1. The one-step fade on the game's 127 frames
+	 * still applies on top. */
+	"	uniform float u_packExact;\n"
+	"	uniform float u_packDecay;\n"
 	"void main() {\n"
-	"	vec3 c = texture2D(s_texture, v_uv).rgb * u_feedbackDamp;\n"
+	"	vec3 src = texture2D(s_texture, v_uv).rgb;\n"
+	"	if (u_packExact > 0.5) {\n"
+	"		vec3 L = clamp(floor(src * 31.875 + 0.5), 0.0, 31.0);\n"
+	"		L = floor(L * u_feedbackDamp + 0.001);\n"
+	"		L = max(L - vec3(u_packDecay), vec3(0.0));\n"
+	"		float e16 = L.r + L.g * 32.0 + L.b * 1024.0;\n"
+	"		if (u_packMaskBit > 0.5 && e16 > 0.0) e16 += 32768.0;\n"
+	"		float ehi = floor(e16 / 256.0);\n"
+	"		float elo = e16 - ehi * 256.0;\n"
+	"		fragColor = vec4(elo / 255.0, ehi / 255.0, 0.0, 1.0);\n"
+	"		return;\n"
+	"	}\n"
+	"	vec3 c = src * u_feedbackDamp;\n"
 	/* TRUNCATE, do not round. Retail's decay does not come from the gain -- at
 	 * 127/128 over ~60 frames the frame would only reach ~0.61 -- it comes from
 	 * this requantize dropping exactly one 5-bit level per pass, 31 passes to
@@ -5756,7 +6045,8 @@ static const char* s_fbPackShaderSrc =
 	"	float r5 = floor(c.r * 31.0 + 0.002);\n"
 	"	float g5 = floor(c.g * 31.0 + 0.002);\n"
 	"	float b5 = floor(c.b * 31.0 + 0.002);\n"
-	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"  /* mask bit left 0 */
+	"	float w16 = r5 + g5 * 32.0 + b5 * 1024.0;\n"
+	"	if (u_packMaskBit > 0.5 && w16 > 0.0) w16 += 32768.0;\n"
 	"	float hi  = floor(w16 / 256.0);\n"
 	"	float lo  = w16 - hi * 256.0;\n"
 	"	fragColor = vec4(lo / 255.0, hi / 255.0, 0.0, 1.0);\n"
@@ -5822,9 +6112,19 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 
 	glUseProgram(g_fbPackShader);
 	{
-		const GLint dampLoc = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
+		const GLint dampLoc  = glGetUniformLocation(g_fbPackShader, "u_feedbackDamp");
+		const GLint maskLoc  = glGetUniformLocation(g_fbPackShader, "u_packMaskBit");
+		const GLint exactLoc = glGetUniformLocation(g_fbPackShader, "u_packExact");
+		const GLint decayLoc = glGetUniformLocation(g_fbPackShader, "u_packDecay");
+		const int   exact    = (!g_fbSamplerSemiTrans && g_PsxFeedbackExact) ? 1 : 0;
 		if (dampLoc != -1)
 			glUniform1f(dampLoc, gain);
+		if (maskLoc != -1)
+			glUniform1f(maskLoc, g_fbSamplerSemiTrans ? 1.0f : 0.0f);
+		if (exactLoc != -1)
+			glUniform1f(exactLoc, exact ? 1.0f : 0.0f);
+		if (decayLoc != -1)
+			glUniform1f(decayLoc, (exact && g_fbSamplerDecay) ? 1.0f : 0.0f);
 	}
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, g_fbPackTex);
@@ -5848,7 +6148,13 @@ static void GR_PackFrameToVramRectGain(int x, int y, int w, int h, float gain)
 
 static void GR_PackFrameToVramRect(int x, int y, int w, int h)
 {
-	GR_PackFrameToVramRectGain(x, y, w, h, g_PsxFeedbackDamp);
+	/* Unity for a blending reader: the 50/50 composite it performs IS the decay,
+	 * exactly as on hardware, where the draw buffer is cleared every frame and
+	 * the overlay sums to a total weight of 1. Damping that loop as well only
+	 * darkens the scene. g_PsxFeedbackDamp stays for the opaque loading trail,
+	 * which has no such decay of its own. */
+	GR_PackFrameToVramRectGain(x, y, w, h,
+		g_fbSamplerSemiTrans ? g_PsxFeedbackDampBlend : g_PsxFeedbackDamp);
 }
 
 /* Pack the captured frame into every rect the game may read back: both PSX
@@ -5957,6 +6263,14 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 		readFBO = g_postFBO;
 	}
 #endif
+	/* Otherwise the scene target itself. Framebuffer 0 is the window, which
+	 * holds the scene only when nothing renders offscreen: since native GL
+	 * always does (GR_SceneAlwaysOffscreen), reading 0 captured the last
+	 * PRESENTED frame, not this one, and every feedback effect -- the scene
+	 * soft-focus (map3_s02 Alessa, map4_s04 Lisa), the dream overlays, the
+	 * loading trail -- composited a stale or empty image. */
+	if (readFBO == 0)
+		readFBO = GR_ScreenReadFBO();
 
 	/* Unflipped downscale of the window rect the PSX DISPLAY BUFFER occupies into
 	 * the 320x224 capture; the pack shader does the one flip needed to land
@@ -5977,15 +6291,41 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 	 * armed). Rows the ortho crops are left black: the frame simply has no pixels
 	 * there, and leaving them black keeps the redraw scale-exact. */
 	{
-		float ax0 = g_psxAreaVp[0], ay0 = g_psxAreaVp[1];
-		float ax1 = g_psxAreaVp[2], ay1 = g_psxAreaVp[3];
+		/* Read through the ortho of the pass that will REDRAW this capture. The
+		 * per-map dream overlays are OT2 prims and the loading blur is not, and
+		 * the two passes map the display buffer to different window rects. */
+		const int useUi = (g_fbSamplerUiPass && g_psxUiAreaVpValid);
+		const float* area = useUi ? g_psxUiAreaVp : g_psxAreaVp;
+		const int areaValid = useUi ? g_psxUiAreaVpValid : g_psxAreaVpValid;
+
+		float ax0 = area[0], ay0 = area[1];
+		float ax1 = area[2], ay1 = area[3];
 		int vx = g_presentVp[0], vy = g_presentVp[1];
 		int vw = g_presentVp[2], vh = g_presentVp[3];
 		float sx0, sy0, sx1, sy1;
 		int dx0, dy0, dx1, dy1;
 
 		if (vw <= 0 || vh <= 0) { vx = 0; vy = 0; vw = g_windowWidth; vh = g_windowHeight; }
-		if (!g_psxAreaVpValid || ax1 <= ax0 || ay1 <= ay0)
+
+		/* Widened ortho: the primitives are stretched to span it, so the store
+		 * has to hold the whole picture rect rather than its 4:3 core. The ortho
+		 * is fitted to the viewport, so that rect IS the viewport. */
+		if (useUi && g_PsxFeedbackWideScale > 1.001f)
+		{
+			ax0 = (float)vx;          ay0 = (float)vy;
+			ax1 = (float)(vx + vw);   ay1 = (float)(vy + vh);
+		}
+		/* The scene-scratch strips are stretched across the WORLD ortho's width
+		 * (MakeVertexRect), which the Hor+ world ortho fits to the viewport, so
+		 * the capture spans the viewport horizontally too. Vertical stays the
+		 * 224-line buffer: that is all the strips cover. */
+		else if (!useUi && g_fbCaptureWorldWide)
+		{
+			ax0 = (float)vx;
+			ax1 = (float)(vx + vw);
+		}
+
+		if (!areaValid || ax1 <= ax0 || ay1 <= ay0)
 		{
 			ax0 = (float)vx; ay0 = (float)vy;
 			ax1 = (float)(vx + vw); ay1 = (float)(vy + vh);
@@ -6013,13 +6353,34 @@ static void GR_CaptureFrameToPackTex(int w, int h)
 			glClearColor(cc[0], cc[1], cc[2], cc[3]);
 		}
 
+		/* [FBGEOM] one-shot companion to the strip line in MakeVertexRect: the
+		 * window rect the capture reads and the sub-rect it lands on. The two
+		 * together say whether the sliver is missing capture or short geometry. */
+		{
+			static int s_fbGeomSrcLogged[2] = { 0, 0 };
+			if (!s_fbGeomSrcLogged[useUi ? 1 : 0])
+			{
+				s_fbGeomSrcLogged[useUi ? 1 : 0] = 1;
+				eprintinfo("[FBGEOM] capture src %.1f,%.1f..%.1f,%.1f of vp %d,%d %dx%d -> dst %d,%d..%d,%d of %dx%d (ui=%d wide=%.4f)\n",
+					sx0, sy0, sx1, sy1, vx, vy, vw, vh, dx0, dy0, dx1, dy1, w, h,
+					useUi, g_PsxFeedbackWideScale);
+			}
+		}
+
 		if (sx1 > sx0 && sy1 > sy0 && dx1 > dx0 && dy1 > dy0)
 		{
+			/* NEAREST for the exact loop. The stored frame is redrawn as blocks of
+			 * one PSX pixel each, and a point sample from the centre of each block
+			 * lands back on that same block, so the round trip is lossless. A
+			 * filtered downscale mixes neighbours on every pass, and over a door
+			 * load that diffusion is a grey haze. The blending dream overlays keep
+			 * LINEAR: their loop halves every frame, so diffusion never builds. */
+			const int exact = (!g_fbSamplerSemiTrans && g_PsxFeedbackExact) ? 1 : 0;
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, readFBO);
 			glBlitFramebuffer((int)(sx0 + 0.5f), (int)(sy0 + 0.5f),
 			                  (int)(sx1 + 0.5f), (int)(sy1 + 0.5f),
 			                  dx0, dy0, dx1, dy1,
-			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+			                  GL_COLOR_BUFFER_BIT, exact ? GL_NEAREST : GL_LINEAR);
 		}
 	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, GR_ScreenReadFBO());
@@ -6053,6 +6414,11 @@ static void GR_SceneRedirectTick(void)
 extern "C" void GR_StoreFrameBufferPsx(void)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
+	/* Consumed here, before any early return, so a hold set on a frame the
+	 * store stands down for cannot leak into the next frame. */
+	const int holdFrame = g_PsxFeedbackHoldFrame;
+	g_PsxFeedbackHoldFrame = 0;
+
 	if (!g_psxDispBufValid || g_PsxSkipFramebufferStore)
 		return;
 
@@ -6077,9 +6443,22 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 	}
 	g_PsxFeedbackStoreAllowed--;
 
+	/* A HOLD frame: the scene is between two of its own steps and must not take
+	 * a loop pass, or the ghost keeps fading at the present rate instead of the
+	 * scene's. The rects keep the last store, which is what the scene redraws;
+	 * a vram[] re-upload in the meantime still repacks it (GR_RepackFrameTo-
+	 * VramBuffers does not look at this flag). */
+	if (holdFrame)
+	{
+		GR_SceneRedirectTick();
+		return;
+	}
+
 	GR_CaptureFrameToPackTex(g_psxDispBuf[0].w, g_psxDispBuf[0].h);
 
 	GR_PackFrameToAllFeedbackRects();
+	g_fbLastStoreDecay = g_fbSamplerDecay;
+	g_fbLastStoreSemi  = g_fbSamplerSemiTrans;
 	GR_SceneRedirectTick();
 #endif
 }
@@ -6096,10 +6475,48 @@ extern "C" void GR_StoreFrameBufferPsx(void)
 extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h)
 {
 #if USE_OPENGL && USE_FRAMEBUFFER_BLIT
-	if (w <= 0 || h <= 0)
+	/* The scene scratch-redirect is its own consumer: the game redraws this rect
+	 * with world-pass prims at PSX coordinates, so it wants the world mapping and
+	 * no widening, whatever the last display-buffer sampler happened to be. */
+	const int savedUiPass  = g_fbSamplerUiPass;
+	const int savedSemi    = g_fbSamplerSemiTrans;
+	const int savedExact   = g_PsxFeedbackExact;
+	/* This runs MID-PASS, between splits that DrawAllSplits draws from the
+	 * vertex array it bound once at the top. The pack leaves VAO 0 bound
+	 * (harmless at end of frame, where it was written for), and on a core
+	 * context every draw after that is an error: the soft-focus strips, and
+	 * anything else behind the capture in the pass, were never rasterized. */
+	GLint     savedVao     = 0;
+
+	/* dream_blur off: no capture. The strips that would composite it are
+	 * dropped at parse (GR_SceneFbRedirectCovers), so the scene draws plain. */
+	if (w <= 0 || h <= 0 || !g_cfg_dreamFeedback)
 		return;
+
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &savedVao);
+	g_fbCaptureWorldWide = g_PsxWorldOrthoValid && g_PsxWorldDisp[0] > 0.0f &&
+	                       (g_PsxWorldOrtho[1] - g_PsxWorldOrtho[0]) / g_PsxWorldDisp[0] > 1.001f;
+
+	/* A one-shot copy, not a loop: unity gain, filtered.
+	 *
+	 * Packed WITH the mask bit. These scenes render into the rect under
+	 * DR_STP(1) (queued at the far bucket, ahead of the whole scene -- see
+	 * map3_s02_2.c / map4_s04_2.c), so on PS1 every texel the strips read
+	 * carries STP, and that bit is what lets their semi-transparent layers
+	 * blend: 50/50 on the average strips, where a clear bit draws the texel
+	 * solid. PC strips the DR_STP packets, so the capture has to set it. Left
+	 * clear, the two average layers stamped solid over each other and the
+	 * four-tap soft focus came out as one offset, darkened copy. */
+	g_fbSamplerUiPass    = 0;
+	g_fbSamplerSemiTrans = 1;
+	g_PsxFeedbackExact   = 0;
 	GR_CaptureFrameToPackTex(w, h);
 	GR_PackFrameToVramRectGain(x, y, w, h, 1.0f);
+	g_fbSamplerUiPass    = savedUiPass;
+	g_fbSamplerSemiTrans = savedSemi;
+	g_PsxFeedbackExact   = savedExact;
+	g_fbCaptureWorldWide = 0;
+	glBindVertexArray((GLuint)savedVao);
 #endif
 }
 
@@ -6122,7 +6539,20 @@ extern "C" void GR_RepackFrameToVramBuffers(void)
 	if (!g_fbPackValid)
 		return;
 
-	GR_PackFrameToAllFeedbackRects();
+	/* Restore exactly what the last store wrote, from the same capture and with
+	 * the same flags. This runs whenever a LoadImage re-uploads vram[], which a
+	 * loading screen does constantly; packing with THIS frame's decay flag would
+	 * take the trail down an extra step on every such frame. */
+	{
+		const int savedDecay = g_fbSamplerDecay;
+		const int savedSemi  = g_fbSamplerSemiTrans;
+
+		g_fbSamplerDecay     = g_fbLastStoreDecay;
+		g_fbSamplerSemiTrans = g_fbLastStoreSemi;
+		GR_PackFrameToAllFeedbackRects();
+		g_fbSamplerDecay     = savedDecay;
+		g_fbSamplerSemiTrans = savedSemi;
+	}
 }
 
 /* Legacy raw-blit scene-redirect helper, superseded by the packed path above.
@@ -6181,6 +6611,8 @@ void GR_StoreFrameBuffer(int x, int y, int w, int h)
 			storeReadFBO = g_postFBO;
 		}
 #endif
+		if (storeReadFBO == 0)
+			storeReadFBO = GR_ScreenReadFBO();	/* the scene target, not the window */
 		// setup draw and read framebuffers
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, storeReadFBO);		// backbuffer, or resolved MSAA copy
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_glBlitFramebuffer);
@@ -6484,6 +6916,133 @@ void GR_DiagGLError(const char* where)
 		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
 }
 
+/* [GREYFRAME] per-swap half, run on the window framebuffer right before the
+ * swap, i.e. on exactly the image that is presented. Four pack buffers in a
+ * ring: each swap queues this frame's rows and inspects the slot it is about to
+ * reuse, four presents old, which has long finished -- no stall. */
+static void GreyFrame_Present(int w, int h)
+{
+#if USE_OPENGL
+	static GLuint        s_pbo[4];
+	static int           s_pboW[4];
+	static GreyFrameSnap s_ring[4];
+	static int           s_idx = 0, s_filled = 0, s_logs = 0, s_plogs = 0;
+	static unsigned      s_frame = 0;
+	GLint                prevRead = 0, prevPack = 0, fbo = 0;
+	const int            slot = s_idx;
+
+	if (g_grIsGLES || w <= 0 || h <= 0)
+		return;
+
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fbo);
+	s_gf.endFbo = fbo;
+	glGetIntegerv(GL_VIEWPORT, s_gf.endVp);
+	s_gf.endSc  = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
+	s_gf.glerr  = (int)glGetError();
+	s_gf.frame  = ++s_frame;
+	memcpy(s_gf.tag, g_PsxGreyTag, sizeof(s_gf.tag));
+	memcpy(s_gf.probe, g_PsxPanelProbe, sizeof(s_gf.probe));
+	memcpy(s_gf.pstate, g_PsxPanelState, sizeof(s_gf.pstate));
+	g_PsxPanelProbe[0] = 0;
+
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prevPack);
+
+	if (s_pbo[0] == 0)
+		glGenBuffers(4, s_pbo);
+
+	/* The slot about to be reused holds the frame presented four swaps ago. */
+	if (s_filled >= 4 && (s_logs < 40 || s_plogs < 40))
+	{
+		const GreyFrameSnap* g = &s_ring[slot];
+		const int            n = s_pboW[slot] * 3;
+		const unsigned char* px;
+
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
+		px = (const unsigned char*)glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, n * 4 + 4, GL_MAP_READ_BIT);
+		if (px)
+		{
+			int i, flat = 1;
+
+			/* [PANELMISS] the overlay's own title-band pixel, in the image that
+			 * was presented. */
+			if (g->probe[0] && s_plogs < 40)
+			{
+				const unsigned char* q = px + n * 4;
+
+				/* One line proving the check is live, so a session with no
+				 * misses reads as "every frame had the panel", not "the probe
+				 * never ran". */
+				{
+					static int s_live = 0;
+					if (!s_live)
+					{
+						s_live = 1;
+						eprintinfo("[PANELMISS] check live: frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d)\n",
+							g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2],
+							g->probe[3], g->probe[4], g->probe[5]);
+					}
+				}
+				const int dr = (int)q[0] - g->probe[3], dg = (int)q[1] - g->probe[4], db = (int)q[2] - g->probe[5];
+				if (dr * dr + dg * dg + db * db > 3 * 10 * 10)
+				{
+					const int* st = g->pstate;
+					s_plogs++;
+					eprintinfo("[PANELMISS] frame=%u at=(%d,%d) got=(%d,%d,%d) want=(%d,%d,%d) | draw fbo=%d sc=%d box=%d,%d,%d,%d stencil=%d func=0x%x ref=%d mask=0x%x vp=%dx%d prog=%d tex=%d glerr=0x%x phase=%d | end fbo=%d vp=%d,%d,%d,%d sc=%d glerr=0x%x | game=%d sys=%d vbl=%d world=%d freeze=%d\n",
+						g->frame, g->probe[1], g->probe[2], q[0], q[1], q[2], g->probe[3], g->probe[4], g->probe[5],
+						st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], st[8], st[9], st[10], st[11],
+						st[12], st[13], st[14], st[15],
+						g->endFbo, g->endVp[0], g->endVp[1], g->endVp[2], g->endVp[3], g->endSc, g->glerr,
+						g->tag[0], g->tag[1], g->tag[2], g->tag[3], g->tag[5]);
+				}
+			}
+			for (i = 1; i < n && flat; i++)
+				flat = px[i * 4] == px[0] && px[i * 4 + 1] == px[1] && px[i * 4 + 2] == px[2];
+
+			/* Black is every fade and loading gap; only a flat NON-black frame
+			 * that is exactly its own clear is the flash. */
+			if (s_logs < 40 && flat && (px[0] | px[1] | px[2]) > 8 &&
+			    px[0] == g->clearRGB[0] && px[1] == g->clearRGB[1] && px[2] == g->clearRGB[2])
+			{
+				s_logs++;
+				eprintinfo("[GREYFRAME] frame=%u rgb=(%d,%d,%d) draws=%d tris=%d clears=%d clearsAfterDraw=%d clearFbo=%d offscreen=%d glerr=0x%x | first fbo=%d vp=%d,%d,%d,%d sc=%d box=%d,%d,%d,%d mask=%d%d%d%d dtest=%d dfunc=0x%x prog=%d blend=%d | end fbo=%d vp=%d,%d,%d,%d sc=%d | game=%d sys=%d vbl=%d world=%d dt=%d freeze=%d\n",
+					g->frame, px[0], px[1], px[2], g->draws, g->tris, g->clears, g->clearsAfterDraw, g->clearFbo,
+					g->offscreen, g->glerr,
+					g->firstFbo, g->firstVp[0], g->firstVp[1], g->firstVp[2], g->firstVp[3],
+					g->firstSc, g->firstBox[0], g->firstBox[1], g->firstBox[2], g->firstBox[3],
+					g->firstMask[0], g->firstMask[1], g->firstMask[2], g->firstMask[3],
+					g->firstDTest, g->firstDFunc, g->firstProg, g->firstBlend,
+					g->endFbo, g->endVp[0], g->endVp[1], g->endVp[2], g->endVp[3], g->endSc,
+					g->tag[0], g->tag[1], g->tag[2], g->tag[3], g->tag[4], g->tag[5]);
+			}
+			glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+		}
+	}
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, s_pbo[slot]);
+	if (s_pboW[slot] != w)
+	{
+		glBufferData(GL_PIXEL_PACK_BUFFER, w * 3 * 4 + 4, NULL, GL_STREAM_READ);
+		s_pboW[slot] = w;
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadPixels(0, h / 4,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)0);
+	glReadPixels(0, h / 2,     w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 4));
+	glReadPixels(0, h * 3 / 4, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 8));
+	if (s_gf.probe[0])
+		glReadPixels(s_gf.probe[1], s_gf.probe[2], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, (void*)(uintptr_t)(w * 12));
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prevPack);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prevRead);
+
+	s_ring[slot] = s_gf;
+	s_idx = (slot + 1) & 3;
+	if (s_filled < 4)
+		s_filled++;
+#endif
+	memset(&s_gf, 0, sizeof(s_gf));
+}
+
 void GR_SwapWindow()
 {
 	{
@@ -6568,7 +7127,11 @@ void GR_SwapWindow()
 	if (PsyX_Angle_Active())
 		PsyX_Angle_Swap();
 	else
+	{
+		GreyFrame_Present(g_internalFBO ? g_presentWidth : g_windowWidth,
+		                  g_internalFBO ? g_presentHeight : g_windowHeight);
 		SDL_GL_SwapWindow(g_window);
+	}
 #endif
 
 	//glFinish();
@@ -6720,6 +7283,11 @@ void GR_SetBlendMode(BlendMode blendMode)
 		return;
 
 #if USE_OPENGL
+	/* BM_ADD_QUATER_SOURCE reads the constant set when blending is enabled,
+	 * which a direct switch out of BM_CONSTANT_ALPHA never passes through. */
+	if (g_PreviousBlendMode == BM_CONSTANT_ALPHA)
+		glBlendColor(0.25f, 0.25f, 0.25f, 0.5f);
+
 	/* Fog mode for this blend: additive/subtractive prims (blood, muzzle flash) must fade
 	 * toward black under fog, not blend toward the light fog color (which whitened their
 	 * edges/faded pixels in daytime). Push now — the fog shader is the bound program here —
@@ -6766,7 +7334,13 @@ void GR_SetBlendMode(BlendMode blendMode)
 		glBlendFunc(GL_ONE, GL_ONE);
 		break;
 	case BM_ADD_QUATER_SOURCE:
-		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE); 
+		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE);
+		break;
+	case BM_CONSTANT_ALPHA:
+		glBlendColor(0.25f, 0.25f, 0.25f, g_PsxFeedbackDampBlend);
+		glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+		break;
+	default:
 		break;
 	}
 #endif
@@ -6938,6 +7512,9 @@ void GR_DrawTriangles(int start_vertex, int triangles)
 {
 #if USE_OPENGL
 	g_PsyX_DrawCalls++;
+	if (s_gf.draws++ == 0)
+		GreyFrame_FirstDraw();
+	s_gf.tris += triangles;
 	glDrawArrays(GL_TRIANGLES, start_vertex, triangles * 3);
 #else
 #error

@@ -302,7 +302,10 @@ typedef enum
 	BM_AVERAGE,
 	BM_ADD,
 	BM_SUBTRACT,
-	BM_ADD_QUATER_SOURCE
+	BM_ADD_QUATER_SOURCE,
+	/* PC only: an opaque prim faded in at dream_blur_strength (the scene-scratch
+	 * soft focus base layer). */
+	BM_CONSTANT_ALPHA
 } BlendMode;
 
 typedef enum
@@ -352,6 +355,30 @@ extern void			GR_ReadFramebufferDataToVRAM();
 extern void			GR_SetPsxDisplayBuffers(int x0, int y0, int x1, int y1, int w, int h);
 extern void			GR_StoreFrameBufferPsx(void);
 extern void			GR_RepackFrameToVramBuffers(void);
+
+/* A prim sampling a display buffer was just drawn: keep the store running and
+ * record which ortho pass will redraw the capture. Called for any 16bpp tpage
+ * in the left 320 VRAM columns. g_cfg_dreamFeedback = 0 leaves the per-map
+ * overlays switched off (the rects stay blanked, so they draw nothing). */
+extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
+extern int			g_PsxFeedbackExact;
+extern int			g_cfg_dreamFeedback;
+
+/* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
+ * reaches, and about which point. The effect's primitives are stretched by this
+ * and the capture is stretched with them, so the blur fills the window at any
+ * aspect instead of blurring a 4:3 box with sharp margins. 1.0 = 4:3, no-op. */
+extern float		g_PsxFeedbackWideScale;
+extern float		g_PsxFeedbackWideCenter;
+
+/* The WORLD pass's ortho (L, R, T, B, display coordinates) and the display size
+ * it was built for. Full-frame flat fills drawn in OT0 are remapped onto it so
+ * they cover the picture instead of a cropped 4:3 box. g_PsxUIOrthoPass tells
+ * the prim builder which pass it is in. */
+extern float		g_PsxWorldOrtho[4];
+extern float		g_PsxWorldDisp[2];
+extern int			g_PsxWorldOrthoValid;
+extern int			g_PsxUIOrthoPass;
 
 /* PC port: directly upload a vram[] sub-region to BOTH double-buffered VRAM
  * textures, bypassing the swap-then-upload dance. Used by the paper-map

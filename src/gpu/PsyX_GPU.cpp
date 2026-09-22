@@ -656,9 +656,46 @@ HiresOverride_LookupByTpageClut(int tpage, int clut, int* outW, int* outH,
  * UVs restart at each tpage — without it every chunk showed the image
  * from x=0). On a miss the DR_PSYX_TEX packet state is restored, so that
  * path keeps its original semantics. */
+/* Semi-transparency flag of the primitive being parsed; set by ParsePrimitive
+ * for the feedback detector below. */
+static int s_curPrimSemiTrans = 0;
+
+/* Set by that detector for the primitive currently being built, so the rect
+ * builder can stretch it across a widened ortho (see g_PsxFeedbackWideScale).
+ * Cleared per primitive in ParsePrimitive. */
+static int s_curPrimIsFeedback = 0;
+
+/* The primitive samples the live scene-scratch rect: a soft-focus composite
+ * strip (see GR_SceneFbRedirectCovers). Cleared per primitive. */
+static int s_curPrimIsScratch = 0;
+extern "C" int GR_SceneFbRedirectCovers(int x, int y);
+extern "C" float g_PsxFeedbackDampBlend;
+
+/* Red modulation of the primitive being parsed (the loading trail alternates
+ * 127/128, and 127 is a PS1 decay frame for its copy loop). */
+static int s_curPrimR0 = 128;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
+
+	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
+	 * addressing the left 320 VRAM columns is the display-buffer band, which is
+	 * the whole effect family's signature and nothing else's -- real 16bpp game
+	 * textures live at x >= 512. The store then knows it has a reader this frame,
+	 * which pass will redraw the capture, and whether that reader blends. Same
+	 * test hires_override.c uses to refuse an override for these prims. */
+	if (((tpage >> 7) & 0x3) >= 2 && ((tpage & 0xF) * 64) < 320)
+	{
+		s_curPrimIsFeedback = 1;
+		GR_NoteFeedbackSamplerPrim(s_curPrimSemiTrans, s_curPrimR0);
+	}
+	else if (((tpage >> 7) & 0x3) >= 2 &&
+	         GR_SceneFbRedirectCovers((tpage & 0xF) * 64, ((tpage >> 4) & 1) * 256))
+	{
+		s_curPrimIsScratch = 1;
+	}
+
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
 	if (hi != 0) {
 		overrideTexture        = (TextureID)hi;
@@ -1949,9 +1986,120 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
+	/* Widescreen feedback: the effect's strips are authored 320 wide and would
+	 * otherwise blur the 4:3 core and leave the margins sharp, with a hard seam
+	 * down each side. Stretch them across the widened ortho; the capture is
+	 * stretched to match, so the loop stays 1:1. No-op at 4:3.
+	 *
+	 * UI pass only. The scale is the UI ortho's, and the capture widens only for
+	 * a UI-pass reader. The loading trail draws in the WORLD pass and also runs
+	 * at room transitions, where the UI ortho is widened: stretching its strips
+	 * over an unstretched capture rescales the loop every frame, which is the
+	 * vertical-streak class this store has hit before. */
+	/* The scene-scratch soft focus (Alessa, Lisa) is the same idea in the WORLD
+	 * pass: its strips are 320 wide and would soften only the 4:3 core. Stretch
+	 * them across the world ortho; GR_CaptureFrameToVramRect captures the full
+	 * width to match, so the composite stays 1:1 with the scene under it. */
+	if (s_curPrimIsScratch && !g_PsxUIOrthoPass && g_PsxWorldOrthoValid && g_PsxWorldDisp[0] > 0.0f)
+	{
+		const float c = (g_PsxWorldOrtho[0] + g_PsxWorldOrtho[1]) * 0.5f;
+		const float k = (g_PsxWorldOrtho[1] - g_PsxWorldOrtho[0]) / g_PsxWorldDisp[0];
+		if (k > 1.001f)
+		{
+			int i;
+			for (i = 0; i < 4; i++)
+				vertex[i].x = (short)floorf(c + ((float)vertex[i].x - c) * k + 0.5f);
+		}
+	}
+
+	if (s_curPrimIsFeedback && g_PsxUIOrthoPass && g_PsxFeedbackWideScale > 1.001f)
+	{
+		int i;
+		for (i = 0; i < 4; i++)
+		{
+			const float fx = g_PsxFeedbackWideCenter +
+			                 ((float)vertex[i].x - g_PsxFeedbackWideCenter) * g_PsxFeedbackWideScale;
+			vertex[i].x = (short)floorf(fx + 0.5f);
+		}
+	}
+
+	/* [FBGEOM] one-shot: where a feedback strip actually lands, in PSX display
+	 * coordinates, against the ortho it is drawn under. Chasing the unblurred
+	 * sliver along the bottom edge -- the strips are authored 224 tall, so if
+	 * they stop short of the ortho's bottom this line says by how much and
+	 * whether the draw-env offset or the display height is responsible. */
+	/* One line per ortho pass, so the loading screen (world pass) cannot use up
+	 * the budget before an in-scene overlay (UI pass) is ever drawn. */
+	if (s_curPrimIsFeedback)
+	{
+		static int s_fbGeomLogged[2] = { 0, 0 };
+		const int  pass = g_PsxUIOrthoPass ? 1 : 0;
+		if (!s_fbGeomLogged[pass])
+		{
+			s_fbGeomLogged[pass] = 1;
+			eprintinfo("[FBGEOM] %s strip x %d..%d y %d..%d  ofs %.1f,%.1f  wide %.4f about %.1f\n",
+				pass ? "ui" : "world",
+				(int)vertex[0].x, (int)vertex[2].x, (int)vertex[0].y, (int)vertex[2].y,
+				ofsX, ofsY, g_PsxFeedbackWideScale, g_PsxFeedbackWideCenter);
+		}
+	}
+
 	ScreenCoordsToEmulator(vertex, 4);
 }
 
+
+/* A flat fill authored to cover the whole PSX frame -- a scene tint, a flash --
+ * drawn in the WORLD pass. That pass's ortho is widened for Hor+ and cropped
+ * vertically by g_PsxWorldVScale, both of which exist for 3D geometry, so the
+ * fill came out as a 4:3 box that stopped short of the bottom: the blue wash in
+ * the carousel's Flauros scene (map6_s04 func_800E74C4, a 320x224 TILE in OT0).
+ * Remap it onto the world ortho's own extent, which is exactly the picture.
+ *
+ * Untextured only, and only a rect that covers the entire display: a flat
+ * colour has no aspect to distort, whereas a full-frame TEXTURED sprite may be a
+ * picture authored for 4:3 and must not be stretched. Identity in 4:3, in the UI
+ * pass (whose ortho is already the picture) and on 2D screens. */
+static inline void StretchFullFrameFillToWorldOrtho(GrVertex* v)
+{
+	float x0, x1, y0, y1;
+	float L, R, T, B, W, H;
+	int   i;
+
+	if (g_PsxUIOrthoPass || !g_PsxWorldOrthoValid)
+		return;
+
+	L = g_PsxWorldOrtho[0]; R = g_PsxWorldOrtho[1];
+	T = g_PsxWorldOrtho[2]; B = g_PsxWorldOrtho[3];
+	W = g_PsxWorldDisp[0];  H = g_PsxWorldDisp[1];
+
+	if (W <= 0.0f || H <= 0.0f || R <= L || B <= T)
+		return;
+	if (fabsf(L) < 0.01f && fabsf(R - W) < 0.01f && fabsf(T) < 0.01f && fabsf(B - H) < 0.01f)
+		return;
+
+	x0 = x1 = (float)v[0].x;
+	y0 = y1 = (float)v[0].y;
+	for (i = 1; i < 4; i++)
+	{
+		if (v[i].x < x0) x0 = (float)v[i].x;
+		if (v[i].x > x1) x1 = (float)v[i].x;
+		if (v[i].y < y0) y0 = (float)v[i].y;
+		if (v[i].y > y1) y1 = (float)v[i].y;
+	}
+
+	if (!(x0 <= 0.0f && x1 >= W && y0 <= 0.0f && y1 >= H))
+		return;
+
+	/* Round OUTWARD: the ortho edges are fractional (-57.4 at 16:9), and rounding
+	 * a corner inward leaves a column of unfilled pixels down the frame edge. */
+	for (i = 0; i < 4; i++)
+	{
+		const float fx = L + (float)v[i].x * (R - L) / W;
+		const float fy = T + (float)v[i].y * (B - T) / H;
+		v[i].x = (short)(((float)v[i].x <= x0) ? floorf(fx) : ceilf(fx));
+		v[i].y = (short)(((float)v[i].y <= y0) ? floorf(fy) : ceilf(fy));
+	}
+}
 
 /* Stamp the polygon's UV bounding box on every vertex (see GrVertex.ulo). */
 static inline void SetUvLimits(GrVertex* vertex, int count)
@@ -2085,9 +2233,23 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 {
 	assert(uv);
 
-	// sim overflow
-	if (int(uv[0]) + w > 255) w = 255 - uv[0];
-	if (int(uv[1]) + h > 255) h = 255 - uv[1];
+	/* A sprite whose far edge lands EXACTLY on the page edge (u+w or v+h == 256)
+	 * is not an overflow: its last texel is 255, and PSX reads 0..255 exactly.
+	 * Only the edge coordinate, one past the last texel, fails to fit in the u8
+	 * vertex field. Clamping w/h to 255-uv there kept the full screen size but
+	 * sampled one texel fewer, stretching the sprite by a texel -- and a
+	 * framebuffer-feedback strip (256 wide from u=0; 224 tall from v=32 on
+	 * buffer 0) then rescales the stored frame on EVERY pass: the smear and the
+	 * lost bottom line on the dream blur, the sideways stretch on the loading
+	 * trail. Store 255 and carry the missing texel in the per-vertex texcoord
+	 * offset instead (a_extra.xy * 0.5 in the vertex shader, so 2 = +1 texel).
+	 * Genuine overflows past 256 keep the old clamp. */
+	int extendU = 0, extendV = 0;
+
+	if (int(uv[0]) + w == 256)     { w = 255 - uv[0]; extendU = 1; }
+	else if (int(uv[0]) + w > 255) { w = 255 - uv[0]; }
+	if (int(uv[1]) + h == 256)     { h = 255 - uv[1]; extendV = 1; }
+	else if (int(uv[1]) + h > 255) { h = 255 - uv[1]; }
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
@@ -2121,6 +2283,19 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 	vertex[3].dither = dither;
 	vertex[3].page = pageCoord;
 	vertex[3].clut = clut;
+
+	/* Vertex order matches MakeVertexRect: 0 top-left, 1 bottom-left,
+	 * 2 bottom-right, 3 top-right. */
+	if (extendU)
+	{
+		vertex[2].tcx = 2;
+		vertex[3].tcx = 2;
+	}
+	if (extendV)
+	{
+		vertex[1].tcy = 2;
+		vertex[2].tcy = 2;
+	}
 
 	/* An upstream half-texel UV nudge used to sit here, applied to every RECT
 	 * whenever filtering was enabled: tcx/tcy reach the vertex shader as
@@ -2635,6 +2810,8 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
 
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
+	if (s_curPrimIsScratch && !semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+		blendMode = BM_CONSTANT_ALPHA;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
 
@@ -3700,6 +3877,7 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+		StretchFullFrameFillToWorldOrtho(firstVertex);
 		MakeTexcoordQuadZero(firstVertex, 0);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
@@ -3719,12 +3897,42 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 		{
 			ApplyHiresOverride(activeDrawEnv.tpage, poly->clut);
 
+			/* dream_blur off: the soft-focus composite is not drawn at all (its
+			 * capture is skipped too), leaving the plain scene. */
+			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
+				return 4;
+
 			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
 			MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
 			MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+
+			/* dream_blur_strength: every soft-focus layer lerps from what is
+			 * under it toward its hardware result, so 1.0 is the PS1 image and 0
+			 * the plain scene, at unchanged brightness. The average layers scale
+			 * their 0.5 weight, the additive layer its colour, and the opaque
+			 * base layer is BM_CONSTANT_ALPHA (AddSplit). */
+			if (s_curPrimIsScratch && semiTrans && g_PsxFeedbackDampBlend < 1.0f)
+			{
+				const float s = g_PsxFeedbackDampBlend;
+				const bool  avg = GET_TPAGE_BLEND(activeDrawEnv.tpage) == BM_AVERAGE;
+				int i;
+				for (i = 0; i < 4; i++)
+				{
+					if (avg)
+					{
+						firstVertex[i].a = (unsigned char)(firstVertex[i].a * s + 0.5f);
+					}
+					else
+					{
+						firstVertex[i].r = (unsigned char)(firstVertex[i].r * s + 0.5f);
+						firstVertex[i].g = (unsigned char)(firstVertex[i].g * s + 0.5f);
+						firstVertex[i].b = (unsigned char)(firstVertex[i].b * s + 0.5f);
+					}
+				}
+			}
 
 			TriangulateQuad();
 
@@ -4012,6 +4220,17 @@ int ParsePrimitive(P_TAG* polyTag)
 	const int primType = polyTag->code & 0xF0;
 
 	int primLength = 0;
+
+	/* For the framebuffer-feedback detector in ApplyHiresOverride, which sees
+	 * the tpage but not the primitive. A feedback overlay that blends (the
+	 * per-map dream shots) needs the stored frame packed with the mask bit set
+	 * so its texels read back as semi-transparent; the loading trail draws
+	 * opaque and needs it clear, or its black packs to an opaque black rect
+	 * instead of nothing. */
+	s_curPrimSemiTrans  = (polyTag->code & 2) ? 1 : 0;
+	s_curPrimIsFeedback = 0;
+	s_curPrimIsScratch  = 0;
+	s_curPrimR0         = polyTag->pad0; /* r0 in every prim struct */
 
 	switch (primType)
 	{

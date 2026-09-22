@@ -320,8 +320,64 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 
 		eprintinfo("Controller '%s' -> slot %d (instance %d)\n",
 			SDL_GameControllerName(controller->gc), slot, (int)controller->instanceId);
+		/* [PADINFO] prints all of this and the per-button raw binds with it,
+		 * so the device detail [PADPROBE] used to dump here is left to it. */
 		PsyX_Pad_DumpDeviceDetail(controller->gc);
 	}
+}
+
+/* [PADPROBE] Reports the first raw button / axis / hat changes on each open
+ * pad -- the joystick level, beneath the controller mapping -- so a pad that
+ * "does nothing" says whether any data arrives at all. Capped. */
+static void PsyX_Pad_ProbeRawInput(int slot, SDL_GameController* gc)
+{
+	static Sint16 s_axis[MAX_CONTROLLERS][16];
+	static Uint8  s_btn[MAX_CONTROLLERS][32];
+	static Uint8  s_hat[MAX_CONTROLLERS][4];
+	static int    s_init[MAX_CONTROLLERS];
+	static int    s_logs = 0;
+	SDL_Joystick* js = SDL_GameControllerGetJoystick(gc);
+	int           nb, na, nh, k;
+
+	if (!js || s_logs >= 16)
+		return;
+
+	nb = SDL_JoystickNumButtons(js); if (nb > 32) nb = 32;
+	na = SDL_JoystickNumAxes(js);    if (na > 16) na = 16;
+	nh = SDL_JoystickNumHats(js);    if (nh > 4)  nh = 4;
+
+	for (k = 0; k < nb; k++)
+	{
+		const Uint8 v = SDL_JoystickGetButton(js, k);
+		if (s_init[slot] && v != s_btn[slot][k] && s_logs < 16)
+		{
+			s_logs++;
+			eprintinfo("[PADPROBE] slot %d raw button %d = %d\n", slot, k, (int)v);
+		}
+		s_btn[slot][k] = v;
+	}
+	for (k = 0; k < na; k++)
+	{
+		const Sint16 v = SDL_JoystickGetAxis(js, k);
+		if (s_init[slot] && abs((int)v - (int)s_axis[slot][k]) > 12000 && s_logs < 16)
+		{
+			s_logs++;
+			eprintinfo("[PADPROBE] slot %d raw axis %d = %d\n", slot, k, (int)v);
+		}
+		if (!s_init[slot] || abs((int)v - (int)s_axis[slot][k]) > 12000)
+			s_axis[slot][k] = v;
+	}
+	for (k = 0; k < nh; k++)
+	{
+		const Uint8 v = SDL_JoystickGetHat(js, k);
+		if (s_init[slot] && v != s_hat[slot][k] && s_logs < 16)
+		{
+			s_logs++;
+			eprintinfo("[PADPROBE] slot %d raw hat %d = 0x%x\n", slot, k, (unsigned)v);
+		}
+		s_hat[slot][k] = v;
+	}
+	s_init[slot] = 1;
 }
 
 // Closes controller in specific slot
@@ -948,6 +1004,8 @@ static int PsyX_Pad_MergeAllControllers(LPPADRAW pad)
 		if (!cont || !SDL_GameControllerGetAttached(cont))
 			continue;
 		any = 1;
+
+		PsyX_Pad_ProbeRawInput(i, cont);
 
 		w1 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping,  g_controllers[i].hystWord[0]);
 		w2 = PsyX_Pad_BuildPadWord(cont, g_cfg_controllerMapping2, g_controllers[i].hystWord[1]);
