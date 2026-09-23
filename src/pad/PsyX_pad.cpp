@@ -320,27 +320,9 @@ void PsyX_Pad_OpenController(Sint32 deviceId, int slot)
 
 		eprintinfo("Controller '%s' -> slot %d (instance %d)\n",
 			SDL_GameControllerName(controller->gc), slot, (int)controller->instanceId);
-
+		/* [PADINFO] prints all of this and the per-button raw binds with it,
+		 * so the device detail [PADPROBE] used to dump here is left to it. */
 		PsyX_Pad_DumpDeviceDetail(controller->gc);
-
-
-		/* [PADPROBE] what SDL actually made of the device: a pad can be listed
-		 * and opened yet deliver nothing (a driver or Steam holding it) or
-		 * deliver on indices its mapping does not name. */
-		{
-			SDL_Joystick* js = SDL_GameControllerGetJoystick(controller->gc);
-			char          guid[64];
-			char*         map = SDL_GameControllerMapping(controller->gc);
-
-			SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(js), guid, sizeof(guid));
-			eprintinfo("[PADPROBE] slot %d vid=%04x pid=%04x type=%d buttons=%d axes=%d hats=%d guid=%s\n",
-				slot, (unsigned)SDL_JoystickGetVendor(js), (unsigned)SDL_JoystickGetProduct(js),
-				(int)SDL_GameControllerGetType(controller->gc),
-				SDL_JoystickNumButtons(js), SDL_JoystickNumAxes(js), SDL_JoystickNumHats(js), guid);
-			eprintinfo("[PADPROBE] slot %d mapping: %s\n", slot, map ? map : "(none)");
-			if (map)
-				SDL_free(map);
-		}
 	}
 }
 

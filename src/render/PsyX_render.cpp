@@ -4,7 +4,6 @@
 #include <windows.h>
 #endif
 
-
 /* Every platform, not just Windows: the VOIDPROBE readback builds its colour
  * histogram with std::map, std::vector, std::pair and std::sort. MinGW's
  * libstdc++ happens to pull these in through other headers, Apple's libc++
@@ -7512,9 +7511,7 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 void GR_DrawTriangles(int start_vertex, int triangles)
 {
 #if USE_OPENGL
-
 	g_PsyX_DrawCalls++;
-
 	if (s_gf.draws++ == 0)
 		GreyFrame_FirstDraw();
 	s_gf.tris += triangles;

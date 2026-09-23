@@ -707,12 +707,10 @@ static void mc_format_buffer(unsigned char* buf)
 	/* Data blocks 1..15 stay 0xFF. */
 }
 
-/* Ensure 0.MCD exists; create a freshly-formatted one if not. */
-static int mc_ensure_card(int chan)
+/* Write a freshly-formatted image over whatever is there. */
+static int mc_write_fresh(int chan)
 {
-	FILE* f = mc_fopen(chan, "rb");
-	if (f) { fclose(f); return 1; }
-	f = mc_fopen(chan, "wb");
+	FILE* f = mc_fopen(chan, "wb");
 	if (!f) return 0;
 	{
 		unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
@@ -723,6 +721,44 @@ static int mc_ensure_card(int chan)
 	}
 	fclose(f);
 	return 1;
+}
+
+/* 1 if the directory holds at least one entry this code can act on: a used
+ * one (0x5x) or a free one (0xAx). Defined below, next to the reader it uses. */
+static int mc_dir_usable(int chan);
+
+/* Ensure the card exists AND that its directory is one a file can be placed
+ * in. A card can be present and still be unusable: iOS laid down 128 KB of
+ * zeros carrying only the "MC" magic (ios_bootstrap.m), and a zeroed entry is
+ * neither free nor used, so mc_alloc_dir never found a slot -- every save
+ * failed on a card the game read as empty, and the save screen sat on "Now
+ * checking MEMORY CARD" (reported 2026-09-23).
+ *
+ * Such a card provably holds nothing, since a real file would leave a 0x5x
+ * entry, so it is reformatted rather than left able only to fail. One check
+ * per channel per run: a card with even one valid entry is never touched. */
+static int mc_ensure_card(int chan)
+{
+	/* Channels are the file numbers the "buXX:" paths resolve to -- 0..3 for
+	 * slot 1 and 8..11 for slot 2 with a multitap -- so never mask this down
+	 * to one bit: 8.MCD is a real card carrying real saves. */
+	static int checked[16];
+	int        c = (chan >= 0 && chan < 16) ? chan : 0;
+	FILE*      f = mc_fopen(c, "rb");
+
+	if (f) {
+		fclose(f);
+		if (!checked[c]) {
+			checked[c] = 1;
+			if (!mc_dir_usable(c)) {
+				eprintwarn("[MEMCARD] %d.MCD has no usable directory - reformatting\n", c);
+				return mc_write_fresh(c);
+			}
+		}
+		return 1;
+	}
+	checked[c] = 1;
+	return mc_write_fresh(c);
 }
 
 /* Read N bytes at byte offset; returns 1 on success. */
@@ -751,6 +787,20 @@ static int mc_write_at(int chan, long ofs, const void* buf, int bytes)
 	fflush(f);
 	fclose(f);
 	return (int)n == bytes;
+}
+
+static int mc_dir_usable(int chan)
+{
+	for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++) {
+		McDirEntry e;
+		unsigned   attr;
+		/* Unreadable: say nothing is wrong rather than reformat a card we
+		 * cannot see. */
+		if (!mc_read_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 1;
+		attr = (unsigned)(unsigned char)e.attr & 0xF0u;
+		if (attr == MC_DIR_ATTR_FREE || attr == MC_DIR_ATTR_FIRST_OR_ONLY) return 1;
+	}
+	return 0;
 }
 
 /* Find a directory entry by name. Returns 1..15 if found, 0 otherwise. */
