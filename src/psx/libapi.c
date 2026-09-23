@@ -739,8 +739,11 @@ static int mc_dir_usable(int chan);
  * per channel per run: a card with even one valid entry is never touched. */
 static int mc_ensure_card(int chan)
 {
-	static int checked[2];
-	int        c = chan & 1;
+	/* Channels are the file numbers the "buXX:" paths resolve to -- 0..3 for
+	 * slot 1 and 8..11 for slot 2 with a multitap -- so never mask this down
+	 * to one bit: 8.MCD is a real card carrying real saves. */
+	static int checked[16];
+	int        c = (chan >= 0 && chan < 16) ? chan : 0;
 	FILE*      f = mc_fopen(c, "rb");
 
 	if (f) {
