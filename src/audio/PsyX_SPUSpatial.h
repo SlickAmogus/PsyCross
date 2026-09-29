@@ -37,6 +37,13 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
 void PsyX_SPUSpatial_Stop(void);
 int  PsyX_SPUSpatial_Active(void);
 
+/* The layout the device ACTUALLY gave us, in the same 0..5 ids, and whether
+ * that layout has real surround channels. Measured from ALC, not echoed back
+ * from the request, because a 5.1 ask on a stereo endpoint degrades silently.
+ * Meaningless unless PsyX_SPUSpatial_Active(). */
+int  PsyX_SPUSpatial_AchievedSpeakers(void);
+int  PsyX_SPUSpatial_SurroundActive(void);
+
 /* Pending XA/CD frames are pushed by the owner before each render block. */
 void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user);
 
