@@ -66,6 +66,14 @@ struct Bus
 {
     ALuint source;
     ALuint buffers[kQueueDepth];
+    /* Buffers not currently queued on the source. alBufferData on a QUEUED
+     * buffer fails and leaves it holding the previous block, so the only safe
+     * refill target is a name alSourceUnqueueBuffers actually handed back.
+     * Indexing by the queued COUNT instead was the "every sound plays over
+     * itself" bug: that index usually names a still-queued buffer, whose stale
+     * audio then gets re-queued (reported on 5.1 2026-10-01). */
+    ALuint free[kQueueDepth];
+    int    freeCount;
     std::vector<int16_t> scratch;
 };
 
@@ -94,6 +102,8 @@ int    g_directChannels = 0;
 ALenum g_directFormat   = 0;
 ALuint g_directSource   = 0;
 ALuint g_directBuffers[kQueueDepth];
+ALuint g_directFree[kQueueDepth];
+int    g_directFreeCount = 0;
 std::vector<int16_t> g_directScratch;
 
 int g_achievedSpeakers = 1;
@@ -361,19 +371,20 @@ int SDLCALL PumpThread(void*)
 {
     while (g_running)
     {
-        int queuedMin = kQueueDepth;
-
         if (g_directOut)
         {
-            ALint processed = 0, queued = 0;
+            ALint processed = 0;
+
             alGetSourcei(g_directSource, AL_BUFFERS_PROCESSED, &processed);
             while (processed-- > 0)
             {
                 ALuint done = 0;
                 alSourceUnqueueBuffers(g_directSource, 1, &done);
+                if (done && g_directFreeCount < kQueueDepth)
+                    g_directFree[g_directFreeCount++] = done;
             }
-            alGetSourcei(g_directSource, AL_BUFFERS_QUEUED, &queued);
-            if (queued >= kQueueDepth)
+
+            if (g_directFreeCount == 0)
             {
                 SDL_Delay(2);
                 continue;
@@ -382,8 +393,9 @@ int SDLCALL PumpThread(void*)
             RenderBlock();
 
             {
-                ALuint buf = g_directBuffers[queued % kQueueDepth];
+                ALuint buf   = g_directFree[--g_directFreeCount];
                 ALint  state = 0;
+
                 alBufferData(buf, g_directFormat, g_directScratch.data(),
                              (ALsizei)(kBlockFrames * g_directChannels * sizeof(int16_t)),
                              kRate);
@@ -395,21 +407,25 @@ int SDLCALL PumpThread(void*)
             continue;
         }
 
+        int freeMin = kQueueDepth;
+
         for (int b = 0; b < kTotalBuses; ++b)
         {
-            ALint processed = 0, queued = 0;
+            ALint processed = 0;
+
             alGetSourcei(g_bus[b].source, AL_BUFFERS_PROCESSED, &processed);
             while (processed-- > 0)
             {
                 ALuint done = 0;
                 alSourceUnqueueBuffers(g_bus[b].source, 1, &done);
+                if (done && g_bus[b].freeCount < kQueueDepth)
+                    g_bus[b].free[g_bus[b].freeCount++] = done;
             }
-            alGetSourcei(g_bus[b].source, AL_BUFFERS_QUEUED, &queued);
-            if (queued < queuedMin)
-                queuedMin = queued;
+            if (g_bus[b].freeCount < freeMin)
+                freeMin = g_bus[b].freeCount;
         }
 
-        if (queuedMin >= kQueueDepth)
+        if (freeMin == 0)
         {
             SDL_Delay(2);
             continue;
@@ -422,17 +438,12 @@ int SDLCALL PumpThread(void*)
          * session -- which is the reason for buses instead of 24 sources. */
         for (int b = 0; b < kTotalBuses; ++b)
         {
-            ALint queued = 0;
-            alGetSourcei(g_bus[b].source, AL_BUFFERS_QUEUED, &queued);
-            if (queued >= kQueueDepth)
-                continue;
+            ALuint buf   = g_bus[b].free[--g_bus[b].freeCount];
+            ALint  state = 0;
 
-            ALuint buf = g_bus[b].buffers[queued % kQueueDepth];
             alBufferData(buf, AL_FORMAT_MONO16, g_bus[b].scratch.data(),
                          (ALsizei)(kBlockFrames * sizeof(int16_t)), kRate);
             alSourceQueueBuffers(g_bus[b].source, 1, &buf);
-
-            ALint state = 0;
             alGetSourcei(g_bus[b].source, AL_SOURCE_STATE, &state);
             if (state != AL_PLAYING)
                 alSourcePlay(g_bus[b].source);
@@ -543,6 +554,9 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
     {
         alGenSources(1, &g_directSource);
         alGenBuffers(kQueueDepth, g_directBuffers);
+        for (int q = 0; q < kQueueDepth; ++q)
+            g_directFree[q] = g_directBuffers[q];
+        g_directFreeCount = kQueueDepth;
         g_directScratch.assign((size_t)kBlockFrames * g_directChannels, 0);
         /* A multichannel buffer is not spatialised, but say so explicitly so
          * no distance or doppler model can touch it. */
@@ -558,6 +572,9 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
     {
         alGenSources(1, &g_bus[b].source);
         alGenBuffers(kQueueDepth, g_bus[b].buffers);
+        for (int q = 0; q < kQueueDepth; ++q)
+            g_bus[b].free[q] = g_bus[b].buffers[q];
+        g_bus[b].freeCount = kQueueDepth;
         g_bus[b].scratch.assign(kBlockFrames, 0);
         g_busAccum[b].assign(kBlockFrames, 0.0f);
 
@@ -609,9 +626,10 @@ void PsyX_SPUSpatial_Stop(void)
         alDeleteBuffers(kQueueDepth, g_directBuffers);
         memset(g_directBuffers, 0, sizeof(g_directBuffers));
     }
-    g_directOut      = 0;
-    g_directChannels = 0;
-    g_directFormat   = 0;
+    g_directOut       = 0;
+    g_directChannels  = 0;
+    g_directFormat    = 0;
+    g_directFreeCount = 0;
 
     for (int b = 0; b < kTotalBuses; ++b)
     {
@@ -623,6 +641,7 @@ void PsyX_SPUSpatial_Stop(void)
             g_bus[b].source = 0;
             alDeleteBuffers(kQueueDepth, g_bus[b].buffers);
             memset(g_bus[b].buffers, 0, sizeof(g_bus[b].buffers));
+            g_bus[b].freeCount = 0;
         }
     }
 
