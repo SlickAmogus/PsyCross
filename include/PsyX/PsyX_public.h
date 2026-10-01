@@ -60,6 +60,7 @@ extern PsyXControllerMapping		g_cfg_controllerMapping2;	/* PC: secondary control
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping;
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping2;		/* PC: secondary keyboard binds (active w/ allow_mouse_secondary) */
 extern int							g_cfg_controllerToSlotMapping[2];
+extern char							g_cfg_preferredController[128];	/* PC: SDL joystick name; "" = every controller */
 extern int							g_cfg_controllerMovement;	/* PC: 0=analog 1=dpad 2=both */
 extern int							g_cfg_allowMouseSecondary;	/* PC: 1 = secondary + mouse-button binds active */
 extern unsigned short				g_cfg_mouseButtonMask[8];	/* PC: [SDL button 1..5] -> PSX button bitmask */
@@ -257,6 +258,15 @@ extern const char* PsyX_Pad_ConnectedControllerName(void);
 extern int         PsyX_Pad_ConnectedControllerType(void);
 extern const char* PsyX_Pad_HeldBindName(void);
 extern int         PsyX_Pad_AxisValue(int sdlAxis);
+
+/* Preferred controller picker (PsyX_pad.cpp). Connected controllers by SDL
+ * joystick name, identical pads listed once; whether the one named by
+ * g_cfg_preferredController is connected; and re-assigning the slots after
+ * that name changes. */
+extern int         PsyX_Pad_DeviceCount(void);
+extern const char* PsyX_Pad_DeviceName(int n);
+extern int         PsyX_Pad_PreferredControllerConnected(void);
+extern void        PsyX_Pad_ApplyPreferredController(void);
 
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);
