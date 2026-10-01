@@ -600,9 +600,13 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
             g_ring = kRing71;   g_ringCount = 7; break;
     default: g_directOut = 0; g_directChannels = 0; g_directFormat = 0; break;
     }
-    if (g_directOut && alGetEnumValue("AL_FORMAT_51CHN16") == 0)
+    /* The format tokens are compile-time defines, so their presence proves
+     * nothing about this runtime. alGetEnumValue only resolves a token NAME,
+     * which OpenAL Soft knows either way, so it never reported a miss -- and a
+     * build without the extension would have reached alBufferData and got
+     * silence, which is what this fallback exists to avoid. */
+    if (g_directOut && !alIsExtensionPresent("AL_EXT_MCFORMATS"))
     {
-        /* No AL_EXT_MCFORMATS: fall back to the panner rather than to silence. */
         eprintwarn("[SPATIAL] multichannel formats unavailable; using positioned sources\n");
         g_directOut = 0;
     }
