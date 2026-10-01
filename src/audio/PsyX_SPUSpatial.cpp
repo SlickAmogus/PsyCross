@@ -73,6 +73,29 @@ struct Bus
  * 1 stereo, 2 quad, 3 5.1, 4 7.1, 5 hrtf). The console reports these, so they
  * must be measured rather than echoed back from the request: asking for 5.1 on
  * a stereo endpoint silently degrades. */
+/* Direct speaker output.
+ *
+ * The buses below sit at FIXED azimuths that are the real speaker positions,
+ * so handing them to OpenAL as positioned mono sources asks the panner to
+ * solve a problem that is already solved. OpenAL Soft mixes through an
+ * ambisonic bus and decodes to the layout, and that decode puts every point
+ * source into several speakers at once. With nine buses carrying correlated
+ * content (a voice is crossfaded across two of them by design) the same signal
+ * reaches most of the room at different gains, which combs: thin, tinny, and
+ * seemingly coming from everywhere. Reported on 5.1 2026-10-01.
+ *
+ * So on a layout with real speakers the buses are written straight into their
+ * own channels of one multichannel buffer. OpenAL plays a multichannel buffer
+ * to the matching speakers untouched -- no panning, no decode, no smear.
+ * Stereo and HRTF keep the positional path: there the panner is doing the
+ * work we actually want, and HRTF has nothing to do without it. */
+int    g_directOut      = 0;
+int    g_directChannels = 0;
+ALenum g_directFormat   = 0;
+ALuint g_directSource   = 0;
+ALuint g_directBuffers[kQueueDepth];
+std::vector<int16_t> g_directScratch;
+
 int g_achievedSpeakers = 1;
 int g_surroundActive   = 0;
 
@@ -197,6 +220,81 @@ void AccumulateStereoBed(const int16_t* interleaved, int frames, int busL, int b
     }
 }
 
+/* Bus indices, named so the mapping below reads as the layout it describes. */
+enum
+{
+    kBusL90 = 0, kBusL45, kBusC, kBusR45, kBusR90,
+    kBusWetL, kBusWetR,
+    kBusCdL, kBusCdR
+};
+
+/* -3dB, for a bus that has to land between two speakers. */
+const float kHalfPower = 0.70710678f;
+
+void MixDirect(float master)
+{
+    const int ch = g_directChannels;
+    int16_t*  dst = g_directScratch.data();
+
+    for (int i = 0; i < kBlockFrames; ++i)
+    {
+        const float l90 = g_busAccum[kBusL90][i];
+        const float l45 = g_busAccum[kBusL45][i];
+        const float c   = g_busAccum[kBusC][i];
+        const float r45 = g_busAccum[kBusR45][i];
+        const float r90 = g_busAccum[kBusR90][i];
+        const float wl  = g_busAccum[kBusWetL][i];
+        const float wr  = g_busAccum[kBusWetR][i];
+        const float cl  = g_busAccum[kBusCdL][i];
+        const float cr  = g_busAccum[kBusCdR][i];
+        float out[8];
+        int   k;
+
+        if (ch == 4)
+        {
+            /* QUAD: FL FR BL BR. No centre, so the centre bus splits across
+             * the fronts; the sides split front/back. */
+            out[0] = l45 + cl + (c + l90) * kHalfPower;
+            out[1] = r45 + cr + (c + r90) * kHalfPower;
+            out[2] = wl + l90 * kHalfPower;
+            out[3] = wr + r90 * kHalfPower;
+        }
+        else if (ch == 6)
+        {
+            /* 5.1: FL FR FC LFE BL BR. No side pair, so the +-90 buses split
+             * between front and back, which is where 90 degrees sits on this
+             * layout. LFE stays silent -- nothing here is bass-managed. */
+            out[0] = l45 + cl + l90 * kHalfPower;
+            out[1] = r45 + cr + r90 * kHalfPower;
+            out[2] = c;
+            out[3] = 0.0f;
+            out[4] = wl + l90 * kHalfPower;
+            out[5] = wr + r90 * kHalfPower;
+        }
+        else
+        {
+            /* 7.1: FL FR FC LFE BL BR SL SR. The +-90 buses are exactly the
+             * side pair, so everything lands on its own speaker. */
+            out[0] = l45 + cl;
+            out[1] = r45 + cr;
+            out[2] = c;
+            out[3] = 0.0f;
+            out[4] = wl;
+            out[5] = wr;
+            out[6] = l90;
+            out[7] = r90;
+        }
+
+        for (k = 0; k < ch; ++k)
+        {
+            float v = out[k] * master;
+            if (v > 32767.0f)  v = 32767.0f;
+            if (v < -32768.0f) v = -32768.0f;
+            dst[i * ch + k] = (int16_t)v;
+        }
+    }
+}
+
 void RenderBlock(void)
 {
     SPUCore::SplitOutput split;
@@ -239,6 +337,12 @@ void RenderBlock(void)
                       / 32767.0f;
     const float master = mvRaw <= 0.0f ? 0.0f : (mvRaw > 1.0f ? 1.0f : mvRaw);
 
+    if (g_directOut)
+    {
+        MixDirect(master);
+        return;
+    }
+
     for (int b = 0; b < kTotalBuses; ++b)
     {
         const float* srcBuf = g_busAccum[b].data();
@@ -258,6 +362,38 @@ int SDLCALL PumpThread(void*)
     while (g_running)
     {
         int queuedMin = kQueueDepth;
+
+        if (g_directOut)
+        {
+            ALint processed = 0, queued = 0;
+            alGetSourcei(g_directSource, AL_BUFFERS_PROCESSED, &processed);
+            while (processed-- > 0)
+            {
+                ALuint done = 0;
+                alSourceUnqueueBuffers(g_directSource, 1, &done);
+            }
+            alGetSourcei(g_directSource, AL_BUFFERS_QUEUED, &queued);
+            if (queued >= kQueueDepth)
+            {
+                SDL_Delay(2);
+                continue;
+            }
+
+            RenderBlock();
+
+            {
+                ALuint buf = g_directBuffers[queued % kQueueDepth];
+                ALint  state = 0;
+                alBufferData(buf, g_directFormat, g_directScratch.data(),
+                             (ALsizei)(kBlockFrames * g_directChannels * sizeof(int16_t)),
+                             kRate);
+                alSourceQueueBuffers(g_directSource, 1, &buf);
+                alGetSourcei(g_directSource, AL_SOURCE_STATE, &state);
+                if (state != AL_PLAYING)
+                    alSourcePlay(g_directSource);
+            }
+            continue;
+        }
 
         for (int b = 0; b < kTotalBuses; ++b)
         {
@@ -377,6 +513,25 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
     }
 
 
+    /* Real speakers get discrete channels; stereo and HRTF keep the panner. */
+    switch (g_achievedSpeakers)
+    {
+    case 2: g_directOut = 1; g_directChannels = 4; g_directFormat = AL_FORMAT_QUAD16;  break;
+    case 3: g_directOut = 1; g_directChannels = 6; g_directFormat = AL_FORMAT_51CHN16; break;
+    case 4: g_directOut = 1; g_directChannels = 8; g_directFormat = AL_FORMAT_71CHN16; break;
+    default: g_directOut = 0; g_directChannels = 0; g_directFormat = 0; break;
+    }
+    if (g_directOut && alGetEnumValue("AL_FORMAT_51CHN16") == 0)
+    {
+        /* No AL_EXT_MCFORMATS: fall back to the panner rather than to silence. */
+        eprintwarn("[SPATIAL] multichannel formats unavailable; using positioned sources\n");
+        g_directOut = 0;
+    }
+
+    eprintinfo("[SPATIAL] output stage: %s\n",
+               g_directOut ? "discrete speaker channels (no panning)"
+                           : "positioned mono sources (OpenAL panning)");
+
     alListener3f(AL_POSITION, 0.0f, 0.0f, 0.0f);
     alListenerf(AL_GAIN, 1.0f);
     {
@@ -384,6 +539,21 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
         alListenerfv(AL_ORIENTATION, orient);
     }
 
+    if (g_directOut)
+    {
+        alGenSources(1, &g_directSource);
+        alGenBuffers(kQueueDepth, g_directBuffers);
+        g_directScratch.assign((size_t)kBlockFrames * g_directChannels, 0);
+        /* A multichannel buffer is not spatialised, but say so explicitly so
+         * no distance or doppler model can touch it. */
+        alSourcei(g_directSource, AL_SOURCE_RELATIVE, AL_TRUE);
+        alSource3f(g_directSource, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        alSourcef(g_directSource, AL_ROLLOFF_FACTOR, 0.0f);
+        alSourcef(g_directSource, AL_GAIN, 1.0f);
+        for (int b = 0; b < kTotalBuses; ++b)
+            g_busAccum[b].assign(kBlockFrames, 0.0f);
+    }
+    else
     for (int b = 0; b < kTotalBuses; ++b)
     {
         alGenSources(1, &g_bus[b].source);
@@ -429,6 +599,19 @@ void PsyX_SPUSpatial_Stop(void)
             g_thread = NULL;
         }
     }
+
+    if (g_directSource)
+    {
+        alSourceStop(g_directSource);
+        alSourcei(g_directSource, AL_BUFFER, 0);
+        alDeleteSources(1, &g_directSource);
+        g_directSource = 0;
+        alDeleteBuffers(kQueueDepth, g_directBuffers);
+        memset(g_directBuffers, 0, sizeof(g_directBuffers));
+    }
+    g_directOut      = 0;
+    g_directChannels = 0;
+    g_directFormat   = 0;
 
     for (int b = 0; b < kTotalBuses; ++b)
     {
