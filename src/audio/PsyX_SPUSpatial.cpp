@@ -362,6 +362,18 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
                    kNames[g_achievedSpeakers],
                    kNames[(speakerMode >= 0 && speakerMode <= 5) ? speakerMode : 0],
                    g_surroundActive ? " [surround routing active]" : "");
+        /* A layout the device would not give us is the one failure that
+         * otherwise looks like the setting being ignored: the sink runs, the
+         * game sounds fine, and only the extra speakers are missing. Say so,
+         * and name the fallback that has its own layout handling. */
+        if (speakerMode >= 2 && speakerMode <= 4 && !g_surroundActive)
+        {
+            eprintwarn("[SPATIAL] %s was requested but the device gave %s. Check the\n"
+                       "          Windows speaker configuration and alsoft.ini, or set\n"
+                       "          spu_renderer = legacy to use the OpenAL renderer.\n",
+                       kNames[(speakerMode >= 0 && speakerMode <= 5) ? speakerMode : 0],
+                       kNames[g_achievedSpeakers]);
+        }
     }
 
 
