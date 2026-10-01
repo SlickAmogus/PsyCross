@@ -33,6 +33,11 @@
 #define ALC_SURROUND_7_1_SOFT 0x1506
 #endif
 
+/* PsyX_SPUSoftware.cpp: the emitter bearing the game stashed for a voice.
+ * extern "C" to match its definition inside that file export block -- the
+ * mangled name would not link. */
+extern "C" int PsyX_SPUSoftware_VoiceAzimuth(int voiceIdx, int* azQ12);
+
 namespace
 {
 using PsyX::SPUCore;
@@ -230,6 +235,79 @@ void AccumulateStereoBed(const int16_t* interleaved, int frames, int busL, int b
     }
 }
 
+/* The real speaker ring, per layout, sorted by azimuth. In direct mode a
+ * voice is panned between its two neighbouring SPEAKERS rather than across
+ * the front-arc buses: the buses only span +-90, so nothing could ever be
+ * placed behind the listener, and that is most of what positional audio is
+ * for. LFE is not on the ring -- nothing here is bass-managed. */
+struct Spk { float az; int ch; };
+
+/* FL FR BL BR */
+const Spk kRingQuad[] = { { -135.0f, 2 }, { -45.0f, 0 }, { 45.0f, 1 }, { 135.0f, 3 } };
+/* FL FR FC LFE BL BR */
+const Spk kRing51[]   = { { -110.0f, 4 }, { -30.0f, 0 }, { 0.0f, 2 }, { 30.0f, 1 }, { 110.0f, 5 } };
+/* FL FR FC LFE BL BR SL SR */
+const Spk kRing71[]   = { { -150.0f, 4 }, { -90.0f, 6 }, { -30.0f, 0 }, { 0.0f, 2 },
+                          { 30.0f, 1 }, { 90.0f, 7 }, { 150.0f, 5 } };
+
+const Spk* g_ring      = NULL;
+int        g_ringCount = 0;
+
+/* Direct mode accumulates straight into speakers. */
+std::vector<float> g_spkAccum[8];
+
+void PanToSpeakers(const int16_t* mono, int frames, float azDeg, float gain)
+{
+    if (gain <= 0.0f || g_ringCount <= 0)
+        return;
+
+    while (azDeg < -180.0f) azDeg += 360.0f;
+    while (azDeg >  180.0f) azDeg -= 360.0f;
+
+    /* Neighbouring pair on the ring, wrapping across the back. */
+    int   lo = g_ringCount - 1;
+    int   hi = 0;
+    float loAz = g_ring[lo].az - 360.0f;
+    float hiAz = g_ring[hi].az;
+    for (int i = 0; i < g_ringCount - 1; ++i)
+    {
+        if (azDeg >= g_ring[i].az && azDeg <= g_ring[i + 1].az)
+        {
+            lo = i; hi = i + 1;
+            loAz = g_ring[lo].az; hiAz = g_ring[hi].az;
+            break;
+        }
+    }
+    if (azDeg > g_ring[g_ringCount - 1].az)
+    {
+        lo = g_ringCount - 1; hi = 0;
+        loAz = g_ring[lo].az; hiAz = g_ring[hi].az + 360.0f;
+    }
+
+    const float span = hiAz - loAz;
+    float t = span > 0.0f ? (azDeg - loAz) / span : 0.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+
+    const float gLo = cosf(t * 1.57079632679f) * gain;
+    const float gHi = sinf(t * 1.57079632679f) * gain;
+    float* dLo = g_spkAccum[g_ring[lo].ch].data();
+    float* dHi = g_spkAccum[g_ring[hi].ch].data();
+    for (int i = 0; i < frames; ++i)
+    {
+        const float v = (float)mono[i];
+        dLo[i] += v * gLo;
+        dHi[i] += v * gHi;
+    }
+}
+
+void AddToSpeaker(const int16_t* interleaved, int frames, int stride, int offset, int ch)
+{
+    float* d = g_spkAccum[ch].data();
+    for (int i = 0; i < frames; ++i)
+        d[i] += (float)interleaved[i * stride + offset];
+}
+
 /* Bus indices, named so the mapping below reads as the layout it describes. */
 enum
 {
@@ -243,61 +321,14 @@ const float kHalfPower = 0.70710678f;
 
 void MixDirect(float master)
 {
-    const int ch = g_directChannels;
+    const int ch  = g_directChannels;
     int16_t*  dst = g_directScratch.data();
 
     for (int i = 0; i < kBlockFrames; ++i)
     {
-        const float l90 = g_busAccum[kBusL90][i];
-        const float l45 = g_busAccum[kBusL45][i];
-        const float c   = g_busAccum[kBusC][i];
-        const float r45 = g_busAccum[kBusR45][i];
-        const float r90 = g_busAccum[kBusR90][i];
-        const float wl  = g_busAccum[kBusWetL][i];
-        const float wr  = g_busAccum[kBusWetR][i];
-        const float cl  = g_busAccum[kBusCdL][i];
-        const float cr  = g_busAccum[kBusCdR][i];
-        float out[8];
-        int   k;
-
-        if (ch == 4)
+        for (int k = 0; k < ch; ++k)
         {
-            /* QUAD: FL FR BL BR. No centre, so the centre bus splits across
-             * the fronts; the sides split front/back. */
-            out[0] = l45 + cl + (c + l90) * kHalfPower;
-            out[1] = r45 + cr + (c + r90) * kHalfPower;
-            out[2] = wl + l90 * kHalfPower;
-            out[3] = wr + r90 * kHalfPower;
-        }
-        else if (ch == 6)
-        {
-            /* 5.1: FL FR FC LFE BL BR. No side pair, so the +-90 buses split
-             * between front and back, which is where 90 degrees sits on this
-             * layout. LFE stays silent -- nothing here is bass-managed. */
-            out[0] = l45 + cl + l90 * kHalfPower;
-            out[1] = r45 + cr + r90 * kHalfPower;
-            out[2] = c;
-            out[3] = 0.0f;
-            out[4] = wl + l90 * kHalfPower;
-            out[5] = wr + r90 * kHalfPower;
-        }
-        else
-        {
-            /* 7.1: FL FR FC LFE BL BR SL SR. The +-90 buses are exactly the
-             * side pair, so everything lands on its own speaker. */
-            out[0] = l45 + cl;
-            out[1] = r45 + cr;
-            out[2] = c;
-            out[3] = 0.0f;
-            out[4] = wl;
-            out[5] = wr;
-            out[6] = l90;
-            out[7] = r90;
-        }
-
-        for (k = 0; k < ch; ++k)
-        {
-            float v = out[k] * master;
+            float v = g_spkAccum[k][i] * master;
             if (v > 32767.0f)  v = 32767.0f;
             if (v < -32768.0f) v = -32768.0f;
             dst[i * ch + k] = (int16_t)v;
@@ -328,6 +359,39 @@ void RenderBlock(void)
     g_core->RenderFrames(NULL, kBlockFrames, &split);
     SDL_UnlockMutex(g_coreMutex);
 
+    if (g_directOut)
+    {
+        for (int k = 0; k < g_directChannels; ++k)
+            memset(g_spkAccum[k].data(), 0, sizeof(float) * (size_t)kBlockFrames);
+
+        for (int v = 0; v < PsyX::kNumVoices; ++v)
+        {
+            float az, gain;
+            int   azQ12 = 0;
+
+            VoiceAzimuthGain(split.panL[v], split.panR[v], &az, &gain);
+            /* The emitter true bearing when the game supplied one: the L/R
+             * balance it would otherwise be derived from only spans the front
+             * arc. Gain still comes from the louder side, since the balance
+             * attenuation is already baked into those volumes. */
+            if (PsyX_SPUSoftware_VoiceAzimuth(v, &azQ12))
+                az = (float)azQ12 * (360.0f / 4096.0f);
+
+            PanToSpeakers(g_voiceBuf[v].data(), kBlockFrames, az, gain);
+        }
+
+        /* Reverb return behind the listener, CD/XA as a front bed. */
+        {
+            const int bl = (g_directChannels == 4) ? 2 : 4;
+            const int br = (g_directChannels == 4) ? 3 : 5;
+            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 0, bl);
+            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 1, br);
+            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 0, 0);
+            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 1, 1);
+        }
+    }
+    else
+    {
     for (int b = 0; b < kTotalBuses; ++b)
         memset(g_busAccum[b].data(), 0, sizeof(float) * (size_t)kBlockFrames);
 
@@ -341,6 +405,7 @@ void RenderBlock(void)
     AccumulateStereoBed(g_wetBuf.data(), kBlockFrames, kDryBuses, kDryBuses + 1);
     AccumulateStereoBed(g_cdBuf.data(), kBlockFrames, kDryBuses + kWetBuses,
                         kDryBuses + kWetBuses + 1);
+    }
 
     /* Master volume last, matching where the hardware applies it. */
     const float mvRaw = (float)(split.masterL > split.masterR ? split.masterL : split.masterR)
@@ -527,9 +592,12 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
     /* Real speakers get discrete channels; stereo and HRTF keep the panner. */
     switch (g_achievedSpeakers)
     {
-    case 2: g_directOut = 1; g_directChannels = 4; g_directFormat = AL_FORMAT_QUAD16;  break;
-    case 3: g_directOut = 1; g_directChannels = 6; g_directFormat = AL_FORMAT_51CHN16; break;
-    case 4: g_directOut = 1; g_directChannels = 8; g_directFormat = AL_FORMAT_71CHN16; break;
+    case 2: g_directOut = 1; g_directChannels = 4; g_directFormat = AL_FORMAT_QUAD16;
+            g_ring = kRingQuad; g_ringCount = 4; break;
+    case 3: g_directOut = 1; g_directChannels = 6; g_directFormat = AL_FORMAT_51CHN16;
+            g_ring = kRing51;   g_ringCount = 5; break;
+    case 4: g_directOut = 1; g_directChannels = 8; g_directFormat = AL_FORMAT_71CHN16;
+            g_ring = kRing71;   g_ringCount = 7; break;
     default: g_directOut = 0; g_directChannels = 0; g_directFormat = 0; break;
     }
     if (g_directOut && alGetEnumValue("AL_FORMAT_51CHN16") == 0)
@@ -558,6 +626,8 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
             g_directFree[q] = g_directBuffers[q];
         g_directFreeCount = kQueueDepth;
         g_directScratch.assign((size_t)kBlockFrames * g_directChannels, 0);
+        for (int k = 0; k < g_directChannels; ++k)
+            g_spkAccum[k].assign(kBlockFrames, 0.0f);
         /* A multichannel buffer is not spatialised, but say so explicitly so
          * no distance or doppler model can touch it. */
         alSourcei(g_directSource, AL_SOURCE_RELATIVE, AL_TRUE);
