@@ -30,6 +30,26 @@ extern "C" void GR_CaptureFrameToVramRect(int x, int y, int w, int h);
 int g_currentOTBucketCount = 0;
 float g_otBucketDepth = 0.0f;
 
+/* The OT bucket the game fills with 2D screen-space strings, or -1.
+ *
+ * The frame-class 3D marker below assumes a POLY on a 3D frame is world
+ * geometry, because the 2D content the game orders is SPRT and TILE. Scaled
+ * text breaks that assumption on purpose: a SPRT draws texels 1:1 and cannot be
+ * resized, so enlarged glyphs are emitted as POLY_FT4 instead -- and were then
+ * filtered as if they were a wall, which is what made big subtitles look soft
+ * and swollen in the world while the same text stayed crisp on a menu frame.
+ * The port names that bucket while the text is scaled; -1 means business as
+ * usual. Absolute index, i.e. the port's own OT tag index. */
+extern "C" { int g_PsxUi2dBucket = -1; }
+
+/* Absolute index of the bucket being walked (the walk runs far->near). */
+static int s_otBucketAbs = -1;
+
+static int OtBucketIsUi2d(void)
+{
+	return g_PsxUi2dBucket >= 0 && s_otBucketAbs == g_PsxUi2dBucket;
+}
+
 /* ----------------------------------------------------------------------------
  * PGXP (perspective-correct rendering) — shadow-memory model, DuckStation-faithful.
  *
@@ -1851,7 +1871,7 @@ void MakeVertexTriangle(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* 
 	 * tree quads coming out blocky at 16x anisotropic. The lookup below still
 	 * runs and still sets the marker; this only removes the dependency on it
 	 * resolving, which it does for ~82% of vertices. */
-	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth)
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth && !OtBucketIsUi2d())
 		vertex[0].geom3d = vertex[1].geom3d = vertex[2].geom3d = 1.0f;
 
 	/* Before the PGXP block: the near-clip eligibility test below reads the
@@ -1919,7 +1939,7 @@ void MakeVertexQuad(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, VERTTYPE* p2, 
 	vertex[0].z = vertex[1].z = vertex[2].z = vertex[3].z = g_otBucketDepth;
 
 	/* Frame-class 3D marker, same reasoning as MakeVertexTriangle. */
-	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth)
+	if (g_PsxFrame3dClass && !g_PsyX_ForceItemDepth && !OtBucketIsUi2d())
 	{
 		vertex[0].geom3d = vertex[1].geom3d =
 		vertex[2].geom3d = vertex[3].geom3d = 1.0f;
@@ -3174,6 +3194,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 		// one depth value — matching the PSX's painter's-algorithm intent.
 		// g_otBucketDepth advances only at tagLength==0 bucket-boundary entries.
 		int otBucketIdx = 0;
+		s_otBucketAbs = -1;
 		const float otBucketStep = (g_currentOTBucketCount > 1)
 			? (2.0f / (float)(g_currentOTBucketCount - 1)) : 0.0f;
 		g_otBucketDepth = -1.0f;
@@ -3267,6 +3288,7 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 					if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
 				}
+				s_otBucketAbs = g_currentOTBucketCount - 1 - otBucketIdx;
 				otBucketIdx++;
 			}
 			else if (tagLength > 32)
