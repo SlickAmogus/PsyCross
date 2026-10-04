@@ -27,6 +27,11 @@ typedef struct
 
 int						g_cfg_controllerToSlotMapping[MAX_CONTROLLERS] = { -1, -1 };
 
+/* PC port: SDL joystick name of the controller the player picked. While it is
+ * connected it alone sits in slot 0 and drives the game; while it is not, every
+ * controller is assigned first-come as before. Empty = Automatic. */
+char					g_cfg_preferredController[128] = "";
+
 /* PC port: movement source for the controller. 0 = analog stick only,
  * 1 = d-pad only (digital), 2 = both (default). Set from config in main_pc.c.
  * Drives whether the emulated pad sits in analog (0x73) or digital (0x41) mode. */
@@ -419,6 +424,161 @@ void PsyX_Pad_InitPad(int slot, u_char* padData)
 	}
 }
 
+static int PsyX_Pad_SlotOfInstance(SDL_JoystickID instanceId)
+{
+	int i;
+
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		if (g_controllers[i].gc && g_controllers[i].instanceId == instanceId)
+			return i;
+	}
+	return -1;
+}
+
+/* Device index of the preferred controller, -1 when none is set or it is not
+ * connected. `gone` is a device whose REMOVED event is being handled: SDL may
+ * still list it at that point. */
+static int PsyX_Pad_PreferredDeviceIndex(SDL_JoystickID gone)
+{
+	int i, n;
+
+	if (g_cfg_preferredController[0] == '\0')
+		return -1;
+
+	n = SDL_NumJoysticks();
+	for (i = 0; i < n; i++)
+	{
+		const char* nm;
+
+		if (!SDL_IsGameController(i) || SDL_JoystickGetDeviceInstanceID(i) == gone)
+			continue;
+		nm = SDL_JoystickNameForIndex(i);
+		if (nm != NULL && strcmp(nm, g_cfg_preferredController) == 0)
+			return i;
+	}
+	return -1;
+}
+
+/* Controllers held open but read by nothing while a preferred one is in use.
+ * Closing them would not silence them on Android: SDL hands the buttons of a
+ * joystick nobody has opened to the keyboard instead (A as Return, the d-pad as
+ * the arrows -- SDL_sysjoystick.c Android_OnPadDown), and the arrows are the
+ * default movement keys. */
+#define MAX_PARKED_CONTROLLERS 8
+static SDL_GameController* g_parkedControllers[MAX_PARKED_CONTROLLERS];
+
+static void PsyX_Pad_UnparkAll(void)
+{
+	int i;
+
+	for (i = 0; i < MAX_PARKED_CONTROLLERS; i++)
+	{
+		if (g_parkedControllers[i])
+			SDL_GameControllerClose(g_parkedControllers[i]);
+		g_parkedControllers[i] = NULL;
+	}
+}
+
+static void PsyX_Pad_ParkAllExcept(SDL_JoystickID keep, SDL_JoystickID gone)
+{
+	int i, n = SDL_NumJoysticks(), k = 0;
+
+	PsyX_Pad_UnparkAll();
+
+	for (i = 0; i < n && k < MAX_PARKED_CONTROLLERS; i++)
+	{
+		const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+
+		if (!SDL_IsGameController(i) || id == keep || id == gone)
+			continue;
+
+		g_parkedControllers[k] = SDL_GameControllerOpen(i);
+		if (g_parkedControllers[k])
+		{
+			eprintinfo("[PAD] '%s' ignored (preferred controller in use)\n",
+				SDL_GameControllerName(g_parkedControllers[k]));
+			k++;
+		}
+	}
+}
+
+/* Bring the slots in line with what is connected and what the player picked.
+ *
+ * First-come assignment alone leaves the player at the mercy of enumeration
+ * order. An Android TV box lists its remote (and often an HDMI-CEC remote) as
+ * game controllers -- SDLControllerManager takes any D-pad source -- so they can
+ * fill both slots before a Bluetooth pad pairs, and the pad is then never
+ * opened at all. A preferred controller takes slot 0 and every other controller
+ * is parked, so a remote cannot drive Harry or keep the touch overlay away; the
+ * moment it disconnects the others take the slots again, so the game is never
+ * left without a controller. */
+static void PsyX_Pad_Reconcile(SDL_JoystickID gone)
+{
+	int i, s, n, pref;
+
+	/* Free any slot whose handle went stale (missed REMOVED, USB re-enumeration). */
+	for (s = 0; s < MAX_CONTROLLERS; s++)
+	{
+		if (g_controllers[s].gc && !SDL_GameControllerGetAttached(g_controllers[s].gc))
+			PsyX_Pad_CloseController(s);
+	}
+
+	pref = PsyX_Pad_PreferredDeviceIndex(gone);
+	if (pref >= 0)
+	{
+		const SDL_JoystickID want = SDL_JoystickGetDeviceInstanceID(pref);
+
+		if (!(g_controllers[0].gc && g_controllers[0].instanceId == want))
+		{
+			PsyX_Pad_UnparkAll();
+			for (s = 0; s < MAX_CONTROLLERS; s++)
+				PsyX_Pad_CloseController(s);
+			PsyX_Pad_OpenController(pref, 0);
+		}
+
+		if (g_controllers[0].gc)
+		{
+			for (s = 1; s < MAX_CONTROLLERS; s++)
+				PsyX_Pad_CloseController(s);
+			PsyX_Pad_ParkAllExcept(want, gone);
+			return;
+		}
+		eprintwarn("[PAD] preferred controller '%s' failed to open, using all controllers\n",
+			g_cfg_preferredController);
+	}
+
+	PsyX_Pad_UnparkAll();
+
+	/* Config-pinned slots accept exactly their device index; unpinned slots
+	 * accept any newcomer. Matching on controller->deviceId is wrong here: it
+	 * auto-latches the index of the FIRST device, so a pad replugged into a
+	 * different port (new index) could never rejoin its slot. */
+	n = SDL_NumJoysticks();
+	for (i = 0; i < n; i++)
+	{
+		SDL_JoystickID id;
+
+		if (!SDL_IsGameController(i))
+			continue;
+		id = SDL_JoystickGetDeviceInstanceID(i);
+		if (id == gone || PsyX_Pad_SlotOfInstance(id) >= 0)
+			continue;
+
+		for (s = 0; s < MAX_CONTROLLERS; s++)
+		{
+			if (g_controllers[s].gc)
+				continue;
+			if (g_cfg_controllerToSlotMapping[s] != -1 &&
+			    g_cfg_controllerToSlotMapping[s] != i)
+				continue;
+
+			PsyX_Pad_OpenController(i, s);
+			break;
+		}
+	}
+}
+
 // called from Psy-X SDL events
 void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 {
@@ -426,37 +586,12 @@ void PsyX_Pad_Event_ControllerAdded(Sint32 deviceId)
 	 * mismatch that used to strand pads. The old haptic subsystem reinit is
 	 * gone: rumble runs through SDL_GameControllerRumble, no SDL_Haptic
 	 * handles exist, and quitting the subsystem mid-event was the crash its
-	 * own FIXME warned about. */
-	int i;
-	PsyXController* controller;
+	 * own FIXME warned about. Every unopened device is considered, not just
+	 * this one, so one that found the slots full earlier gets its turn. */
+	(void)deviceId;
 
 	PsyX_Pad_Debug_ListControllers();
-
-	/* Free any slot whose handle went stale (missed REMOVED, USB re-enumeration). */
-	for (i = 0; i < MAX_CONTROLLERS; i++)
-	{
-		controller = &g_controllers[i];
-		if (controller->gc && !SDL_GameControllerGetAttached(controller->gc))
-			PsyX_Pad_CloseController(i);
-	}
-
-	/* Config-pinned slots accept exactly their device index; unpinned slots
-	 * accept any newcomer. Matching on controller->deviceId is wrong here: it
-	 * auto-latches the index of the FIRST device, so a pad replugged into a
-	 * different port (new index) could never rejoin its slot. */
-	for (i = 0; i < MAX_CONTROLLERS; i++)
-	{
-		controller = &g_controllers[i];
-
-		if (controller->gc)
-			continue;
-		if (g_cfg_controllerToSlotMapping[i] != -1 &&
-		    g_cfg_controllerToSlotMapping[i] != deviceId)
-			continue;
-
-		PsyX_Pad_OpenController(deviceId, i);
-		break;
-	}
+	PsyX_Pad_Reconcile(-1);
 }
 
 // called from Psy-X SDL events
@@ -482,7 +617,76 @@ void PsyX_Pad_Event_ControllerRemoved(Sint32 instanceId)
 		}
 	}
 
+	/* A preferred controller going away is what opens the others again. */
+	PsyX_Pad_Reconcile((SDL_JoystickID)instanceId);
+
 	PsyX_Pad_Debug_ListControllers();
+}
+
+/* PC port: connected controllers by SDL joystick name, for the in-game
+ * picker. Two identical pads share a name and are listed once -- the
+ * preference is stored by name, so they could not be told apart anyway. */
+static const char* PsyX_Pad_DistinctDeviceName(int nth, int* count)
+{
+	const char* found = NULL;
+	int         i, j, n = SDL_NumJoysticks(), k = 0;
+
+	for (i = 0; i < n; i++)
+	{
+		const char* nm;
+		int         dup = 0;
+
+		if (!SDL_IsGameController(i))
+			continue;
+		nm = SDL_JoystickNameForIndex(i);
+		if (nm == NULL || nm[0] == '\0')
+			continue;
+
+		for (j = 0; j < i && !dup; j++)
+		{
+			const char* prev = SDL_IsGameController(j) ? SDL_JoystickNameForIndex(j) : NULL;
+			dup = (prev != NULL && strcmp(prev, nm) == 0);
+		}
+		if (dup)
+			continue;
+
+		if (k == nth)
+			found = nm;
+		k++;
+	}
+
+	if (count != NULL)
+		*count = k;
+	return found;
+}
+
+extern "C" int PsyX_Pad_DeviceCount(void)
+{
+	int count;
+
+	PsyX_Pad_DistinctDeviceName(-1, &count);
+	return count;
+}
+
+extern "C" const char* PsyX_Pad_DeviceName(int n)
+{
+	return PsyX_Pad_DistinctDeviceName(n, NULL);
+}
+
+extern "C" int PsyX_Pad_PreferredControllerConnected(void)
+{
+	return PsyX_Pad_PreferredDeviceIndex(-1) >= 0;
+}
+
+extern "C" void PsyX_Pad_ApplyPreferredController(void)
+{
+	/* Before init the ADDED events SDL raises at startup do this. */
+	if (g_sdlKeyboardState == NULL)
+		return;
+
+	eprintinfo("[PAD] preferred controller: %s\n",
+		g_cfg_preferredController[0] ? g_cfg_preferredController : "(automatic)");
+	PsyX_Pad_Reconcile(-1);
 }
 
 void PsyX_Pad_InternalPadUpdates()
