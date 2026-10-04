@@ -964,6 +964,19 @@ static GLuint s_internalDepthRbo = 0;
 static int    s_internalW = 0, s_internalH = 0;
 int g_presentWidth = 0, g_presentHeight = 0;
 
+/* How the internal target is scaled onto the window when the two differ.
+ * 0 = integer, 1 = nearest, 2 = bilinear, 3 = sharp bilinear. 2 is the default
+ * because it is what the present always did. Only matters when a render
+ * resolution below the window is in use, which in practice means borderless at
+ * a deliberately low resolution. */
+int g_PcPresentScale = 2;
+
+/* Sharp bilinear needs somewhere to put the nearest whole-multiple upscale
+ * before the smooth pass. That intermediate is what keeps texel edges crisp
+ * while still easing the leftover fraction. */
+static GLuint s_sharpFBO = 0, s_sharpTex = 0;
+static int    s_sharpW = 0, s_sharpH = 0;
+
 /* What the launcher asked for, and which display mode. The window itself cannot
  * be trusted for this: a borderless window is created at desktop size and SDL
  * then fires a resize event with the desktop size, which is exactly how the
@@ -1067,8 +1080,121 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 	*outX = x; *outY = y; *outW = w; *outH = h;
 }
 
+/* Scale the internal target into the window rect by the configured method.
+ *
+ * Integer and sharp bilinear both start from the largest whole multiple of the
+ * render size that still fits, because that is what puts every texel on the
+ * same number of pixels. Integer stops there and centres the result; sharp
+ * bilinear takes that crisp intermediate and eases only the leftover fraction,
+ * so it fills the window without the mush of a plain linear stretch. Nearest
+ * and bilinear stretch straight to the rect. */
+static void GR_PresentBlit(GLuint src, int dx, int dy, int dw, int dh)
+{
+	const int mode = g_PcPresentScale;
+
+	if (s_internalW <= 0 || s_internalH <= 0 || dw <= 0 || dh <= 0)
+		return;
+
+	/* Nothing to choose when the sizes already match. */
+	if (dw == s_internalW && dh == s_internalH)
+	{
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH, dx, dy, dx + dw, dy + dh,
+		                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		return;
+	}
+
+	if (mode == 1 || mode == 2)
+	{
+		glBlitFramebuffer(0, 0, s_internalW, s_internalH, dx, dy, dx + dw, dy + dh,
+		                  GL_COLOR_BUFFER_BIT, mode == 1 ? GL_NEAREST : GL_LINEAR);
+		return;
+	}
+
+	{
+		int       n  = dw / s_internalW;
+		const int ny = dh / s_internalH;
+
+		if (ny < n) n = ny;
+		if (n < 1)  n = 1; /* window smaller than the render: just fit it */
+
+		if (mode == 0)
+		{
+			/* Centre the whole-multiple image inside the rect it was given. */
+			const int iw = s_internalW * n;
+			const int ih = s_internalH * n;
+			const int ix = dx + (dw - iw) / 2;
+			const int iy = dy + (dh - ih) / 2;
+
+			glBlitFramebuffer(0, 0, s_internalW, s_internalH, ix, iy, ix + iw, iy + ih,
+			                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			return;
+		}
+
+		/* Sharp bilinear. At 1x the intermediate buys nothing and this would be
+		 * a plain linear stretch, so skip the extra pass. */
+		if (n < 2)
+		{
+			glBlitFramebuffer(0, 0, s_internalW, s_internalH, dx, dy, dx + dw, dy + dh,
+			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+			return;
+		}
+
+		{
+			const int sw = s_internalW * n;
+			const int sh = s_internalH * n;
+
+			if (s_sharpFBO == 0 || s_sharpW != sw || s_sharpH != sh)
+			{
+				if (s_sharpTex) { glDeleteTextures(1, &s_sharpTex); s_sharpTex = 0; }
+				if (s_sharpFBO) { glDeleteFramebuffers(1, &s_sharpFBO); s_sharpFBO = 0; }
+
+				glGenTextures(1, &s_sharpTex);
+				glBindTexture(GL_TEXTURE_2D, s_sharpTex);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, sw, sh, 0, GL_RGBA,
+				             GL_UNSIGNED_BYTE, NULL);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				glGenFramebuffers(1, &s_sharpFBO);
+				glBindFramebuffer(GL_FRAMEBUFFER, s_sharpFBO);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+				                       GL_TEXTURE_2D, s_sharpTex, 0);
+
+				if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+				{
+					/* Degrade to the smooth stretch, never to a black frame. */
+					glDeleteFramebuffers(1, &s_sharpFBO); s_sharpFBO = 0;
+					glDeleteTextures(1, &s_sharpTex);     s_sharpTex = 0;
+					s_sharpW = 0; s_sharpH = 0;
+					glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+					glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+					glBlitFramebuffer(0, 0, s_internalW, s_internalH,
+					                  dx, dy, dx + dw, dy + dh,
+					                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+					return;
+				}
+				s_sharpW = sw; s_sharpH = sh;
+			}
+
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_sharpFBO);
+			glBlitFramebuffer(0, 0, s_internalW, s_internalH, 0, 0, sw, sh,
+			                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, s_sharpFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glBlitFramebuffer(0, 0, sw, sh, dx, dy, dx + dw, dy + dh,
+			                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		}
+	}
+}
+
 void GR_DestroyInternalTarget(void)
 {
+	if (s_sharpTex) { glDeleteTextures(1, &s_sharpTex); s_sharpTex = 0; }
+	if (s_sharpFBO) { glDeleteFramebuffers(1, &s_sharpFBO); s_sharpFBO = 0; }
+	s_sharpW = 0; s_sharpH = 0;
 	if (s_internalColorTex) { glDeleteTextures(1, &s_internalColorTex); s_internalColorTex = 0; }
 	if (s_internalColorRbo) { glDeleteRenderbuffers(1, &s_internalColorRbo); s_internalColorRbo = 0; }
 	if (s_resolveTex)       { glDeleteTextures(1, &s_resolveTex); s_resolveTex = 0; }
@@ -7097,9 +7223,7 @@ void GR_SwapWindow()
 			glClear(GL_COLOR_BUFFER_BIT);
 		}
 
-		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
-		                  dx, dy, dx + dw, dy + dh,
-		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		GR_PresentBlit(src, dx, dy, dw, dh);
 		if (g_PsxVoidProbeArmed)
 		{
 			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
