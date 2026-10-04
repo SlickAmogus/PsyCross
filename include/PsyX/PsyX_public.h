@@ -61,6 +61,7 @@ extern PsyXKeyboardMapping			g_cfg_keyboardMapping;
 extern PsyXKeyboardMapping			g_cfg_keyboardMapping2;		/* PC: secondary keyboard binds (active w/ allow_mouse_secondary) */
 extern int							g_cfg_controllerToSlotMapping[2];
 extern char							g_cfg_preferredController[128];	/* PC: SDL joystick name; "" = every controller */
+extern int							g_PcPresentScale;				/* PC: present upscale -- 0 integer, 1 nearest, 2 bilinear, 3 sharp */
 extern int							g_cfg_controllerMovement;	/* PC: 0=analog 1=dpad 2=both */
 extern int							g_cfg_allowMouseSecondary;	/* PC: 1 = secondary + mouse-button binds active */
 extern unsigned short				g_cfg_mouseButtonMask[8];	/* PC: [SDL button 1..5] -> PSX button bitmask */

@@ -388,6 +388,17 @@ float g_PcUiRect[4]  = { -160.0f, 160.0f, -120.0f, 120.0f };
  * coordinates a GTE-projected object lands in. Console object picking
  * (pc_pick.c) reads it. Defaults to the 4:3 frame until the first latch. */
 float g_PcWorldOrthoRect[4] = { -160.0f, 160.0f, -120.0f, 120.0f };
+
+/* PC port: how the finished image is scaled onto the window when the render
+ * resolution is below it -- 0 integer, 1 nearest, 2 bilinear, 3 sharp
+ * bilinear, matching the config's Scaling option, which main_pc.c writes at
+ * startup. 2 is what this layer did unconditionally before the option existed,
+ * so it is the default here too. Read by GR_SwapWindow.
+ *
+ * 3 currently presents as 2 on this backend: sharp bilinear means a NEAREST
+ * prescale to a whole multiple followed by a LINEAR remainder, which needs a
+ * second target this path does not have. */
+int g_PcPresentScale = 2;
 extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
 
 int g_cfg_pgxpTextureCorrection = 1;
@@ -7072,14 +7083,35 @@ void GR_SwapWindow()
 
 	/* Stretch the internal target onto the real window. This is the only bind of
 	 * framebuffer 0 that genuinely means "the window" -- every other one means
-	 * "the scene target" and goes through GR_ScreenFBO(). LINEAR so a lower
-	 * internal resolution scales up smoothly rather than blockily. */
+	 * "the scene target" and goes through GR_ScreenFBO(). The filter is the
+	 * player's Scaling choice (g_PcPresentScale); it used to be LINEAR always,
+	 * which is still the default. */
 	if (g_internalFBO != 0 && g_presentWidth > 0 && g_presentHeight > 0)
 	{
 		int dx, dy, dw, dh;
 		GLuint src = GR_ScreenReadFBO();   /* resolves first when multisampled */
 
 		GR_PresentRect(&dx, &dy, &dw, &dh);
+
+		/* Integer scaling keeps the rect the aspect code chose and shrinks it
+		 * to the largest whole multiple of the internal image that still fits,
+		 * centred in what it gave up, so every source pixel covers the same
+		 * number of window pixels. Below 1:1 there is no whole multiple to
+		 * take, so the rect stands and the filter alone applies. */
+		if (g_PcPresentScale == 0 && s_internalW > 0 && s_internalH > 0)
+		{
+			int k  = dw / s_internalW;
+			int ky = dh / s_internalH;
+
+			if (ky < k) k = ky;
+			if (k >= 1)
+			{
+				dx += (dw - s_internalW * k) / 2;
+				dy += (dh - s_internalH * k) / 2;
+				dw  = s_internalW * k;
+				dh  = s_internalH * k;
+			}
+		}
 
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, PSYX_DEFAULT_FBO);
@@ -7098,8 +7130,9 @@ void GR_SwapWindow()
 		}
 
 		glBlitFramebuffer(0, 0, s_internalW, s_internalH,
-		                  dx, dy, dx + dw, dy + dh,
-		                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		                  dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT,
+		                  (g_PcPresentScale == 0 || g_PcPresentScale == 1) ? GL_NEAREST
+		                                                                  : GL_LINEAR);
 		if (g_PsxVoidProbeArmed)
 		{
 			VoidProbeRows("window", 0, g_presentWidth, g_presentHeight);
