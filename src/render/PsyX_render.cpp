@@ -4891,6 +4891,30 @@ static GLint    g_postLoc_calib = -1;
 /* Set nonzero by the Brightness screen so GR_PostProcess overlays the reference
  * bar; cleared when it exits. */
 extern "C" { int g_cfg_calibBar = 0; }
+
+/* Image-adjustment scope (config key image_adjust_scope).
+ *
+ * Brightness/contrast/saturation are a grade of the COMPOSED frame, so they
+ * used to hit the menus, the paper map, the save screen and every FMV as well
+ * as the world -- the complaint in issue #150. With world-only scope the grade
+ * is skipped on frames that render no 3D world, which on this game means the
+ * UI and movie screens, since there is no persistent in-game HUD to worry
+ * about.
+ *
+ * The look filters (CRT, scanlines, vignette, grain, sharpen) and the tonemap
+ * are deliberately NOT scoped: those emulate a display or a film response and
+ * belong over the whole frame.
+ *
+ * g_cfg_sceneFrame is published once per frame by the game side
+ * (DbgOverlay_Render). g_cfg_calibBar forces the grade back on for the
+ * Brightness screen itself -- it IS a UI screen, and without this exception
+ * its own calibration preview would stop responding to the sliders. */
+extern "C" { int g_cfg_imageAdjustScope = 1; int g_cfg_sceneFrame = 1; }
+
+extern "C" int GR_ImageAdjustActive(void)
+{
+	return g_cfg_imageAdjustScope == 0 || g_cfg_sceneFrame || g_cfg_calibBar;
+}
 static GLuint   g_postVAO = 0;
 static GLuint   g_postFBO = 0;
 static TextureID g_postTex = (TextureID)-1;
@@ -5116,12 +5140,21 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 		glUniform1f(g_postLoc_postInt, g_cfg_postProcessIntensity);
 	if (g_postLoc_tmInt != -1)
 		glUniform1f(g_postLoc_tmInt, g_cfg_tonemapIntensity);
-	if (g_postLoc_bright != -1)
-		glUniform1f(g_postLoc_bright, g_cfg_brightness);
-	if (g_postLoc_contrast != -1)
-		glUniform1f(g_postLoc_contrast, g_cfg_contrast);
-	if (g_postLoc_satur != -1)
-		glUniform1f(g_postLoc_satur, g_cfg_saturation);
+	/* Out of scope = pass neutral rather than skip the pass, since a look filter
+	 * or the tonemap may still need it this frame. */
+	{
+		const int   adj = GR_ImageAdjustActive();
+		const float br  = adj ? g_cfg_brightness : 1.0f;
+		const float ct  = adj ? g_cfg_contrast   : 1.0f;
+		const float sa  = adj ? g_cfg_saturation : 1.0f;
+
+		if (g_postLoc_bright != -1)
+			glUniform1f(g_postLoc_bright, br);
+		if (g_postLoc_contrast != -1)
+			glUniform1f(g_postLoc_contrast, ct);
+		if (g_postLoc_satur != -1)
+			glUniform1f(g_postLoc_satur, sa);
+	}
 	if (g_postLoc_calib != -1)
 		glUniform1i(g_postLoc_calib, g_cfg_calibBar);
 
@@ -5154,8 +5187,9 @@ void GR_PostProcess(void)
 {
 	/* Also run when an image adjustment is off-neutral or the calibration bar is
 	 * requested, so brightness/contrast/saturation apply with no filter selected. */
-	const int bcsActive = (g_cfg_brightness != 1.0f) || (g_cfg_contrast != 1.0f) ||
-	                      (g_cfg_saturation != 1.0f) || (g_cfg_calibBar != 0);
+	const int bcsActive = GR_ImageAdjustActive() &&
+	                      ((g_cfg_brightness != 1.0f) || (g_cfg_contrast != 1.0f) ||
+	                       (g_cfg_saturation != 1.0f) || (g_cfg_calibBar != 0));
 	if (g_cfg_postProcess <= 0 && g_cfg_tonemap <= 0 && !bcsActive)
 		return;
 	if (g_postShader == (ShaderID)-1)
