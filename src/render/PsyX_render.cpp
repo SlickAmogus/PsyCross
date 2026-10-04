@@ -380,6 +380,14 @@ float g_PcHudRect[4] = { -160.0f, 160.0f, -120.0f, 120.0f };
  * included. g_PcHudRect deliberately ignores those, so on a 4:3 menu it still
  * says wide; anything drawn on a menu has to be placed against this one. */
 float g_PcUiRect[4]  = { -160.0f, 160.0f, -120.0f, 120.0f };
+
+/* PC port: the WORLD (OT0) pass's ortho rect in prim coordinates, latched on
+ * every gameplay frame. Same idea as g_PcHudRect above, for the other pass:
+ * the world ortho carries hfov and vfov and, in Hor+, the widened margin, so
+ * inverting it is the only way to turn a mouse position into the prim
+ * coordinates a GTE-projected object lands in. Console object picking
+ * (pc_pick.c) reads it. Defaults to the 4:3 frame until the first latch. */
+float g_PcWorldOrthoRect[4] = { -160.0f, 160.0f, -120.0f, 120.0f };
 extern "C" void PsyX_GetDrawEnvOffset(float* x, float* y);
 
 int g_cfg_pgxpTextureCorrection = 1;
@@ -4702,6 +4710,16 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 					g_PcHudRect[2] = g_PcUiRect[2];
 					g_PcHudRect[3] = g_PcUiRect[3];
 				}
+			}
+
+			/* Same latch for the world pass, for console object picking. */
+			if (g_PcHorPlusEnabled && !g_PsxUIOrthoPass) {
+				float ox = 0.0f, oy = 0.0f;
+				PsyX_GetDrawEnvOffset(&ox, &oy);
+				g_PcWorldOrthoRect[0] = fbOrthoL - ox;
+				g_PcWorldOrthoRect[1] = fbOrthoR - ox;
+				g_PcWorldOrthoRect[2] = fbOrthoT - oy;
+				g_PcWorldOrthoRect[3] = fbOrthoB - oy;
 			}
 
 			/* [ASPECT] ground-truth dump of the ACTUAL runtime projection

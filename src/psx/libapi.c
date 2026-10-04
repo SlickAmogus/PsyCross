@@ -631,8 +631,13 @@ typedef struct {
 } McDirEntry;
 #pragma pack(pop)
 
+/* Card files are numbered like the "buXY:" device paths, X*8+Y: 0..3 = port 1
+ * slots A-D, 8..11 = port 2 slots A-D. The low-level _card_* calls take the
+ * hardware channel instead, port*16+slot, and go through mc_card_from_channel. */
+#define MC_CARD_FILES 12
+
 static int  s_currentChannel = 0;
-static int  s_lastCardOk[2]  = { 0, 0 };
+static int  s_lastCardOk[MC_CARD_FILES];
 
 /* PSX file-handle table for open()/read()/write()/lseek()/close().
  * We use small positive ints as handles (1..MC_DIR_ENTRY_COUNT). */
@@ -683,34 +688,85 @@ static FILE* mc_fopen(int chan, const char* mode)
 	return fopen(mc_path_for_channel(chan), mode);
 }
 
-/* Build a "fresh card" image: header magic + free dir + 0xFF data. */
+static int mc_card_from_channel(int chan)
+{
+	return ((chan >> 4) & 1) * 8 + (chan & 3);
+}
+
+/* Directory frames carry an XOR of their first 127 bytes in byte 127. The
+ * console BIOS and DuckStation's card editor expect it, so cards written here
+ * stay usable outside the port. */
+static void mc_seal_frame(unsigned char* frame)
+{
+	unsigned char x = 0;
+	for (int i = 0; i < MC_FRAME_SIZE - 1; i++) x ^= frame[i];
+	frame[MC_FRAME_SIZE - 1] = x;
+}
+
+/* Fields are written byte-wise so the image is little-endian on every host. */
+static void mc_make_dir_frame(unsigned char* frame, unsigned int attr, unsigned int size, const char* name)
+{
+	memset(frame, 0, MC_FRAME_SIZE);
+	frame[0] = (unsigned char)attr;
+	frame[4] = (unsigned char)size;
+	frame[5] = (unsigned char)(size >> 8);
+	frame[6] = (unsigned char)(size >> 16);
+	frame[7] = (unsigned char)(size >> 24);
+	frame[8] = 0xFF;
+	frame[9] = 0xFF;
+	if (name) strncpy((char*)frame + 10, name, 20);
+	mc_seal_frame(frame);
+}
+
+/* A standard formatted card, as the console BIOS writes it. */
 static void mc_format_buffer(unsigned char* buf)
 {
-	memset(buf, 0xFF, MC_TOTAL_SIZE);
-	/* Frame 0: "MC" magic at offset 0; 0x80 xor checksum at offset 127. */
-	memset(buf, 0, MC_FRAME_SIZE);
+	memset(buf, 0, MC_BLOCK_SIZE);
+	memset(buf + MC_BLOCK_SIZE, 0xFF, MC_TOTAL_SIZE - MC_BLOCK_SIZE);
 	buf[0] = 'M';
 	buf[1] = 'C';
+	mc_seal_frame(buf);
+	for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++)
+		mc_make_dir_frame(buf + i * MC_FRAME_SIZE, MC_DIR_ATTR_FREE, 0, NULL);
+	/* Frames 16..35: empty bad-sector relocation list. */
+	for (int i = 16; i < 36; i++) {
+		unsigned char* fr = buf + i * MC_FRAME_SIZE;
+		memset(fr, 0xFF, 4);
+		fr[8] = 0xFF;
+		fr[9] = 0xFF;
+		mc_seal_frame(fr);
+	}
+	memset(buf + 36 * MC_FRAME_SIZE, 0xFF, 27 * MC_FRAME_SIZE);
+	memcpy(buf + 63 * MC_FRAME_SIZE, buf, MC_FRAME_SIZE);
+}
+
+/* Only port 1 and port 2 slot A are plugged in: the PC has no multitap. A
+ * multitap slot still counts as present when an older build left saves on it
+ * (those builds reported all eight slots present), so no save goes missing. */
+static int mc_card_present(int card)
+{
+	if (card < 0 || card >= MC_CARD_FILES || (card & 4)) return 0;
+	if ((card & 3) == 0) return 1;
 	{
-		unsigned char xorck = 0;
-		for (int i = 0; i < MC_FRAME_SIZE - 1; i++) xorck ^= buf[i];
-		buf[MC_FRAME_SIZE - 1] = xorck;
+		unsigned char dir[(MC_DIR_ENTRY_COUNT + 1) * MC_FRAME_SIZE];
+		FILE* f = mc_fopen(card, "rb");
+		size_t n;
+		if (!f) return 0;
+		n = fread(dir, 1, sizeof(dir), f);
+		fclose(f);
+		if (n != sizeof(dir) || dir[0] != 'M' || dir[1] != 'C') return 0;
+		for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++) {
+			const unsigned char* e = dir + i * MC_FRAME_SIZE;
+			if ((e[0] & 0xF0) == MC_DIR_ATTR_FIRST_OR_ONLY && e[10] != 0) return 1;
+		}
 	}
-	/* Frames 1..15: free directory entries. */
-	for (int i = 0; i < MC_DIR_ENTRY_COUNT; i++) {
-		McDirEntry* d = (McDirEntry*)(buf + (1 + i) * MC_FRAME_SIZE);
-		memset(d, 0, sizeof(*d));
-		d->attr = MC_DIR_ATTR_FREE;
-	}
-	/* Frames 16..35: broken-sector list (filled with 0xFF, unused). */
-	memset(buf + 16 * MC_FRAME_SIZE, 0xFF, 20 * MC_FRAME_SIZE);
-	/* Data blocks 1..15 stay 0xFF. */
+	return 0;
 }
 
 /* Write a freshly-formatted image over whatever is there. */
-static int mc_write_fresh(int chan)
+static int mc_write_fresh(int card)
 {
-	FILE* f = mc_fopen(chan, "wb");
+	FILE* f = mc_fopen(card, "wb");
 	if (!f) return 0;
 	{
 		unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
@@ -723,42 +779,39 @@ static int mc_write_fresh(int chan)
 	return 1;
 }
 
-/* 1 if the directory holds at least one entry this code can act on: a used
- * one (0x5x) or a free one (0xAx). Defined below, next to the reader it uses. */
-static int mc_dir_usable(int chan);
+/* 1 if the directory holds an entry this code can act on: used (0x5x) or free
+ * (0xAx). Defined below, beside the reader it uses. */
+static int mc_dir_usable(int card);
 
-/* Ensure the card exists AND that its directory is one a file can be placed
- * in. A card can be present and still be unusable: iOS laid down 128 KB of
- * zeros carrying only the "MC" magic (ios_bootstrap.m), and a zeroed entry is
- * neither free nor used, so mc_alloc_dir never found a slot -- every save
- * failed on a card the game read as empty, and the save screen sat on "Now
- * checking MEMORY CARD" (reported 2026-09-23).
+/* Creates a formatted card file on first use; fails for a slot with no card.
  *
- * Such a card provably holds nothing, since a real file would leave a 0x5x
- * entry, so it is reformatted rather than left able only to fail. One check
- * per channel per run: a card with even one valid entry is never touched. */
-static int mc_ensure_card(int chan)
+ * A card file can also exist and still be unusable: an older iOS build laid one
+ * down as 128 KB of zeros carrying only the "MC" magic, and a zeroed entry is
+ * neither free nor used, so mc_alloc_dir never found a slot -- every save failed
+ * on a card the game read as empty (reported 2026-09-23). Such a card provably
+ * holds nothing, since a real file leaves a 0x5x entry, so it is reformatted
+ * rather than left able only to fail. Checked once per card per run; a card
+ * with even one valid entry is never touched. */
+static int mc_ensure_card(int card)
 {
-	/* Channels are the file numbers the "buXX:" paths resolve to -- 0..3 for
-	 * slot 1 and 8..11 for slot 2 with a multitap -- so never mask this down
-	 * to one bit: 8.MCD is a real card carrying real saves. */
-	static int checked[16];
-	int        c = (chan >= 0 && chan < 16) ? chan : 0;
-	FILE*      f = mc_fopen(c, "rb");
+	static int checked[MC_CARD_FILES];
+	FILE*      f;
 
+	if (!mc_card_present(card)) return 0;
+
+	f = mc_fopen(card, "rb");
 	if (f) {
 		fclose(f);
-		if (!checked[c]) {
-			checked[c] = 1;
-			if (!mc_dir_usable(c)) {
-				eprintwarn("[MEMCARD] %d.MCD has no usable directory - reformatting\n", c);
-				return mc_write_fresh(c);
+		if (card >= 0 && card < MC_CARD_FILES && !checked[card]) {
+			checked[card] = 1;
+			if (!mc_dir_usable(card)) {
+				eprintwarn("[MEMCARD] %d.MCD has no usable directory - reformatting\n", card);
+				return mc_write_fresh(card);
 			}
 		}
 		return 1;
 	}
-	checked[c] = 1;
-	return mc_write_fresh(c);
+	return mc_write_fresh(card);
 }
 
 /* Read N bytes at byte offset; returns 1 on success. */
@@ -823,19 +876,28 @@ static int mc_find_dir(int chan, const char* name, McDirEntry* outEntry)
  * blocks = block count requested. Returns dir index 1..15 or 0 on failure. */
 static int mc_alloc_dir(int chan, const char* name, int blocks)
 {
-	int dirIdx = 0;
-	for (int i = 1; i <= MC_DIR_ENTRY_COUNT; i++) {
-		McDirEntry e;
-		if (!mc_read_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
-		if ((e.attr & 0xF0) == MC_DIR_ATTR_FREE) {
-			dirIdx = i;
-			memset(&e, 0, sizeof(e));
-			e.attr = MC_DIR_ATTR_FIRST_OR_ONLY | (blocks & 0x7);
-			e.size = blocks * MC_BLOCK_SIZE;
-			strncpy(e.name, name, sizeof(e.name) - 1);
-			if (!mc_write_at(chan, i * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
-			return i;
+	/* read()/write() address a file as consecutive blocks from its directory
+	 * slot, so the whole run must be free. */
+	unsigned char dir[(MC_DIR_ENTRY_COUNT + 1) * MC_FRAME_SIZE];
+	if (!mc_read_at(chan, 0, dir, sizeof(dir))) return 0;
+	for (int i = 1; i + blocks - 1 <= MC_DIR_ENTRY_COUNT; i++) {
+		int b;
+		for (b = 0; b < blocks; b++)
+			if ((dir[(i + b) * MC_FRAME_SIZE] & 0xF0) != MC_DIR_ATTR_FREE) break;
+		if (b < blocks) continue;
+		for (b = 0; b < blocks; b++) {
+			unsigned char* fr = dir + (i + b) * MC_FRAME_SIZE;
+			unsigned int attr = (b == 0) ? 0x51 : (b == blocks - 1 ? 0x53 : 0x52);
+			mc_make_dir_frame(fr, attr, b == 0 ? (unsigned int)(blocks * MC_BLOCK_SIZE) : 0, b == 0 ? name : NULL);
+			if (b < blocks - 1) {
+				/* Link = next block index - 1, which is this slot's index. */
+				fr[8] = (unsigned char)(i + b);
+				fr[9] = 0;
+				mc_seal_frame(fr);
+			}
 		}
+		if (!mc_write_at(chan, i * MC_FRAME_SIZE, dir + i * MC_FRAME_SIZE, blocks * MC_FRAME_SIZE)) return 0;
+		return i;
 	}
 	return 0;
 }
@@ -857,6 +919,13 @@ static void mc_deliver_iod(void)
 {
 	DeliverEvent(SwCARD, EvSpIOE);
 	DeliverEvent(HwCARD, EvSpIOE);
+}
+
+/* What the BIOS raises for an empty slot: the request is accepted, then times out. */
+static void mc_deliver_timeout(void)
+{
+	DeliverEvent(SwCARD, EvSpTIMOUT);
+	DeliverEvent(HwCARD, EvSpTIMOUT);
 }
 
 /* ----- BIOS-level memcard funcs ----- */
@@ -885,26 +954,36 @@ void _bu_init()
 	mc_ensure_card(0);
 }
 
+/* Common front of the low-level calls: 1 = card there (event left to the
+ * caller), 0 = no card (timeout already delivered). */
+static int mc_card_request(int chan)
+{
+	int card = mc_card_from_channel(chan);
+	s_currentChannel = chan;
+	if (!mc_ensure_card(card)) {
+		s_lastCardOk[card] = 0;
+		mc_deliver_timeout();
+		return 0;
+	}
+	s_lastCardOk[card] = 1;
+	return 1;
+}
+
 int _card_info(int chan)
 {
-	mc_ensure_card(chan & 1);
-	s_lastCardOk[chan & 1] = 1;
-	mc_deliver_iod();
+	if (mc_card_request(chan)) mc_deliver_iod();
 	return 1;
 }
 
 int _card_clear(int chan)
 {
-	mc_deliver_iod();
+	if (mc_card_request(chan)) mc_deliver_iod();
 	return 1;
 }
 
 int _card_load(int chan)
 {
-	s_currentChannel = chan & 1;
-	if (!mc_ensure_card(s_currentChannel)) return 0;
-	s_lastCardOk[s_currentChannel] = 1;
-	mc_deliver_iod();
+	if (mc_card_request(chan)) mc_deliver_iod();
 	return 1;
 }
 
@@ -917,13 +996,12 @@ int _card_auto(int val)
 void _new_card()
 {
 	/* PSX BIOS: marks card as "newly inserted" — clear cached state. */
-	s_lastCardOk[0] = 0;
-	s_lastCardOk[1] = 0;
+	memset(s_lastCardOk, 0, sizeof(s_lastCardOk));
 }
 
 int _card_status(int drv)
 {
-	return s_lastCardOk[drv & 1] ? 1 : 0;
+	return s_lastCardOk[mc_card_from_channel(drv)] ? 1 : 0;
 }
 
 int _card_wait(int drv)
@@ -939,26 +1017,28 @@ unsigned int _card_chan(void)
 
 int _card_write(int chan, int frameIdx, unsigned char *buf)
 {
-	int c = chan & 1;
-	if (!mc_ensure_card(c)) return 0;
-	if (!mc_write_at(c, (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
+	if (frameIdx < 0 || frameIdx >= MC_TOTAL_SIZE / MC_FRAME_SIZE) return 0;
+	if (!mc_card_request(chan)) return 1;
+	if (!mc_write_at(mc_card_from_channel(chan), (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
 	mc_deliver_iod();
 	return 1;
 }
 
 int _card_read(int chan, int frameIdx, unsigned char *buf)
 {
-	int c = chan & 1;
-	if (!mc_ensure_card(c)) return 0;
-	if (!mc_read_at(c, (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
+	if (frameIdx < 0 || frameIdx >= MC_TOTAL_SIZE / MC_FRAME_SIZE) return 0;
+	if (!mc_card_request(chan)) return 1;
+	if (!mc_read_at(mc_card_from_channel(chan), (long)frameIdx * MC_FRAME_SIZE, buf, MC_FRAME_SIZE)) return 0;
 	mc_deliver_iod();
 	return 1;
 }
 
-int _card_format(int chan)
+/* Takes a card file number (format() passes the "buXY:" path's X*8+Y). */
+static int mc_format_card(int c)
 {
-	int c = chan & 1;
-	unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
+	unsigned char* fresh;
+	if (!mc_card_present(c)) return 0;
+	fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
 	if (!fresh) return 0;
 	mc_format_buffer(fresh);
 	{
@@ -971,6 +1051,11 @@ int _card_format(int chan)
 	free(fresh);
 	mc_deliver_iod();
 	return 1;
+}
+
+int _card_format(int chan)
+{
+	return mc_format_card(mc_card_from_channel(chan));
 }
 
 /* ----- POSIX-style file ops on "buXX:NAME" paths ----- */
@@ -1119,12 +1204,26 @@ int erase(char* path)
 	if (!path) return 0;
 	int chan = 0;
 	const char* name = mc_strip_prefix(path, &chan);
-	int dirIdx = mc_find_dir(chan, name, NULL);
-	if (dirIdx == 0) return 0;
 	McDirEntry e;
-	memset(&e, 0, sizeof(e));
-	e.attr = MC_DIR_ATTR_FREE;
-	if (!mc_write_at(chan, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
+	int dirIdx = mc_find_dir(chan, name, &e);
+	if (dirIdx == 0) return 0;
+	{
+		/* Follow the block links (a file copied onto a real card need not be
+		 * contiguous). Older port builds wrote link 0 on single-block files, so
+		 * the size decides how many blocks to free, not the link. */
+		unsigned char fr[MC_FRAME_SIZE];
+		int blocks = (int)((e.size + MC_BLOCK_SIZE - 1) / MC_BLOCK_SIZE);
+		int cur = dirIdx;
+		if (blocks < 1) blocks = 1;
+		for (int b = 0; b < blocks && cur >= 1 && cur <= MC_DIR_ENTRY_COUNT; b++) {
+			int next;
+			if (!mc_read_at(chan, cur * MC_FRAME_SIZE, fr, MC_FRAME_SIZE)) return 0;
+			next = fr[8] | (fr[9] << 8);
+			mc_make_dir_frame(fr, MC_DIR_ATTR_FREE, 0, NULL);
+			if (!mc_write_at(chan, cur * MC_FRAME_SIZE, fr, MC_FRAME_SIZE)) return 0;
+			cur = (next == 0xFFFF) ? -1 : next + 1;
+		}
+	}
 	return 1;
 }
 
@@ -1136,9 +1235,9 @@ int undelete(char* unk00)
 
 int format(char* path)
 {
-	int chan = 0;
-	if (path) mc_strip_prefix(path, &chan);
-	return _card_format(chan);
+	int card = 0;
+	if (!path || mc_strip_prefix(path, &card) == path) return 0;
+	return mc_format_card(card);
 }
 
 /* Signature uses const char* to match the stdio.h `rename` decl
@@ -1160,6 +1259,7 @@ int rename(const char* oldpath, const char* newpath)
 	if (!mc_read_at(chanA, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
 	memset(e.name, 0, sizeof(e.name));
 	strncpy(e.name, newname, sizeof(e.name) - 1);
+	mc_seal_frame((unsigned char*)&e);
 	if (!mc_write_at(chanA, dirIdx * MC_FRAME_SIZE, &e, sizeof(e))) return 0;
 	return 1;
 }

@@ -11,6 +11,28 @@
 #include <string.h>
 #include <vector>
 
+/* Output-mode tokens come from a current OpenAL Soft alext.h; bare OpenAL 1.1
+ * headers (macOS system framework) lack them, so define fallbacks. Every use
+ * is still gated on a runtime extension check. Kept identical to the copies in
+ * PsyX_SPUAL.cpp -- the two renderers must agree on what a layout id means. */
+#ifndef ALC_OUTPUT_MODE_SOFT
+#define ALC_OUTPUT_MODE_SOFT  0x19AC
+#define ALC_ANY_SOFT          0x19AD
+#define ALC_STEREO_BASIC_SOFT 0x19AE
+#define ALC_STEREO_UHJ_SOFT   0x19AF
+#define ALC_STEREO_HRTF_SOFT  0x19B2
+#endif
+#ifndef ALC_MONO_SOFT
+#define ALC_MONO_SOFT   0x1500
+#define ALC_STEREO_SOFT 0x1501
+#define ALC_QUAD_SOFT   0x1503
+#endif
+#ifndef ALC_SURROUND_5_1_SOFT
+#define ALC_SURROUND_5_1_SOFT 0x1504
+#define ALC_SURROUND_6_1_SOFT 0x1505
+#define ALC_SURROUND_7_1_SOFT 0x1506
+#endif
+
 namespace
 {
 using PsyX::SPUCore;
@@ -46,6 +68,39 @@ struct Bus
     ALuint buffers[kQueueDepth];
     std::vector<int16_t> scratch;
 };
+
+/* What the device actually gave us, in the shared 0..5 layout ids (0 auto,
+ * 1 stereo, 2 quad, 3 5.1, 4 7.1, 5 hrtf). The console reports these, so they
+ * must be measured rather than echoed back from the request: asking for 5.1 on
+ * a stereo endpoint silently degrades. */
+int g_achievedSpeakers = 1;
+int g_surroundActive   = 0;
+
+int AlcOutputModeToSpeakers(int alcMode)
+{
+    switch (alcMode)
+    {
+    case ALC_QUAD_SOFT:         return 2;
+    case ALC_SURROUND_5_1_SOFT:
+    case ALC_SURROUND_6_1_SOFT: return 3;
+    case ALC_SURROUND_7_1_SOFT: return 4;
+    case ALC_STEREO_HRTF_SOFT:  return 5;
+    }
+    return 1;
+}
+
+int SpeakersToAlcOutputMode(int spk)
+{
+    switch (spk)
+    {
+    case 1: return ALC_STEREO_BASIC_SOFT;
+    case 2: return ALC_QUAD_SOFT;
+    case 3: return ALC_SURROUND_5_1_SOFT;
+    case 4: return ALC_SURROUND_7_1_SOFT;
+    case 5: return ALC_STEREO_HRTF_SOFT;
+    }
+    return ALC_ANY_SOFT;
+}
 
 ALCdevice*  g_dev = NULL;
 ALCcontext* g_ctx = NULL;
@@ -263,10 +318,21 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
         return false;
     }
 
-    ALCint attrs[3];
-    attrs[0] = ALC_FREQUENCY;
-    attrs[1] = kRate;
-    attrs[2] = 0;
+    /* An explicit layout is requested through ALC, exactly as the legacy
+     * renderer does it. auto passes NO output-mode attribute on purpose: the
+     * attribute unconditionally overrides the user alsoft.ini, so auto has to
+     * stay out of the way and let the device report its own layout. */
+    ALCint attrs[5];
+    int    na = 0;
+    attrs[na++] = ALC_FREQUENCY;
+    attrs[na++] = kRate;
+    if (speakerMode >= 1 && speakerMode <= 5 &&
+        alcIsExtensionPresent(g_dev, "ALC_SOFT_output_mode"))
+    {
+        attrs[na++] = ALC_OUTPUT_MODE_SOFT;
+        attrs[na++] = SpeakersToAlcOutputMode(speakerMode);
+    }
+    attrs[na] = 0;
 
     g_prevCtx = alcGetCurrentContext();
     g_ctx = alcCreateContext(g_dev, attrs);
@@ -279,7 +345,37 @@ bool PsyX_SPUSpatial_Start(PsyX::SPUCore* core, SDL_mutex* coreMutex, int speake
         return false;
     }
 
-    (void)speakerMode; /* the layout comes from the device configuration */
+    /* Trust only what came back. */
+    g_achievedSpeakers = 1;
+    g_surroundActive   = 0;
+    if (alcIsExtensionPresent(g_dev, "ALC_SOFT_output_mode"))
+    {
+        ALCint alcMode = 0;
+        alcGetIntegerv(g_dev, ALC_OUTPUT_MODE_SOFT, 1, &alcMode);
+        g_achievedSpeakers = AlcOutputModeToSpeakers(alcMode);
+        g_surroundActive   = g_achievedSpeakers == 2 || g_achievedSpeakers == 3 ||
+                             g_achievedSpeakers == 4;
+    }
+    {
+        static const char* const kNames[] = { "auto", "stereo", "quad", "5.1", "7.1", "hrtf" };
+        eprintinfo("[SPATIAL] speaker layout: %s (requested %s)%s\n",
+                   kNames[g_achievedSpeakers],
+                   kNames[(speakerMode >= 0 && speakerMode <= 5) ? speakerMode : 0],
+                   g_surroundActive ? " [surround routing active]" : "");
+        /* A layout the device would not give us is the one failure that
+         * otherwise looks like the setting being ignored: the sink runs, the
+         * game sounds fine, and only the extra speakers are missing. Say so,
+         * and name the fallback that has its own layout handling. */
+        if (speakerMode >= 2 && speakerMode <= 4 && !g_surroundActive)
+        {
+            eprintwarn("[SPATIAL] %s was requested but the device gave %s. Check the\n"
+                       "          Windows speaker configuration and alsoft.ini, or set\n"
+                       "          spu_renderer = legacy to use the OpenAL renderer.\n",
+                       kNames[(speakerMode >= 0 && speakerMode <= 5) ? speakerMode : 0],
+                       kNames[g_achievedSpeakers]);
+        }
+    }
+
 
     alListener3f(AL_POSITION, 0.0f, 0.0f, 0.0f);
     alListenerf(AL_GAIN, 1.0f);
@@ -366,6 +462,16 @@ void PsyX_SPUSpatial_Stop(void)
 int PsyX_SPUSpatial_Active(void)
 {
     return g_active;
+}
+
+int PsyX_SPUSpatial_AchievedSpeakers(void)
+{
+    return g_achievedSpeakers;
+}
+
+int PsyX_SPUSpatial_SurroundActive(void)
+{
+    return g_surroundActive;
 }
 
 void PsyX_SPUSpatial_SetXaPump(void (*pump)(void* user, int frames), void* user)

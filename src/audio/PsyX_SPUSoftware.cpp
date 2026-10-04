@@ -430,9 +430,25 @@ PSX_API_EXPORT void PsyX_SPUAL_SetAdsrEnabled(int) {}
 PSX_API_EXPORT int PsyX_SPUAL_GetAdsrEnabled(void) { return 1; }
 
 PSX_API_EXPORT void PsyX_SPUAL_SetOutputMode(int) {}
+/* No live switch here: the spatial sink negotiates its layout when the OpenAL
+ * context is created, so changing it needs a restart. Returning 0 is what
+ * makes the console say so instead of claiming success. */
 PSX_API_EXPORT int PsyX_SPUAL_ApplyOutputMode(int) { return 0; }
-PSX_API_EXPORT int PsyX_SPUAL_GetOutputMode(void) { return 1; }
-PSX_API_EXPORT int PsyX_SPUAL_GetSurroundActive(void) { return 0; }
+
+/* Report the spatial sink's measured layout rather than a hardcoded stereo.
+ * These two fed the AUDIOOUT console readout, so it used to answer "stereo
+ * active" even with 5.1 genuinely running -- which reads as the setting having
+ * failed and was half of why the layout being ignored went unnoticed. With no
+ * spatial sink the output really is the plain stereo one. */
+PSX_API_EXPORT int PsyX_SPUAL_GetOutputMode(void)
+{
+    return PsyX_SPUSpatial_Active() ? PsyX_SPUSpatial_AchievedSpeakers() : 1;
+}
+
+PSX_API_EXPORT int PsyX_SPUAL_GetSurroundActive(void)
+{
+    return PsyX_SPUSpatial_Active() ? PsyX_SPUSpatial_SurroundActive() : 0;
+}
 
 PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int) {}
 PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void) {}
