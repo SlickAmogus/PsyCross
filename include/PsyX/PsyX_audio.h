@@ -189,6 +189,16 @@ PsyXAudioResult PsyX_AudioEnumerateDevices(
 	size_t capacity,
 	size_t* device_count);
 
+/* One-shot stereo UI cue (the achievement chime), mixed into the finished
+ * output. Needs no audio device of its own, which is the point: a phone has
+ * exactly one and the SPU holds it. Kept separate from the XA stream so a cue
+ * can never cut a voice line short. 0 when the active backend mixes no cues. */
+int PsyX_AudioPlayUiCue(
+	const int16_t* samples,
+	uint32_t frames,
+	uint32_t sourceRate,
+	float gain);
+
 int PsyX_AudioPushXaFrames(
 	const int16_t* samples,
 	uint32_t frames,
