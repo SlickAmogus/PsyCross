@@ -3873,6 +3873,14 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 	{
 		TILE* poly = (TILE*)polyTag;
 
+		/* The lighthouse glow (map6_s02 func_800D2364; map7_s00 has a twin) pairs its
+		 * feedback sprites with add/subtract fills under the same display-band
+		 * tpage. The sprites get stretched across the widened UI ortho; the
+		 * fills must follow or their contrast lands as a 4:3 box. */
+		if (semiTrans && poly->h >= 224 &&
+		    ((activeDrawEnv.tpage >> 7) & 0x3) >= 2 && ((activeDrawEnv.tpage & 0xF) * 64) < 320)
+			s_curPrimIsFeedback = 1;
+
 		AddSplit(semiTrans, false, SplitDepthForPrim(polyTag));
 
 		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];

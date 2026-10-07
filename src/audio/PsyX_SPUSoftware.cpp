@@ -47,6 +47,28 @@ bool g_rendererConfigValid = true;
  * by OpenAL instead of being downmixed here. Opt-in via audio_spatial. */
 bool g_spatialRequested = false;
 int  g_spatialSpeakers = 0;
+
+/* Emitter azimuth side-channel (PSX Q12 angle: 0 = dead ahead, positive =
+ * right, 4096 = full circle). The game recovers each emitter true bearing
+ * before collapsing it to an L/R balance, and hands it over here. These were
+ * empty stubs, so the software SPU threw the whole thing away and the spatial
+ * sink had nothing to place voices by except the L/R balance -- which only
+ * spans the front arc, so nothing could ever come from behind and anything
+ * near-centred collapsed into one speaker. Reported as "positional audio does
+ * not work" on 5.1, 2026-10-01.
+ *
+ * Same claim contract as the legacy renderer: a key-on is accompanied by a
+ * start-address write, and the stash is claimed there only by the thread that
+ * armed it and within a short TTL. Sequencer note-ons run on another thread,
+ * so they can neither steal an in-flight azimuth nor inherit an orphan. */
+#define AZIMUTH_STASH_TTL_MS 100
+
+int    g_voiceAzQ12[PsyX::kNumVoices];
+int    g_voiceAzValid[PsyX::kNumVoices];
+int    s_nextAzQ12    = 0;
+int    s_nextAzValid  = 0;
+Uint32 s_nextAzThread = 0;
+Uint32 s_nextAzMs     = 0;
 uint32_t g_idealNativePhase = 0;
 
 void EnsureConfig()
@@ -358,6 +380,26 @@ u_int PsyX_SPUAL_Read(u_char* addr, u_int size)
 void PsyX_SPUAL_SetVoiceAttr(SpuVoiceAttr* attr)
 {
     if (!attr) return;
+
+    /* Every key-on carries a start-address write; claim or clear there so a
+     * reused voice can never inherit the previous sound position. */
+    if (attr->mask & SPU_VOICE_WDSA)
+    {
+        const int claim = s_nextAzValid &&
+                          s_nextAzThread == (Uint32)SDL_ThreadID() &&
+                          (Uint32)(SDL_GetTicks() - s_nextAzMs) <= AZIMUTH_STASH_TTL_MS;
+        for (int v = 0; v < PsyX::kNumVoices; ++v)
+        {
+            if (!(attr->voice & (1u << v)))
+                continue;
+            g_voiceAzValid[v] = claim ? 1 : 0;
+            if (claim)
+                g_voiceAzQ12[v] = s_nextAzQ12;
+        }
+        if (claim)
+            s_nextAzValid = 0;
+    }
+
     SDL_LockMutex(g_spuMutex);
     g_spu().SetVoiceAttr(*attr);
     SDL_UnlockMutex(g_spuMutex);
@@ -430,13 +472,56 @@ PSX_API_EXPORT void PsyX_SPUAL_SetAdsrEnabled(int) {}
 PSX_API_EXPORT int PsyX_SPUAL_GetAdsrEnabled(void) { return 1; }
 
 PSX_API_EXPORT void PsyX_SPUAL_SetOutputMode(int) {}
+/* No live switch here: the spatial sink negotiates its layout when the OpenAL
+ * context is created, so changing it needs a restart. Returning 0 is what
+ * makes the console say so instead of claiming success. */
 PSX_API_EXPORT int PsyX_SPUAL_ApplyOutputMode(int) { return 0; }
-PSX_API_EXPORT int PsyX_SPUAL_GetOutputMode(void) { return 1; }
-PSX_API_EXPORT int PsyX_SPUAL_GetSurroundActive(void) { return 0; }
 
-PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int) {}
-PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void) {}
-PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int, int) {}
+/* Report the spatial sink's measured layout rather than a hardcoded stereo.
+ * These two fed the AUDIOOUT console readout, so it used to answer "stereo
+ * active" even with 5.1 genuinely running -- which reads as the setting having
+ * failed and was half of why the layout being ignored went unnoticed. With no
+ * spatial sink the output really is the plain stereo one. */
+PSX_API_EXPORT int PsyX_SPUAL_GetOutputMode(void)
+{
+    return PsyX_SPUSpatial_Active() ? PsyX_SPUSpatial_AchievedSpeakers() : 1;
+}
+
+PSX_API_EXPORT int PsyX_SPUAL_GetSurroundActive(void)
+{
+    return PsyX_SPUSpatial_Active() ? PsyX_SPUSpatial_SurroundActive() : 0;
+}
+
+PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuthQ12)
+{
+    s_nextAzQ12    = azimuthQ12;
+    s_nextAzValid  = 1;
+    s_nextAzThread = (Uint32)SDL_ThreadID();
+    s_nextAzMs     = SDL_GetTicks();
+}
+
+PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void)
+{
+    s_nextAzValid = 0;
+}
+
+PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int voiceIdx, int azimuthQ12)
+{
+    if (voiceIdx < 0 || voiceIdx >= PsyX::kNumVoices)
+        return;
+    g_voiceAzQ12[voiceIdx]   = azimuthQ12;
+    g_voiceAzValid[voiceIdx] = 1;
+}
+
+/* Read by the spatial sink when it places a voice. */
+int PsyX_SPUSoftware_VoiceAzimuth(int voiceIdx, int* azQ12)
+{
+    if (voiceIdx < 0 || voiceIdx >= PsyX::kNumVoices || !g_voiceAzValid[voiceIdx])
+        return 0;
+    if (azQ12)
+        *azQ12 = g_voiceAzQ12[voiceIdx];
+    return 1;
+}
 
 int PsyX_SPUAL_SetMute(int onOff)
 {
