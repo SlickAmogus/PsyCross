@@ -249,6 +249,17 @@ void PsyX_SPUAL_SetXaMasterGain(double gain) { if (UseSoftware()) PsyX_SPUSoftwa
 void PsyX_SPUAL_SetXaPaused(int paused) { if (UseSoftware()) PsyX_SPUSoftware_SetXaPaused(paused); }
 u_int PsyX_SPUAL_GetQueuedXaFrames() { return UseSoftware() ? PsyX_SPUSoftware_GetQueuedXaFrames() : 0; }
 
+/* Only the software SPU mixes cues. The legacy AL backend has OpenAL sources of
+ * its own, which pc_ui_sound.c uses directly, so 0 there says "not handled" and
+ * the caller keeps its existing path. */
+int PsyX_AudioPlayUiCue(const int16_t* samples, uint32_t frames,
+	uint32_t sourceRate, float gain)
+{
+	return UseSoftware()
+		? PsyX_SPUAL_PlayUiCue(samples, frames, (int)sourceRate, gain)
+		: 0;
+}
+
 int PsyX_AudioPushXaFrames(const int16_t* samples, uint32_t frames,
 	uint32_t sourceRate, uint32_t channels)
 {

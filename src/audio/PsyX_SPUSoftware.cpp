@@ -95,6 +95,64 @@ void SpatialXaPump(void*, int frames)
     SDL_UnlockMutex(g_spuMutex);
 }
 
+/* A one-shot UI cue (the achievement chime), mixed into the finished buffer.
+ *
+ * Android has no OpenAL and SDL hands out a single output device, which this
+ * SPU already holds, so the cue's own device was refused every time and it
+ * played silent: "[UISND] SDL audio ...: Audio device already open". Mixing it
+ * here needs no second device.
+ *
+ * Deliberately NOT the XA stream. That is what voice lines and movies use, so
+ * a cue pushed through it would cut a line of dialogue short. This is its own
+ * buffer, added AFTER the SPU has rendered, so no SPU state is touched and a
+ * cue cannot disturb a single voice. Both render paths carry int16-scale
+ * samples (PsyX_audio_convert.h quantises the doubles against the same range),
+ * so one buffer serves both. Guarded by the mutex that protects every other
+ * push in this file; while nothing is queued the cost is one empty() test. */
+static std::vector<int16_t> g_cue;           /* interleaved stereo, cue rate */
+static uint64_t             g_cuePos  = 0;   /* 32.32 fixed-point frame cursor */
+static uint64_t             g_cueStep = 0;   /* cue frames per output frame */
+static float                g_cueGain = 1.0f;
+
+static inline int16_t CueMixSat(int32_t a, int32_t b)
+{
+    const int32_t v = a + b;
+    return static_cast<int16_t>(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+}
+
+/* Called with g_spuMutex held, by both render paths. */
+template <typename T>
+static void MixUiCue(T* out, uint32_t frames, bool saturate)
+{
+    if (g_cue.empty() || g_cueStep == 0)
+        return;
+
+    const uint64_t total = static_cast<uint64_t>(g_cue.size() / 2u) << 32;
+
+    for (uint32_t i = 0; i < frames && g_cuePos < total; ++i)
+    {
+        const size_t  f = static_cast<size_t>(g_cuePos >> 32) * 2u;
+        const int32_t l = static_cast<int32_t>(static_cast<float>(g_cue[f])     * g_cueGain);
+        const int32_t r = static_cast<int32_t>(static_cast<float>(g_cue[f + 1]) * g_cueGain);
+
+        if (saturate)
+        {
+            out[i * 2]     = static_cast<T>(CueMixSat(static_cast<int32_t>(out[i * 2]), l));
+            out[i * 2 + 1] = static_cast<T>(CueMixSat(static_cast<int32_t>(out[i * 2 + 1]), r));
+        }
+        else
+        {
+            /* The packer clamps the doubles on the way out. */
+            out[i * 2]     = out[i * 2]     + static_cast<T>(l);
+            out[i * 2 + 1] = out[i * 2 + 1] + static_cast<T>(r);
+        }
+        g_cuePos += g_cueStep;
+    }
+
+    if (g_cuePos >= total)
+        g_cue.clear();
+}
+
 uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
 {
     SDL_LockMutex(g_spuMutex);
@@ -107,6 +165,7 @@ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
         g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
 
     g_spu().RenderFrames(output, static_cast<int>(frames));
+    MixUiCue<int16_t>(output, frames, true);
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -140,6 +199,7 @@ uint32_t RenderAudioFloat64(void*, double* output, uint32_t frames)
             g_spu().PushCdStereoFrame(xa[i * 2], xa[i * 2 + 1]);
     }
     g_spu().RenderFramesDouble(output, static_cast<int>(frames));
+    MixUiCue<double>(output, frames, false);
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -607,6 +667,28 @@ int PsyX_SPUAL_ClearReverbWorkArea(void)
     g_spu().ClearReverbWorkArea();
     SDL_UnlockMutex(g_spuMutex);
     return 0;
+}
+
+/* Queue a stereo cue, replacing any still playing: these are one-shots and a
+ * second achievement should not stack on the first. Stepped against the SPU's
+ * native rate, so it plays at pitch whichever renderer is selected. */
+int PsyX_SPUAL_PlayUiCue(const short* samples, u_int frames, int sourceRate, float gain)
+{
+    if (!samples || frames == 0 || sourceRate <= 0)
+        return 0;
+
+    SDL_LockMutex(g_spuMutex);
+    {
+        const uint32_t native = g_spu().GetNativeSampleRate();
+
+        g_cue.assign(samples, samples + static_cast<size_t>(frames) * 2u);
+        g_cuePos  = 0;
+        g_cueStep = (static_cast<uint64_t>(sourceRate) << 32) /
+                    static_cast<uint64_t>(native > 0 ? native : 44100u);
+        g_cueGain = (gain > 0.0f) ? gain : 1.0f;
+    }
+    SDL_UnlockMutex(g_spuMutex);
+    return 1;
 }
 
 int PsyX_SPUAL_PushXaFrames(const short* samples, u_int frames, int sourceRate, int channels)

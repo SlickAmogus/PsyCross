@@ -30,6 +30,7 @@ extern int PsyX_SPUAL_IsXaDrained(void);
 extern void PsyX_SPUAL_SetXaMasterGain(double gain);
 extern void PsyX_SPUAL_SetXaPaused(int paused);
 extern u_int PsyX_SPUAL_GetQueuedXaFrames(void);
+extern int PsyX_SPUAL_PlayUiCue(const short* samples, u_int frames, int sourceRate, float gain);
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }

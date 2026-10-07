@@ -763,10 +763,13 @@ static int mc_card_present(int card)
 	return 0;
 }
 
-/* Write a freshly-formatted image over whatever is there. */
+/* Write a freshly-formatted image over whatever is there. mc_ensure_card
+ * leaves an existing file alone; this one replaces it, which is what the
+ * unusable-directory repair below needs. */
 static int mc_write_fresh(int card)
 {
 	FILE* f = mc_fopen(card, "wb");
+
 	if (!f) return 0;
 	{
 		unsigned char* fresh = (unsigned char*)malloc(MC_TOTAL_SIZE);
