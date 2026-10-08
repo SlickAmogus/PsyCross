@@ -336,6 +336,13 @@ void GR_ApplyRenderScale(void)
 		g_windowWidth  = w;
 		g_windowHeight = h;
 	}
+}
+
+/* C-callable, for the options menu: the game side is C and cannot link the
+ * mangled name. Goes through the same clamp and rebuild as startup. */
+extern "C" void PsyX_RenderScaleApply(void)
+{
+	GR_ApplyRenderScale();
 }
 
 int g_dbg_wireframeMode = 0;
