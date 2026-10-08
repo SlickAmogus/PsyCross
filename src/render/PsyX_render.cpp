@@ -3561,6 +3561,7 @@ void GR_Ortho2D(float left, float right, float bottom, float top, float znear, f
 	};
 
 #if USE_OPENGL
+	{ extern unsigned g_PsyX_OrthoUp; g_PsyX_OrthoUp++; }
 	glUniformMatrix4fv(u_projectionLoc, 1, GL_FALSE, ortho);
 #endif
 }
@@ -3635,6 +3636,7 @@ void GR_SetupClipMode(const RECT16* rect, int enable)
 	const float crw = clipRectW * (float)g_windowWidth;
 	const float crh = clipRectH * (float)g_windowHeight;
 
+	{ extern unsigned g_PsyX_ScissorSet; g_PsyX_ScissorSet++; }
 	glScissor(crx, flipOffset - cry, crw, crh);
 #endif
 }
@@ -3653,6 +3655,7 @@ void GR_SetShader(const ShaderID shader)
 	if (g_PreviousShader != shader)
 	{
 #if USE_OPENGL
+		{ extern unsigned g_PsyX_ShaderSw; g_PsyX_ShaderSw++; }
 		glUseProgram(shader);
 #else
 #error
@@ -4073,6 +4076,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	}
 
 #if USE_OPENGL
+	{ extern unsigned g_PsyX_TexBinds; g_PsyX_TexBinds++; }
 	glBindTexture(GL_TEXTURE_2D, texture);
 	GR_ApplyTextureFilter(texture, texFormat);
 #endif

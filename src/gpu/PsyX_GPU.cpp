@@ -383,6 +383,30 @@ static unsigned s_dbgArmF = 0, s_dbgCapF = 0, s_dbgApplyCalls = 0, s_dbgStaleRej
 extern "C" { int g_PsxPgxpDepthStats = 0; }
 extern "C" { unsigned g_PsyX_OtNodes = 0; }
 extern "C" { unsigned g_PsyX_MsParse = 0, g_PsyX_MsSubmit = 0, g_PsyX_OtPrims = 0; }
+
+/* [PERF4] Where the submit millisecond actually goes.
+ *
+ * [PERF3] measures submit as one lump -- 7.0 ms/frame over 103 draws on a
+ * mid-range phone, about 68 us a draw, which is far too much for a state change
+ * and a glDrawArrays. That number alone cannot say whether the cost is CPU
+ * state setup (fix: fewer, bigger batches) or the draw calls blocking on the
+ * GPU (fix: fewer pixels, i.e. render scale), and those lead to opposite work.
+ *
+ * Microseconds and counts, accumulated per frame and reported once a second
+ * with the other PERF lines. Redundant-state counts come from the callers that
+ * actually touch GL, so a cached setter costs nothing here. */
+extern "C" {
+	unsigned g_PsyX_UsVbo = 0, g_PsyX_UsState = 0, g_PsyX_UsDraw = 0;
+	unsigned g_PsyX_ShaderSw = 0, g_PsyX_TexBinds = 0, g_PsyX_OrthoUp = 0, g_PsyX_ScissorSet = 0;
+}
+
+unsigned PsyX_PerfUs(void)
+{
+	static double scale = 0.0;
+	if (scale == 0.0)
+		scale = 1000000.0 / (double)SDL_GetPerformanceFrequency();
+	return (unsigned)((double)SDL_GetPerformanceCounter() * scale);
+}
 extern "C" void PGXP_CoverageTick(void)
 {
 	PGXP_BumpGen();
@@ -2953,8 +2977,11 @@ int g_PsxWorldDepthAlways = 1;
 
 int g_PsxDbgAddMode = 1;
 
+unsigned PsyX_PerfUs(void);
+
 void DrawSplit(const GPUDrawSplit& split)
 {
+	const unsigned s_splitT0 = PsyX_PerfUs();   /* [PERF4] state setup starts here */
 	const bool isAdditive = (split.blendMode == BM_ADD || split.blendMode == BM_ADD_QUATER_SOURCE);
 
 	if (g_PsxDbgAddMode == 0 && isAdditive)
@@ -3022,7 +3049,15 @@ void DrawSplit(const GPUDrawSplit& split)
 		                        (int)split.numVerts, (int)split.drawenv.dfe);
 	}
 
-	GR_DrawTriangles(split.startVertex, split.numVerts / 3);
+	{
+		extern unsigned g_PsyX_UsState, g_PsyX_UsDraw;
+		unsigned        tDraw;
+
+		g_PsyX_UsState += PsyX_PerfUs() - s_splitT0;
+		tDraw = PsyX_PerfUs();
+		GR_DrawTriangles(split.startVertex, split.numVerts / 3);
+		g_PsyX_UsDraw += PsyX_PerfUs() - tDraw;
+	}
 
 	if (split.debugText)
 		GR_PopDebugLabel();
@@ -3109,7 +3144,16 @@ void DrawAllSplits()
 #endif // _DEBUG
 
 	// next code ideally should be called before EndScene
-	GR_UpdateVertexBuffer(g_vertexBuffer, g_vertexIndex);
+	{
+		/* [PERF4] The whole frame's vertices in one upload: a stall here is the
+		 * driver waiting for the GPU to finish reading the buffer it is about to
+		 * overwrite, which looks like submit cost but is not per-draw. */
+		extern unsigned g_PsyX_UsVbo;
+		unsigned        t0 = PsyX_PerfUs();
+
+		GR_UpdateVertexBuffer(g_vertexBuffer, g_vertexIndex);
+		g_PsyX_UsVbo += PsyX_PerfUs() - t0;
+	}
 
 	/* Flashlight shadow map: depth-only pre-pass over the OPAQUE splits from the
 	 * light POV, into the shadow FBO, while the frame VAO is still bound. Only
