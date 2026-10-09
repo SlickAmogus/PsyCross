@@ -7366,6 +7366,7 @@ void GR_SwapWindow()
 		{
 			const char* swapErr = SDL_GetError();
 			int         eglErr  = 0;
+			static int  s_swapBad = 0;
 
 			/* SDL_GL_SwapWindow returns void and swallows the platform
 			 * result, so presentation can stop working in complete
@@ -7401,13 +7402,36 @@ void GR_SwapWindow()
 				const unsigned  nowMs        = (unsigned)SDL_GetTicks();
 
 				s_swapHits++;
+				s_swapBad = 1;
+
+				/* Rebind the context to whatever surface SDL holds NOW.
+				 *
+				 * The cabinet loses its window surface after a few minutes and
+				 * every swap fails from then on, permanently: the compositor keeps
+				 * showing the last frame while the game runs on. Keeping the screen
+				 * awake did not stop it, and that machine never sleeps anyway, so
+				 * rather than keep hunting the trigger the renderer should survive
+				 * it. If SDL has already built a replacement surface, making the
+				 * context current again binds to it and the next swap works. */
+				{
+					SDL_GLContext ctx = SDL_GL_GetCurrentContext();
+
+					if (ctx != NULL)
+						SDL_GL_MakeCurrent(g_window, ctx);
+				}
+
 				if (nowMs >= s_nextSwapMs)
 				{
-					eprintwarn("[SWAPDIAG] swap: egl=0x%04X sdl='%s' x%u\n",
+					eprintwarn("[SWAPDIAG] swap: egl=0x%04X sdl='%s' x%u (rebinding)\n",
 						(unsigned)eglErr, (swapErr != NULL) ? swapErr : "", s_swapHits);
 					s_swapHits   = 0;
 					s_nextSwapMs = nowMs + 3000u;
 				}
+			}
+			else if (s_swapBad)
+			{
+				s_swapBad = 0;
+				eprintwarn("[SWAPDIAG] presentation recovered\n");
 			}
 		}
 	}
