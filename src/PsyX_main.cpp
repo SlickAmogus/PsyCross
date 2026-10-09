@@ -804,6 +804,22 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 	SDL_SetHint(SDL_HINT_EMSCRIPTEN_ASYNCIFY, "0");
 #endif
 	
+	/* Keep the display awake while the game runs.
+	 *
+	 * Standing still for a few minutes let the arcade cabinet blank its
+	 * screen, and Android destroys the window surface when it does. The game
+	 * carried on rendering into a surface that no longer existed:
+	 * eglSwapBuffers returned EGL_BAD_SURFACE on EVERY frame from then on
+	 * (measured, ~150 failures per 3 s), the compositor kept showing the last
+	 * frame it had, and the one GL_OUT_OF_MEMORY that got blamed for this for
+	 * several rounds landed immediately AFTER the first failed swap -- it was
+	 * a consequence, not the cause.
+	 *
+	 * A game should not let the screen sleep while it is on screen anyway,
+	 * and SDL turns this into FLAG_KEEP_SCREEN_ON on Android. The hint is set
+	 * before init so it applies to the window from creation. */
+	SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "0");
+
 	if (SDL_Init(SDL_INIT_VIDEO) != 0)
 	{
 		eprinterr("Failed to initialise SDL\n");
@@ -811,6 +827,10 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 		return;
 	}
 	
+	/* Belt and braces with the hint above: the hint covers the window from
+	 * creation, this covers a platform that only applies it on request. */
+	SDL_DisableScreenSaver();
+
 	if (!GR_InitialiseRender(windowNameStr, width, height, fullscreen))
 	{
 		eprinterr("Failed to Intialise Window\n");
