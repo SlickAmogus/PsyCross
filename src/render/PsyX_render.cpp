@@ -953,6 +953,30 @@ int			g_curVertexBuffer = 0;
 static size_t s_vboOffset[2] = { 0, 0 };
 extern "C" { int g_vboBaseVertex = 0; }
 static void GR_SetupVertexAttribs();
+static void GR_DetectVaoRespec();
+
+/* Some drivers want the attribute pointers re-specified on every bind.
+ *
+ * Setting them once in the VAO is correct and is what every modern driver
+ * wants -- on a phone it took the frame from 47.9 ms to 12.7 ms. On ARM's
+ * Midgard (Mali-T6xx/T7xx/T8xx) it is a disaster: measured on the Mali-T720
+ * cabinet, PsyX_EndScene went from 2.7 ms to 46.7 ms a frame and the game from
+ * 51 fps to 14.7, with the CPU side unchanged and no visual difference. That
+ * driver evidently resolves stale attribute descriptors at draw or tile time
+ * rather than at bind, so the work reappears behind the present.
+ *
+ * Detected once from GL_RENDERER rather than guessed per frame. Newer Mali
+ * (Bifrost "Mali-G...") is not affected and keeps the fast path. */
+static int s_vaoRespecPerBind = 0;
+
+static void GR_DetectVaoRespec()
+{
+	const char* r = (const char*)glGetString(GL_RENDERER);
+
+	s_vaoRespecPerBind = (r != NULL && strstr(r, "Mali-T") != NULL) ? 1 : 0;
+	if (s_vaoRespecPerBind)
+		eprintinfo("[GL] %s: re-specifying vertex attributes per bind (Midgard)\n", r);
+}
 
 GLuint		g_glBlitFramebuffer;
 
@@ -3532,7 +3556,10 @@ int GR_InitialisePSX()
 			glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[i]);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(GrVertex) * MAX_VERTEX_BUFFER_SIZE, NULL, GL_DYNAMIC_DRAW);
 
-			/* Once per VAO, not once per flush. See GR_SetupVertexAttribs. */
+			/* Once per VAO, not once per flush -- except on the drivers
+			 * GR_DetectVaoRespec names. See GR_SetupVertexAttribs. */
+			if (i == 0)
+				GR_DetectVaoRespec();
 			GR_SetupVertexAttribs();
 		}
 
@@ -7585,6 +7612,9 @@ void GR_BindVertexBuffer()
 	/* Still bound explicitly: the VAO remembers the attribute bindings, but
 	 * GL_ARRAY_BUFFER is global state and the upload below writes through it. */
 	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer]);
+
+	if (s_vaoRespecPerBind)
+		GR_SetupVertexAttribs();
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;
