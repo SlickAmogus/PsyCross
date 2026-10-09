@@ -955,7 +955,14 @@ extern "C" { int g_vboBaseVertex = 0; }
 static void GR_SetupVertexAttribs();
 static void GR_DetectVaoRespec();
 
-/* Some drivers want the attribute pointers re-specified on every bind.
+/* WITHDRAWN: the Midgard carve-out that used to live here.
+ *
+ * It was based on a cabinet run that looked like a 51 -> 14.7 fps collapse
+ * from setting the vertex layout once. That run was at render_scale 0.700
+ * against 0.350 in the runs it was compared with -- four times the pixels on a
+ * Mali-T720 -- which accounts for the whole difference on its own. The VAO
+ * change was never shown to cost anything there, so every device keeps the
+ * fast path until a measurement with the scale held fixed says otherwise.
  *
  * Setting them once in the VAO is correct and is what every modern driver
  * wants -- on a phone it took the frame from 47.9 ms to 12.7 ms. On ARM's
@@ -3558,8 +3565,6 @@ int GR_InitialisePSX()
 
 			/* Once per VAO, not once per flush -- except on the drivers
 			 * GR_DetectVaoRespec names. See GR_SetupVertexAttribs. */
-			if (i == 0)
-				GR_DetectVaoRespec();
 			GR_SetupVertexAttribs();
 		}
 
@@ -7612,9 +7617,6 @@ void GR_BindVertexBuffer()
 	/* Still bound explicitly: the VAO remembers the attribute bindings, but
 	 * GL_ARRAY_BUFFER is global state and the upload below writes through it. */
 	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer]);
-
-	if (s_vaoRespecPerBind)
-		GR_SetupVertexAttribs();
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;

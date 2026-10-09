@@ -219,7 +219,17 @@ extern unsigned int g_PsyX_DefaultFBO;
  * one frame than a streamed scene, so the ceiling is raised and the split indices
  * widened to unsigned int (GPUDrawSplit). Output-neutral for normal play — the
  * buffer is only ever filled to g_vertexIndex, and a streamed frame stays tiny. */
-#define MAX_VERTEX_BUFFER_SIZE	(1 << 18)
+/* 65536 verts x 68 B of GrVertex = 4.5 MB per buffer, two of them.
+ *
+ * Was 1<<18, which is 17.8 MB each and 35.6 MB resident for a game that writes
+ * about 1.5 MB of vertices a frame -- and every orphan asks the driver for the
+ * whole thing. The 962 MB Mali cabinet dies with GL_OUT_OF_MEMORY after a few
+ * minutes (0x0505 at scene draw, audio still running), in builds both before
+ * and after the ring, so the churn of blocks that size is the one thing those
+ * builds share. Capacity only bounds a SINGLE flush, and flushes are driven by
+ * DrawSync long before this is reached; the largest single-prim emit is 18
+ * verts, so 65536 is still three orders of magnitude of headroom. */
+#define MAX_VERTEX_BUFFER_SIZE	(1 << 16)
 
 #pragma pack(push,1)
 typedef struct
