@@ -12,6 +12,9 @@
 #include <vector>
 #include <utility>
 #include <algorithm>
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#endif
 
 #include "PsyX/PsyX_public.h"
 
@@ -7362,8 +7365,36 @@ void GR_SwapWindow()
 		SDL_GL_SwapWindow(g_window);
 		{
 			const char* swapErr = SDL_GetError();
+			int         eglErr  = 0;
 
-			if (swapErr != NULL && swapErr[0] != '\0')
+			/* SDL_GL_SwapWindow returns void and swallows the platform
+			 * result, so presentation can stop working in complete
+			 * silence -- which is what the cabinet looks like: the last
+			 * frame held while the game runs on and GL reports nothing.
+			 * eglGetError comes through dlsym; this file has no EGL
+			 * headers and does not need them for one symbol. */
+			{
+				typedef int (*EglErrFn)(void);
+				static EglErrFn s_eglGetError = NULL;
+				static int      s_eglTried    = 0;
+
+				if (!s_eglTried)
+				{
+					void* lib  = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+
+					s_eglTried = 1;
+					if (lib != NULL)
+						s_eglGetError = (EglErrFn)dlsym(lib, "eglGetError");
+				}
+				if (s_eglGetError != NULL)
+				{
+					eglErr = s_eglGetError();
+					if (eglErr == 0x3000)   /* EGL_SUCCESS */
+						eglErr = 0;
+				}
+			}
+
+			if (eglErr != 0 || (swapErr != NULL && swapErr[0] != '\0'))
 			{
 				static unsigned s_nextSwapMs = 0;
 				static unsigned s_swapHits   = 0;
@@ -7372,7 +7403,8 @@ void GR_SwapWindow()
 				s_swapHits++;
 				if (nowMs >= s_nextSwapMs)
 				{
-					eprintwarn("[SWAPDIAG] swap reported '%s' x%u\n", swapErr, s_swapHits);
+					eprintwarn("[SWAPDIAG] swap: egl=0x%04X sdl='%s' x%u\n",
+						(unsigned)eglErr, (swapErr != NULL) ? swapErr : "", s_swapHits);
 					s_swapHits   = 0;
 					s_nextSwapMs = nowMs + 3000u;
 				}
