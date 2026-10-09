@@ -7352,7 +7352,32 @@ void GR_SwapWindow()
 	{
 		GreyFrame_Present(g_internalFBO ? g_presentWidth : g_windowWidth,
 		                  g_internalFBO ? g_presentHeight : g_windowHeight);
+		/* [SWAPDIAG] The cabinet freezes with GL reporting no errors, frames
+		 * still pacing to vblank and the game still running -- which says the
+		 * picture stops reaching the screen rather than the renderer stopping.
+		 * SDL_GL_SwapWindow returns void, so the only report is SDL's error
+		 * string; clear it first so anything found here belongs to the swap.
+		 * Rate-limited, and silent unless something is actually wrong. */
+		SDL_ClearError();
 		SDL_GL_SwapWindow(g_window);
+		{
+			const char* swapErr = SDL_GetError();
+
+			if (swapErr != NULL && swapErr[0] != '\0')
+			{
+				static unsigned s_nextSwapMs = 0;
+				static unsigned s_swapHits   = 0;
+				const unsigned  nowMs        = (unsigned)SDL_GetTicks();
+
+				s_swapHits++;
+				if (nowMs >= s_nextSwapMs)
+				{
+					eprintwarn("[SWAPDIAG] swap reported '%s' x%u\n", swapErr, s_swapHits);
+					s_swapHits   = 0;
+					s_nextSwapMs = nowMs + 3000u;
+				}
+			}
+		}
 	}
 #endif
 
@@ -7794,7 +7819,35 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 		if (offset + needed > capped)
 			offset = 0;
 
-		glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
+		/* Mapped UNSYNCHRONIZED in preference to glBufferSubData, because the
+		 * cabinet's one GL_OUT_OF_MEMORY lands exactly here.
+		 *
+		 * A plain sub-data write into a buffer the GPU may still be reading is
+		 * the classic trigger for Midgard to "ghost" it -- quietly duplicate
+		 * the whole store so the old contents stay valid for work in flight.
+		 * That is a multi-megabyte allocation behind a call that looks like a
+		 * memcpy, and on a 962 MB box it eventually cannot be served. An
+		 * unsynchronized map is the promise that makes ghosting unnecessary:
+		 * nothing being written is a region anything is still reading, which is
+		 * true of a ring that only ever moves forward.
+		 *
+		 * This is the one combination never tried: no orphan AND no ghost.
+		 * Earlier builds had the map but still orphaned on wrap, or dropped the
+		 * orphan but wrote with sub-data. Sub-data stays as the fallback. */
+		void* dst = glMapBufferRange ?
+			glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed,
+			                 GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
+			                 GL_MAP_INVALIDATE_RANGE_BIT) : NULL;
+
+		if (dst != NULL)
+		{
+			memcpy(dst, vertices, needed);
+			glUnmapBuffer(GL_ARRAY_BUFFER);
+		}
+		else
+		{
+			glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
+		}
 		GR_DiagGLError("vertex upload");
 
 		/* Every draw that indexes THIS buffer has to be shifted by where the
