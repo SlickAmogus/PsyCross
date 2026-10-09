@@ -7746,26 +7746,28 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 			return;
 		}
 
+		/* Wrap by resetting the cursor. NOTHING is reallocated here, and
+		 * nothing is mapped: after init this function performs exactly one GL
+		 * call, a copy into storage that already exists.
+		 *
+		 * The 962 MB Mali cabinet dies with GL_OUT_OF_MEMORY after a few
+		 * minutes of standing still, with vram_uploads=0 and no textures being
+		 * created -- so something allocated per frame and was not given back.
+		 * Every build that crashed churned buffer allocations: first an orphan
+		 * per flush, then an orphan per wrap plus an UNSYNCHRONIZED map per
+		 * flush, which Midgard is known to service by ghosting the store.
+		 * Shrinking the buffer made it worse rather than better, because a
+		 * smaller ring wraps four times as often -- which is itself the
+		 * evidence that the wrap, not the size, was the cost.
+		 *
+		 * Safe without the orphan because the ring holds many frames of
+		 * vertices (see MAX_VERTEX_BUFFER_SIZE) while the GPU is at most a
+		 * frame or two behind, so by the time the cursor comes back around to
+		 * a region, nothing is still reading it. */
 		if (offset + needed > capped)
-		{
-			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)capped, NULL, GL_STREAM_DRAW);
 			offset = 0;
-		}
 
-		void* dst = glMapBufferRange ?
-			glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed,
-			                 GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
-			                 GL_MAP_INVALIDATE_RANGE_BIT) : NULL;
-
-		if (dst != NULL)
-		{
-			memcpy(dst, vertices, needed);
-			glUnmapBuffer(GL_ARRAY_BUFFER);
-		}
-		else
-		{
-			glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
-		}
+		glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
 
 		/* Every draw that indexes THIS buffer has to be shifted by where the
 		 * flush landed; the two sites that do are DrawSplit and the shadow

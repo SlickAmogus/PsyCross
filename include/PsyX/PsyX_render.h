@@ -219,7 +219,15 @@ extern unsigned int g_PsyX_DefaultFBO;
  * one frame than a streamed scene, so the ceiling is raised and the split indices
  * widened to unsigned int (GPUDrawSplit). Output-neutral for normal play — the
  * buffer is only ever filled to g_vertexIndex, and a streamed frame stays tiny. */
-/* 65536 verts x 68 B of GrVertex = 4.5 MB per buffer, two of them.
+/* 262144 verts x 68 B of GrVertex = 17.8 MB per buffer, two of them.
+ *
+ * Deliberately deep rather than tight. The buffer is a ring that is never
+ * reallocated after init (GR_UpdateVertexBuffer), so its size does not cost
+ * allocation churn -- it buys DISTANCE: at about 1.5 MB of vertices a frame
+ * this is a dozen frames before the cursor comes back around, against a GPU
+ * one or two frames behind, which is what makes writing without orphaning
+ * safe. Shrinking it to 1<<16 to save memory quadrupled the wrap rate and did
+ * not stop the cabinet's GL_OUT_OF_MEMORY.
  *
  * Was 1<<18, which is 17.8 MB each and 35.6 MB resident for a game that writes
  * about 1.5 MB of vertices a frame -- and every orphan asks the driver for the
@@ -229,7 +237,7 @@ extern unsigned int g_PsyX_DefaultFBO;
  * builds share. Capacity only bounds a SINGLE flush, and flushes are driven by
  * DrawSync long before this is reached; the largest single-prim emit is 18
  * verts, so 65536 is still three orders of magnitude of headroom. */
-#define MAX_VERTEX_BUFFER_SIZE	(1 << 16)
+#define MAX_VERTEX_BUFFER_SIZE	(1 << 18)
 
 #pragma pack(push,1)
 typedef struct
