@@ -7090,9 +7090,19 @@ void GR_DumpVRAM(const char* path)
  * thing that broke instead of a wall of repeats. */
 void GR_DiagGLError(const char* where)
 {
+	/* Rate-limited per site, NOT once-per-site-forever as it used to be.
+	 *
+	 * The old dedupe made "one [GLDIAG] line in the log" look like one error,
+	 * when the cabinet's GL_OUT_OF_MEMORY may be happening on every frame from
+	 * then on -- which is what a frozen picture with the game still running
+	 * actually looks like. A count tells those two apart. */
 	static const char* s_seen[16];
+	static unsigned    s_hits[16];
+	static unsigned    s_nextMs[16];
 	static int         s_seenCount = 0;
 	GLenum             err;
+	int                i, slot = -1;
+	unsigned           now;
 
 	if (!g_grIsGLES && !g_dbg_glDiag)
 		return;
@@ -7101,16 +7111,33 @@ void GR_DiagGLError(const char* where)
 	if (err == GL_NO_ERROR)
 		return;
 
-	for (int i = 0; i < s_seenCount; i++)
+	for (i = 0; i < s_seenCount; i++)
 	{
 		if (s_seen[i] == where)
-			return;
+		{
+			slot = i;
+			break;
+		}
 	}
-	if (s_seenCount < 16)
-		s_seen[s_seenCount++] = where;
+	if (slot < 0)
+	{
+		if (s_seenCount >= 16)
+			return;
+		slot          = s_seenCount++;
+		s_seen[slot]  = where;
+		s_hits[slot]  = 0;
+		s_nextMs[slot] = 0;
+	}
 
-	eprintwarn("[GLDIAG] GL error 0x%04X at %s (backend=%s)\n",
-		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
+	s_hits[slot]++;
+	now = (unsigned)SDL_GetTicks();
+	if (now < s_nextMs[slot])
+		return;
+
+	eprintwarn("[GLDIAG] GL error 0x%04X at %s x%u (backend=%s)\n",
+		(unsigned)err, where, s_hits[slot], PsyX_Backend_GetName(g_grActiveBackend));
+	s_hits[slot]   = 0;
+	s_nextMs[slot] = now + 3000u;
 }
 
 /* [GREYFRAME] per-swap half, run on the window framebuffer right before the
@@ -7768,6 +7795,7 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 			offset = 0;
 
 		glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
+		GR_DiagGLError("vertex upload");
 
 		/* Every draw that indexes THIS buffer has to be shifted by where the
 		 * flush landed; the two sites that do are DrawSplit and the shadow
@@ -7789,6 +7817,10 @@ void GR_DrawTriangles(int start_vertex, int triangles)
 		GreyFrame_FirstDraw();
 	s_gf.tris += triangles;
 	glDrawArrays(GL_TRIANGLES, start_vertex, triangles * 3);
+	/* Per draw, so the failing operation is named rather than inferred from a
+	 * sweep at the end of the scene. Costs a glGetError per draw in a build
+	 * that is already writing a log. */
+	GR_DiagGLError("glDrawArrays");
 #else
 #error
 #endif
