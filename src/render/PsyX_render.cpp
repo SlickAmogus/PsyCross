@@ -7654,8 +7654,34 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	 * GPU holds the buffer, so it is largest on tilers and shared-memory iGPUs
 	 * and smallest on a discrete desktop card — but it is never a pessimisation,
 	 * and the size is constant so drivers can recycle identical blocks. */
-	glBufferData(GL_ARRAY_BUFFER, MAX_VERTEX_BUFFER_SIZE * sizeof(GrVertex), NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, num_vertices * sizeof(GrVertex), vertices);
+	/* ...but orphan only as much as this call needs, not the whole capacity.
+	 *
+	 * The full-capacity orphan asked the driver for ~17 MB of fresh storage
+	 * EVERY call (262144 verts x 68 B of GrVertex) in order to write about 1 MB
+	 * of it, and a phone charges real time for handing that back. Measured with
+	 * [PERF4]: 35.4 ms of a 47.9 ms frame, 93% of all GL submit time, while the
+	 * ~790 draw calls it was blamed on came to 1.4 ms and state setup to 1.0 ms.
+	 *
+	 * Rounded up to a 1 MB bucket rather than sized exactly, because the reason
+	 * orphaning works at all is that the driver can hand back a block it already
+	 * has: a size that wobbles every frame defeats that, while a handful of
+	 * repeating sizes does not. Still never a pessimisation against the old
+	 * behaviour -- the size only ever shrinks. */
+	{
+		const size_t vtxSize = sizeof(GrVertex);
+		const size_t needed  = (size_t)num_vertices * vtxSize;
+		const size_t bucket  = 1u << 20;
+		const size_t capped  = (size_t)MAX_VERTEX_BUFFER_SIZE * vtxSize;
+		size_t       orphan  = ((needed + bucket - 1) / bucket) * bucket;
+
+		if (orphan < bucket)
+			orphan = bucket;
+		if (orphan > capped)
+			orphan = capped;
+
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)orphan, NULL, GL_STREAM_DRAW);
+		glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)needed, vertices);
+	}
 #else
 #error
 #endif

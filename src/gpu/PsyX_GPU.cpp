@@ -402,10 +402,19 @@ extern "C" {
 
 unsigned PsyX_PerfUs(void)
 {
+	/* Microseconds since the first call, NOT since the epoch: the raw counter
+	 * times a microsecond scale overflows an unsigned, and casting an
+	 * out-of-range double to unsigned is undefined -- on ARM it pinned to a
+	 * constant, so every measured delta came out as exactly zero. */
+	static Uint64 base  = 0;
 	static double scale = 0.0;
+
 	if (scale == 0.0)
+	{
 		scale = 1000000.0 / (double)SDL_GetPerformanceFrequency();
-	return (unsigned)((double)SDL_GetPerformanceCounter() * scale);
+		base  = SDL_GetPerformanceCounter();
+	}
+	return (unsigned)((double)(SDL_GetPerformanceCounter() - base) * scale);
 }
 extern "C" void PGXP_CoverageTick(void)
 {
