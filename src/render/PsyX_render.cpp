@@ -945,7 +945,14 @@ void PBO_Download(GrPBO* pbo)
 
 GLuint		g_glVertexArray[2];
 GLuint		g_glVertexBuffer[2];
-int			g_curVertexBuffer = 0;
+int			g_curVertexBuffer = 0;
+
+/* Where the next flush writes in each of the two frame VBOs, and the vertex
+ * that offset lands on: every draw indexing the frame buffer is shifted by it.
+ * See GR_UpdateVertexBuffer for why the buffer is used as a ring. */
+static size_t s_vboOffset[2] = { 0, 0 };
+extern "C" { int g_vboBaseVertex = 0; }
+static void GR_SetupVertexAttribs();
 
 GLuint		g_glBlitFramebuffer;
 
@@ -3524,6 +3531,9 @@ int GR_InitialisePSX()
 
 			glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[i]);
 			glBufferData(GL_ARRAY_BUFFER, sizeof(GrVertex) * MAX_VERTEX_BUFFER_SIZE, NULL, GL_DYNAMIC_DRAW);
+
+			/* Once per VAO, not once per flush. See GR_SetupVertexAttribs. */
+			GR_SetupVertexAttribs();
 		}
 
 		glBindVertexArray(0);
@@ -5715,7 +5725,7 @@ void GR_ShadowPassBegin(void)
 
 void GR_ShadowPassDraw(int startVertex, int numVerts)
 {
-	glDrawArrays(GL_TRIANGLES, startVertex, numVerts);
+	glDrawArrays(GL_TRIANGLES, g_vboBaseVertex + startVertex, numVerts);
 }
 
 void GR_ShadowPassEnd(void)
@@ -7534,32 +7544,47 @@ void GR_SetWireframe(int enable)
 #endif
 }
 
+/* The attribute layout is the same for every shader -- the locations are a
+ * fixed enum and each program binds them explicitly with glBindAttribLocation
+ * -- so it belongs in the VAO once, at init, which is what a VAO is for.
+ *
+ * It used to be re-specified on every flush: 23 GL calls, times the ~30 flushes
+ * a frame the game performs, for state that never changed. [PERF4] measured the
+ * function holding it at 26.3 ms of a 46.8 ms frame, after the orphan it was
+ * first blamed on had already been fixed. */
+static void GR_SetupVertexAttribs()
+{
+#if USE_OPENGL
+	glEnableVertexAttribArray(a_position);
+	glEnableVertexAttribArray(a_texcoord);
+	glEnableVertexAttribArray(a_color);
+	glEnableVertexAttribArray(a_extra);
+	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
+	glVertexAttribPointer(a_zw, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
+	glEnableVertexAttribArray(a_zw);
+	glVertexAttribPointer(a_pgxp, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ppx);
+	glEnableVertexAttribArray(a_pgxp);
+	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->u);
+	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GrVertex), &((GrVertex*)NULL)->r);
+	glVertexAttribPointer(a_extra, 4, GL_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->tcx);
+	glVertexAttribPointer(a_normal, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->nx);
+	glEnableVertexAttribArray(a_normal);
+	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
+	glEnableVertexAttribArray(a_viewpos);
+	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
+	glEnableVertexAttribArray(a_geom3d);
+	glVertexAttribPointer(a_uvlim, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ulo);
+	glEnableVertexAttribArray(a_uvlim);
+#endif
+}
+
 void GR_BindVertexBuffer()
 {
 #if USE_OPENGL
 	glBindVertexArray(g_glVertexArray[g_curVertexBuffer]);
-
-	glEnableVertexAttribArray(a_position);
-	glEnableVertexAttribArray(a_texcoord);
-	glEnableVertexAttribArray(a_color);
-	glEnableVertexAttribArray(a_extra);
-
-	glVertexAttribPointer(a_position, 4, GL_SHORT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->x);
-	glVertexAttribPointer(a_zw, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->z);
-	glEnableVertexAttribArray(a_zw);
-	glVertexAttribPointer(a_pgxp, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ppx);
-	glEnableVertexAttribArray(a_pgxp);
-	glVertexAttribPointer(a_texcoord, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->u);
-	glVertexAttribPointer(a_color, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GrVertex), &((GrVertex*)NULL)->r);
-	glVertexAttribPointer(a_extra, 4, GL_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->tcx);
-	glVertexAttribPointer(a_normal, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->nx);
-	glEnableVertexAttribArray(a_normal);
-	glVertexAttribPointer(a_viewpos, 3, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->vsx);
-	glEnableVertexAttribArray(a_viewpos);
-	glVertexAttribPointer(a_geom3d, 1, GL_FLOAT, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->geom3d);
-	glEnableVertexAttribArray(a_geom3d);
-	glVertexAttribPointer(a_uvlim, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(GrVertex), &((GrVertex*)NULL)->ulo);
-	glEnableVertexAttribArray(a_uvlim);
+	/* Still bound explicitly: the VAO remembers the attribute bindings, but
+	 * GL_ARRAY_BUFFER is global state and the upload below writes through it. */
+	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer]);
 
 	g_curVertexBuffer++;
 	g_curVertexBuffer &= 1;
@@ -7633,6 +7658,10 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 		num_vertices = MAX_VERTEX_BUFFER_SIZE;
 	}
 
+	/* The buffer GR_BindVertexBuffer is about to bind: it advances the index on
+	 * the way out, so read it before the call, not after. */
+	const int curBuf = g_curVertexBuffer;
+
 	//assert(num_vertices <= MAX_VERTEX_BUFFER_SIZE);
 	GR_BindVertexBuffer();
 
@@ -7654,33 +7683,64 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 	 * GPU holds the buffer, so it is largest on tilers and shared-memory iGPUs
 	 * and smallest on a discrete desktop card — but it is never a pessimisation,
 	 * and the size is constant so drivers can recycle identical blocks. */
-	/* ...but orphan only as much as this call needs, not the whole capacity.
+	/* ...but ONCE PER WRAP, not once per flush, because the cost turned out to
+	 * be the number of orphans and not their size.
 	 *
-	 * The full-capacity orphan asked the driver for ~17 MB of fresh storage
-	 * EVERY call (262144 verts x 68 B of GrVertex) in order to write about 1 MB
-	 * of it, and a phone charges real time for handing that back. Measured with
-	 * [PERF4]: 35.4 ms of a 47.9 ms frame, 93% of all GL submit time, while the
-	 * ~790 draw calls it was blamed on came to 1.4 ms and state setup to 1.0 ms.
+	 * ClearSplits resets the vertex index after every flush, and the game
+	 * flushes many times a frame (every DrawSync with pending splits, plus the
+	 * near-full flush in ParsePrimitivesLinkedList), so each flush was handing
+	 * the driver a brand new allocation. [PERF4] on a phone: 35.4 ms of a
+	 * 47.9 ms frame in here, against 1.4 ms for all ~790 draw calls and 1.0 ms
+	 * for all per-split state. Sizing the orphan to what was used took it to
+	 * 7.25 ms, still 93% of submit in a scene of only 88 draws, which is what
+	 * showed the per-CALL overhead was the thing.
 	 *
-	 * Rounded up to a 1 MB bucket rather than sized exactly, because the reason
-	 * orphaning works at all is that the driver can hand back a block it already
-	 * has: a size that wobbles every frame defeats that, while a handful of
-	 * repeating sizes does not. Still never a pessimisation against the old
-	 * behaviour -- the size only ever shrinks. */
+	 * So treat the buffer as a ring: append each flush after the last, and only
+	 * orphan when the write would run off the end. In-flight draws are reading
+	 * earlier offsets, which nothing here overwrites, and the orphan at the wrap
+	 * leaves those draws with the old storage exactly as before. Mapped
+	 * UNSYNCHRONIZED because that is the promise being made -- no part of this
+	 * write is a region the GPU is still reading -- with glBufferSubData kept as
+	 * the fallback where the map is unavailable. */
 	{
 		const size_t vtxSize = sizeof(GrVertex);
 		const size_t needed  = (size_t)num_vertices * vtxSize;
-		const size_t bucket  = 1u << 20;
 		const size_t capped  = (size_t)MAX_VERTEX_BUFFER_SIZE * vtxSize;
-		size_t       orphan  = ((needed + bucket - 1) / bucket) * bucket;
+		size_t       offset  = s_vboOffset[curBuf & 1];
 
-		if (orphan < bucket)
-			orphan = bucket;
-		if (orphan > capped)
-			orphan = capped;
+		if (needed == 0)
+		{
+			g_vboBaseVertex = 0;
+			return;
+		}
 
-		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)orphan, NULL, GL_STREAM_DRAW);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)needed, vertices);
+		if (offset + needed > capped)
+		{
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)capped, NULL, GL_STREAM_DRAW);
+			offset = 0;
+		}
+
+		void* dst = glMapBufferRange ?
+			glMapBufferRange(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed,
+			                 GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
+			                 GL_MAP_INVALIDATE_RANGE_BIT) : NULL;
+
+		if (dst != NULL)
+		{
+			memcpy(dst, vertices, needed);
+			glUnmapBuffer(GL_ARRAY_BUFFER);
+		}
+		else
+		{
+			glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)needed, vertices);
+		}
+
+		/* Every draw that indexes THIS buffer has to be shifted by where the
+		 * flush landed; the two sites that do are DrawSplit and the shadow
+		 * caster pass. GR_DrawTriangles itself is left alone because the modern
+		 * mesh path calls it with its own buffer bound. */
+		g_vboBaseVertex           = (int)(offset / vtxSize);
+		s_vboOffset[curBuf & 1]   = offset + needed;
 	}
 #else
 #error

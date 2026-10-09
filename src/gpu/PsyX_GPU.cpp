@@ -3062,9 +3062,11 @@ void DrawSplit(const GPUDrawSplit& split)
 		extern unsigned g_PsyX_UsState, g_PsyX_UsDraw;
 		unsigned        tDraw;
 
+		extern int g_vboBaseVertex;   /* where this flush landed in the ring */
+
 		g_PsyX_UsState += PsyX_PerfUs() - s_splitT0;
 		tDraw = PsyX_PerfUs();
-		GR_DrawTriangles(split.startVertex, split.numVerts / 3);
+		GR_DrawTriangles(g_vboBaseVertex + split.startVertex, split.numVerts / 3);
 		g_PsyX_UsDraw += PsyX_PerfUs() - tDraw;
 	}
 
