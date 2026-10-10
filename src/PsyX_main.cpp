@@ -929,6 +929,19 @@ int g_activeKeyboardControllers = 0x1;
 int g_PsyX_WheelUpFrames   = 0;
 int g_PsyX_WheelDownFrames = 0;
 
+/* Set while Android has taken the app off screen.
+ *
+ * SDL destroys the window surface then, and its release handshake waits for
+ * THIS thread to stop using the GL context first (onNativeSurfaceDestroyed in
+ * SDL_android.c retries 50 times waiting for backup_done, then gives up with
+ * "context probably still active"). Nothing here handled the app events, so
+ * the game kept drawing and swapping, the handshake always timed out, and the
+ * surface was left in a state onNativeSurfaceChanged will not rebuild -- which
+ * is why the cabinet froze permanently with eglSwapBuffers returning
+ * EGL_BAD_SURFACE on every frame while audio and input carried on.
+ *
+ * Honouring it costs nothing on desktop, where these events never arrive. */
+extern "C" { int g_PsyX_AppPaused = 0; }
 void PsyX_Sys_DoPollEvent()
 {
 	SDL_Event event;
@@ -936,6 +949,18 @@ void PsyX_Sys_DoPollEvent()
 	{
 		switch (event.type)
 		{
+			case SDL_APP_WILLENTERBACKGROUND:
+			case SDL_APP_DIDENTERBACKGROUND:
+				/* Stop touching GL from here until we are back: that is what
+				 * lets SDL release the surface cleanly and rebuild it later. */
+				g_PsyX_AppPaused = 1;
+				eprintinfo("[LIFECYCLE] backgrounded; GL suspended\n");
+				break;
+			case SDL_APP_WILLENTERFOREGROUND:
+			case SDL_APP_DIDENTERFOREGROUND:
+				g_PsyX_AppPaused = 0;
+				eprintinfo("[LIFECYCLE] foregrounded; GL resumed\n");
+				break;
 			case SDL_CONTROLLERDEVICEADDED:
 				PsyX_Pad_Event_ControllerAdded(event.cdevice.which);
 				break;

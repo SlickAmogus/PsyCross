@@ -7361,6 +7361,14 @@ void GR_SwapWindow()
 		 * SDL_GL_SwapWindow returns void, so the only report is SDL's error
 		 * string; clear it first so anything found here belongs to the swap.
 		 * Rate-limited, and silent unless something is actually wrong. */
+		{
+			/* Android has the surface; presenting now is what breaks it. */
+			extern int g_PsyX_AppPaused;
+
+			if (g_PsyX_AppPaused)
+				return;
+		}
+
 		SDL_ClearError();
 		SDL_GL_SwapWindow(g_window);
 		{
@@ -7413,12 +7421,10 @@ void GR_SwapWindow()
 				 * rather than keep hunting the trigger the renderer should survive
 				 * it. If SDL has already built a replacement surface, making the
 				 * context current again binds to it and the next swap works. */
-				{
-					SDL_GLContext ctx = SDL_GL_GetCurrentContext();
-
-					if (ctx != NULL)
-						SDL_GL_MakeCurrent(g_window, ctx);
-				}
+				/* Deliberately does NOT make the context current again. That was
+				 * tried and it is counter-productive: re-activating the context is
+				 * precisely what stops SDL from releasing the dead surface, so the
+				 * rebind kept the window permanently unrecoverable. */
 
 				if (nowMs >= s_nextSwapMs)
 				{
