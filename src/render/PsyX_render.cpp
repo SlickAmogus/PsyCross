@@ -31,6 +31,10 @@
 /* For the HWND that the ANGLE/EGL surface is created against. */
 #   include <SDL_syswm.h>
 #endif
+#if defined(__ANDROID__)
+/* For the live EGL surface handle: the swap watches it for replacement. */
+#   include <SDL_syswm.h>
+#endif
 
 #include <assert.h>
 #include <string.h>
@@ -7270,6 +7274,42 @@ static void GreyFrame_Present(int w, int h)
 	memset(&s_gf, 0, sizeof(s_gf));
 }
 
+#if defined(__ANDROID__)
+/* [SWAPDIAG] One-shot: the app's own logcat lines from SDL's Java side around
+ * the moment the window surface was replaced. SDLSurface logs
+ * surfaceDestroyed()/surfaceCreated()/surfaceChanged() under the SDL tag, and
+ * SDLActivity logs its pause/resume decisions there too, so this names what
+ * Android actually did -- which the game cannot otherwise see, because no
+ * SDL event is sent for a surface that is replaced without a pause. A process
+ * may read its own log lines without any permission. Runs once. */
+static void Swap_CaptureLogcatOnce(void)
+{
+	static int done = 0;
+	FILE*      lc;
+	char       line[512];
+	int        n = 0;
+
+	if (done)
+		return;
+	done = 1;
+
+	lc = popen("/system/bin/logcat -d -t 2000 -v time -s SDL:V SurfaceView:V", "r");
+	if (lc == NULL)
+	{
+		eprintwarn("[SWAPDIAG] logcat not readable\n");
+		return;
+	}
+	eprintwarn("[SWAPDIAG] ---- logcat SDL/SurfaceView, around the replacement ----\n");
+	while (n < 300 && fgets(line, (int)sizeof(line), lc) != NULL)
+	{
+		eprintwarn("[LOGCAT] %s", line);
+		n++;
+	}
+	pclose(lc);
+	eprintwarn("[SWAPDIAG] ---- end logcat (%d lines) ----\n", n);
+}
+#endif
+
 void GR_SwapWindow()
 {
 	{
@@ -7369,6 +7409,77 @@ void GR_SwapWindow()
 				return;
 		}
 
+#if defined(__ANDROID__)
+		/* Re-bind the context when Android has replaced the window surface.
+		 *
+		 * The cabinet freeze, finally read out of SDL rather than guessed at.
+		 * Android destroyed and recreated the SurfaceView surface WITHOUT pausing
+		 * the activity (no SDL_APP_* event ever arrived -- verified). SDL's
+		 * onNativeSurfaceDestroyed waits 500 ms for a pause handshake that never
+		 * comes, then destroys the old EGL surface anyway while this thread still
+		 * has it current; onNativeSurfaceCreated/Changed then build a NEW one.
+		 * But the step that makes the new surface current on this thread,
+		 * android_egl_context_restore, lives only on the resume path, which never
+		 * runs without a pause. So eglSwapBuffers is handed a surface that is not
+		 * bound to the calling thread, which is precisely EGL_BAD_SURFACE, on
+		 * every frame from then on. GL itself keeps working into the dead surface
+		 * (no GL errors), the compositor keeps the last frame it got, and the game
+		 * runs on underneath -- exactly what was reported.
+		 *
+		 * Why the earlier rebind attempt could not work: SDL_GL_MakeCurrent
+		 * returns early when the window AND context are unchanged ("already
+		 * current"), and both were unchanged -- only the surface underneath moved.
+		 * SDL's own restore therefore unbinds with MakeCurrent(window, NULL) first;
+		 * that is the step this does too.
+		 *
+		 * Watched every frame via SDL_GetWindowWMInfo, which hands back the live
+		 * egl_surface, so the replacement is caught before a swap ever fails. The
+		 * context survives the whole thing (eglDestroySurface never touches it), so
+		 * every texture, buffer and shader is intact. */
+		{
+			static void* s_boundSurface = NULL;   /* what the context was last bound to */
+			static int   s_boundKnown   = 0;
+			SDL_SysWMinfo wm;
+			void*         cur = NULL;
+
+			SDL_VERSION(&wm.version);
+			if (SDL_GetWindowWMInfo(g_window, &wm))
+				cur = (void*)wm.info.android.surface;
+
+			if (!s_boundKnown)
+			{
+				s_boundSurface = cur;
+				s_boundKnown   = 1;
+			}
+
+			if (cur == NULL)
+			{
+				/* Between destroy and create: nothing to present to yet. */
+				return;
+			}
+
+			if (cur != s_boundSurface)
+			{
+				SDL_GLContext ctx = SDL_GL_GetCurrentContext();
+
+				SDL_GL_MakeCurrent(g_window, NULL);
+				if (ctx != NULL && SDL_GL_MakeCurrent(g_window, ctx) == 0)
+				{
+					eprintwarn("[SWAPDIAG] window surface replaced (%p -> %p); context rebound\n",
+						s_boundSurface, cur);
+					s_boundSurface = cur;
+					Swap_CaptureLogcatOnce();
+				}
+				else
+				{
+					eprintwarn("[SWAPDIAG] window surface replaced but rebind failed: %s\n",
+						SDL_GetError());
+					return;
+				}
+			}
+		}
+#endif
+
 		SDL_ClearError();
 		SDL_GL_SwapWindow(g_window);
 		{
@@ -7421,10 +7532,10 @@ void GR_SwapWindow()
 				 * rather than keep hunting the trigger the renderer should survive
 				 * it. If SDL has already built a replacement surface, making the
 				 * context current again binds to it and the next swap works. */
-				/* Deliberately does NOT make the context current again. That was
-				 * tried and it is counter-productive: re-activating the context is
-				 * precisely what stops SDL from releasing the dead surface, so the
-				 * rebind kept the window permanently unrecoverable. */
+				/* No rebind here: the surface watch above the swap handles a
+				 * replaced surface, with the unbind that makes it take. An earlier
+				 * rebind in this spot was a no-op, not harmful -- SDL_GL_MakeCurrent
+				 * short-circuits when window and context are unchanged. */
 
 				if (nowMs >= s_nextSwapMs)
 				{
