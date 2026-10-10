@@ -7293,14 +7293,14 @@ static void Swap_CaptureLogcatOnce(void)
 		return;
 	done = 1;
 
-	lc = popen("/system/bin/logcat -d -t 2000 -v time -s SDL:V SurfaceView:V", "r");
+	lc = popen("/system/bin/logcat -d -t 600 -v time", "r");
 	if (lc == NULL)
 	{
 		eprintwarn("[SWAPDIAG] logcat not readable\n");
 		return;
 	}
-	eprintwarn("[SWAPDIAG] ---- logcat SDL/SurfaceView, around the replacement ----\n");
-	while (n < 300 && fgets(line, (int)sizeof(line), lc) != NULL)
+	eprintwarn("[SWAPDIAG] ---- logcat, this process, around the first failed swap ----\n");
+	while (n < 500 && fgets(line, (int)sizeof(line), lc) != NULL)
 	{
 		eprintwarn("[LOGCAT] %s", line);
 		n++;
@@ -7486,6 +7486,7 @@ void GR_SwapWindow()
 			const char* swapErr = SDL_GetError();
 			int         eglErr  = 0;
 			static int  s_swapBad = 0;
+			static int  s_rebindOk = 0;
 
 			/* SDL_GL_SwapWindow returns void and swallows the platform
 			 * result, so presentation can stop working in complete
@@ -7523,6 +7524,63 @@ void GR_SwapWindow()
 				s_swapHits++;
 				s_swapBad = 1;
 
+				/* First failure: say what state EGL is actually in. Whether the
+				 * handle SDL holds is still a live surface (eglQuerySurface works)
+				 * and whether it is the one bound to this thread
+				 * (eglGetCurrentSurface) are the two facts that separate "window
+				 * abandoned underneath us" from "surface replaced at the same
+				 * address". Then the logcat capture, which names the trigger. */
+				{
+					static int s_probed = 0;
+
+					if (!s_probed)
+					{
+						typedef void* (*EglGetCurSurfFn)(int);
+						typedef void* (*EglGetCurDispFn)(void);
+						typedef unsigned (*EglQuerySurfFn)(void*, void*, int, int*);
+						typedef int (*EglErrFn2)(void);
+						void*            lib   = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+						EglGetCurSurfFn  getCur = lib ? (EglGetCurSurfFn)dlsym(lib, "eglGetCurrentSurface") : NULL;
+						EglGetCurDispFn  getDpy = lib ? (EglGetCurDispFn)dlsym(lib, "eglGetCurrentDisplay") : NULL;
+						EglQuerySurfFn   query  = lib ? (EglQuerySurfFn)dlsym(lib, "eglQuerySurface") : NULL;
+						EglErrFn2        getErr = lib ? (EglErrFn2)dlsym(lib, "eglGetError") : NULL;
+						SDL_SysWMinfo    wm;
+						void*            sdlSurf = NULL;
+						void*            curDraw = getCur ? getCur(0x3059 /* EGL_DRAW */) : NULL;
+						void*            dpy     = getDpy ? getDpy() : NULL;
+						int              w       = -1;
+						unsigned         qok     = 0;
+						int              qerr    = 0;
+
+						s_probed = 1;
+						SDL_VERSION(&wm.version);
+						if (SDL_GetWindowWMInfo(g_window, &wm))
+							sdlSurf = (void*)wm.info.android.surface;
+						if (query && dpy && sdlSurf)
+						{
+							qok  = query(dpy, sdlSurf, 0x3057 /* EGL_WIDTH */, &w);
+							qerr = getErr ? getErr() : 0;
+						}
+						eprintwarn("[SWAPDIAG] probe: sdlSurface=%p currentDraw=%p nativeWindow=%p"
+						           " querySurface(ok=%u width=%d err=0x%04X)\n",
+						           sdlSurf, curDraw, (void*)wm.info.android.window,
+						           qok, w, (unsigned)qerr);
+						Swap_CaptureLogcatOnce();
+					}
+				}
+
+				/* Then try to recover, every failed frame: unbind so SDL cannot
+				 * short-circuit, rebind so the context attaches to whatever surface
+				 * SDL holds now -- including one recreated at the same address,
+				 * which the handle watch above cannot tell apart. Harmless when
+				 * the surface is genuinely dead; decisive when it is merely unbound. */
+				{
+					SDL_GLContext ctx = SDL_GL_GetCurrentContext();
+
+					SDL_GL_MakeCurrent(g_window, NULL);
+					s_rebindOk = (ctx != NULL && SDL_GL_MakeCurrent(g_window, ctx) == 0) ? 1 : 0;
+				}
+
 				/* Rebind the context to whatever surface SDL holds NOW.
 				 *
 				 * The cabinet loses its window surface after a few minutes and
@@ -7532,15 +7590,13 @@ void GR_SwapWindow()
 				 * rather than keep hunting the trigger the renderer should survive
 				 * it. If SDL has already built a replacement surface, making the
 				 * context current again binds to it and the next swap works. */
-				/* No rebind here: the surface watch above the swap handles a
-				 * replaced surface, with the unbind that makes it take. An earlier
-				 * rebind in this spot was a no-op, not harmful -- SDL_GL_MakeCurrent
-				 * short-circuits when window and context are unchanged. */
+
 
 				if (nowMs >= s_nextSwapMs)
 				{
-					eprintwarn("[SWAPDIAG] swap: egl=0x%04X sdl='%s' x%u (rebinding)\n",
-						(unsigned)eglErr, (swapErr != NULL) ? swapErr : "", s_swapHits);
+					eprintwarn("[SWAPDIAG] swap: egl=0x%04X sdl='%s' x%u (rebind %s)\n",
+						(unsigned)eglErr, (swapErr != NULL) ? swapErr : "", s_swapHits,
+						s_rebindOk ? "ok" : "failed");
 					s_swapHits   = 0;
 					s_nextSwapMs = nowMs + 3000u;
 				}
