@@ -29,6 +29,10 @@
 #include <SDL.h>
 
 #include <exception>
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+#include <chrono>
+#include <thread>
+#endif
 
 #include "PsyX/PsyX_render.h"
 
@@ -272,6 +276,28 @@ int intrThreadMain(void* data)
 		 * g_SpuMutex (never nested under g_intrMutex), throttles on the
 		 * SDL_GetTicks ms delta, no-op unless `adsr 1`. */
 		PsyX_SPUAL_Update();
+
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+		/* Avoid busy-polling for the next vblank or RCnt2 audio tick. The audio
+		 * timer runs at ~578 Hz, so a full millisecond sleep would miss ticks.
+		 * Wake shortly before the next deadline and poll the final fraction. */
+		{
+			const double timestep = g_vmode == MODE_NTSC ? FIXED_TIME_STEP_NTSC : FIXED_TIME_STEP_PAL;
+			double remaining = timestep - Util_GetHPCTime(&g_vblTimer, 0);
+			if (g_rcnt2_timer_active)
+			{
+				const double audioRemaining = rcnt2Period - Util_GetHPCTime(&rcnt2Timer, 0);
+				if (audioRemaining < remaining)
+					remaining = audioRemaining;
+			}
+			if (remaining > 0.00025)
+			{
+				int sleepUs = (int)((remaining - 0.00015) * 1000000.0);
+				if (sleepUs > 500) sleepUs = 500;
+				std::this_thread::sleep_for(std::chrono::microseconds(sleepUs));
+			}
+		}
+#endif
 	}
 
 	return 0;
@@ -1343,6 +1369,10 @@ void PsyX_WaitForTimestep(int count)
 			emscripten_sleep(0);
 #endif
 			vbl = PsyX_Sys_GetVBlankCount();
+#if defined(__linux__) && !defined(__EMSCRIPTEN__)
+			if (vbl - swapLastVbl < count)
+				SDL_Delay(1);
+#endif
 		}
 		while (vbl - swapLastVbl < count);
 
