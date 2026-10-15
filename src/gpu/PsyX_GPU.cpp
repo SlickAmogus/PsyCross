@@ -387,7 +387,11 @@ static unsigned s_wmDevPrims, s_wmPrecPrims;
 extern "C" { double g_wmTParse = 0, g_wmTDraw = 0, g_wmTChunks = 0, g_wmTXform = 0, g_wmTMesh = 0; unsigned g_wmSplits = 0, g_wmVerts = 0, g_wmOtDraws = 0; }
 static Uint64 s_wmFrameStart = 0;
 /* Probe-frame cycle counts per GT4 parse step (world prims are GT4). */
+#if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
+#else
+static inline unsigned long long __rdtsc(void) { return SDL_GetPerformanceCounter(); }
+#endif
 static unsigned long long s_wmCyc[9];
 static unsigned s_wmGt4;
 /* Probe-frame parse cost by prim class: [code>>4], 16 = 0xB5 far quads,
