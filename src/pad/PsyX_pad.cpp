@@ -33,6 +33,21 @@ int						g_cfg_controllerToSlotMapping[MAX_CONTROLLERS] = { -1, -1 };
 int						g_cfg_controllerMovement = 2;
 int						g_cfg_disableDpadMovement = 0; /* 1 = controller D-pad no longer drives movement (freed for action binds); keyboard arrows unaffected */
 
+/* PC port split screen: two copies of the game share one PC, so each may open
+ * only its own pads. 0 = any device, 1 = only g_PsyX_PadFilterDevice (Player
+ * 2's window), 2 = every device but that one (Player 1's). Player 2's window
+ * also never reads the keyboard or mouse: those are Player 1's. */
+int						g_PsyX_PadFilterMode   = 0;
+int						g_PsyX_PadFilterDevice = -1;
+extern "C" { int g_PsyX_NoKeyboardMouse = 0; }
+
+static int PsyX_Pad_DeviceAllowed(Sint32 deviceId)
+{
+	if (g_PsyX_PadFilterMode == 1) return deviceId == g_PsyX_PadFilterDevice;
+	if (g_PsyX_PadFilterMode == 2) return deviceId != g_PsyX_PadFilterDevice;
+	return 1;
+}
+
 PsyXController			g_controllers[MAX_CONTROLLERS];
 
 /* PSX PadSetAct semantics: the game registers a LIVE actuator buffer once
@@ -429,6 +444,10 @@ static void PsyX_Pad_AdoptDevice(Sint32 deviceId)
 	const SDL_JoystickID instance = SDL_JoystickGetDeviceInstanceID(deviceId);
 	int i;
 
+	/* Split screen: this process owns only some of the pads. */
+	if (!PsyX_Pad_DeviceAllowed(deviceId))
+		return;
+
 	/* Already ours. An ADDED event can arrive for a device the startup scan
 	 * has just taken, and without this the same physical pad would be opened a
 	 * second time into the next free slot and sit there as player 2. */
@@ -503,6 +522,51 @@ void PsyX_Pad_Event_ControllerRemoved(Sint32 instanceId)
 	}
 
 	PsyX_Pad_Debug_ListControllers();
+}
+
+extern "C" void PsyX_Pad_SetDeviceFilter(int mode, int deviceId)
+{
+	int i, j, n;
+
+	g_PsyX_PadFilterMode   = mode;
+	g_PsyX_PadFilterDevice = deviceId;
+
+	/* Only one of the two windows has the focus, and both must keep reading
+	 * their pads. SDL re-reads this hint when it changes. */
+	SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+
+	/* Close what the filter now excludes. A slot's device index can be stale
+	 * (plug order), so the open pad is matched to a current index by instance. */
+	n = SDL_NumJoysticks();
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		PsyXController* c = &g_controllers[i];
+		int             allowed = 0;
+
+		if (!c->gc)
+			continue;
+		for (j = 0; j < n; j++)
+		{
+			if (SDL_JoystickGetDeviceInstanceID(j) == c->instanceId)
+			{
+				allowed = PsyX_Pad_DeviceAllowed(j);
+				break;
+			}
+		}
+		if (!allowed)
+		{
+			eprintinfo("[PAD] slot %d released to the other split-screen window\n", i);
+			PsyX_Pad_CloseController(i);
+		}
+	}
+
+	/* Adopt what it now allows. */
+	for (j = 0; j < n; j++)
+	{
+		if (SDL_IsGameController(j))
+			PsyX_Pad_AdoptDevice(j);
+	}
+	eprintinfo("[PAD] device filter mode %d device %d\n", mode, deviceId);
 }
 
 void PsyX_Pad_InternalPadUpdates()
@@ -941,6 +1005,10 @@ u_short PsyX_Pad_UpdateKeyboardInput()
 		return 0xFFFF;
 
 	SDL_PumpEvents();
+
+	/* Player 2's split-screen window: the keyboard and mouse are Player 1's. */
+	if (g_PsyX_NoKeyboardMouse)
+		return 0xFFFF;
 
 	ret = PsyX_Pad_BuildKbWord(g_cfg_keyboardMapping);
 

@@ -249,6 +249,15 @@ extern int         PsyX_Pad_ConnectedControllerType(void);
 extern const char* PsyX_Pad_HeldBindName(void);
 extern int         PsyX_Pad_AxisValue(int sdlAxis);
 
+/* PC port split screen (pc_split_screen.c): which SDL game controllers this
+ * process may open. mode 0 = any (default), 1 = only the device at index
+ * deviceId, 2 = every device but that one. Pads already open that the filter
+ * excludes are closed, the rest adopted; pads also keep reporting while the
+ * window is unfocused, since the two windows share one desktop. */
+extern void PsyX_Pad_SetDeviceFilter(int mode, int deviceId);
+/* 1 = the keyboard and mouse never reach the emulated pad (Player 2's window). */
+extern int g_PsyX_NoKeyboardMouse;
+
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);
 

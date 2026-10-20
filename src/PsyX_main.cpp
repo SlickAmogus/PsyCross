@@ -920,8 +920,10 @@ int g_PsyX_WheelNotches    = 0;
 /* Never cleared: readers diff it against their own last sample, so no reader
  * can steal another's notches. */
 int g_PsyX_WheelTotal      = 0;
-/* 1 once a controller button or a deliberate stick/trigger push arrives, 0
- * again on real mouse use; the host hides its UI cursor while it is 1. */
+/* 1 once a controller button, a deliberate stick/trigger push or a key
+ * arrives, 0 again on real mouse use; the host hides its UI cursor and stops
+ * hover-selecting while it is 1, so a pointer left resting on a menu row
+ * cannot drag the selection back to it. */
 int g_PsyX_PadInputLast    = 0;
 
 void PsyX_Sys_DoPollEvent()
@@ -1004,6 +1006,9 @@ void PsyX_Sys_DoPollEvent()
 			case SDL_KEYUP:
 			{
 				int nKey = event.key.keysym.scancode;
+
+				if (event.type == SDL_KEYDOWN)
+					g_PsyX_PadInputLast = 1;
 
 				if (nKey == SDL_SCANCODE_RETURN)
 				{
