@@ -28,6 +28,8 @@
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+/* Optional capture owner; standalone PsyCross builds need no game symbol. */
+extern "C" { void (*g_PsyX_MenuPreviewCapture)(void)=nullptr; }
 
 #ifdef _WIN32
 
@@ -287,6 +289,10 @@ int g_PcHorPlusEnabled = 1;
  * instead of stretching the 4:3 content to fill a widescreen window. Set
  * from g_PcConfig.menuPillarbox in main_pc.c. Default on. */
 int g_PcMenuPillarbox = 1;
+
+/* Opt-in responsive overlays (title/options). Saved aspect settings are
+ * unchanged. Shared by presentation, overlay viewport and pointer mapping. */
+int g_PcOptionsWideScreen = 0;
 
 /* Widescreen presentation mode for 3D gameplay (only used when g_PcHorPlusEnabled=1):
  *   0 = Pillarbox (PSX-faithful): render 4:3 content centered in a 16:9 frame
@@ -974,7 +980,8 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 	int x = 0, y = 0, w = g_presentWidth, h = g_presentHeight;
 
 	/* Every PSX mode is a 4:3 picture, whatever its pixel count. */
-	if (g_PcNativeRender && w > 0 && h > 0)
+	if (g_PcNativeRender && !g_PcOptionsWideScreen &&
+	    (g_PcHorPlusEnabled || g_PcMenuPillarbox) && w > 0 && h > 0)
 	{
 		if (w * 3 > h * 4)
 		{
@@ -990,7 +997,7 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 		return;
 	}
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcOptionsWideScreen && !g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 
@@ -1325,6 +1332,7 @@ static void GR_ResolveBackend(void)
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+	if (SDL_getenv("SH_OPTIONS_PREVIEW")) windowFlags |= SDL_WINDOW_HIDDEN;
 
 #if defined(RENDERER_OGL)
 	/* A window created with SDL_WINDOW_OPENGL gets an SDL-chosen pixel format
@@ -1376,8 +1384,10 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	 * copy of the game — repeatedly. Windows lets a child of the foreground process
 	 * set foreground, so raising the freshly-created window puts intro-skip (and
 	 * all) input on the game where it belongs. */
-	SDL_ShowWindow(g_window);
-	SDL_RaiseWindow(g_window);
+	if (!SDL_getenv("SH_OPTIONS_PREVIEW")) {
+		SDL_ShowWindow(g_window);
+		SDL_RaiseWindow(g_window);
+	}
 #endif
 
 #if defined(RENDERER_OGLES)
@@ -1446,8 +1456,10 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
 				return 0;
 			}
-			SDL_ShowWindow(g_window);
-			SDL_RaiseWindow(g_window);
+			if (!SDL_getenv("SH_OPTIONS_PREVIEW")) {
+				SDL_ShowWindow(g_window);
+				SDL_RaiseWindow(g_window);
+			}
 		}
 	}
 
@@ -1484,8 +1496,10 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 				eprinterr("Failed to re-create window for the OpenGL fallback!\n");
 				return 0;
 			}
-			SDL_ShowWindow(g_window);
-			SDL_RaiseWindow(g_window);
+			if (!SDL_getenv("SH_OPTIONS_PREVIEW")) {
+				SDL_ShowWindow(g_window);
+				SDL_RaiseWindow(g_window);
+			}
 		}
 	}
 
@@ -4426,7 +4440,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	 * then clear only the 4:3 region to the requested color via a scissor.
 	 * Skipped when the clear is already black (menus) — those bars are fine. */
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcOptionsWideScreen && !g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	/* Menus are NOT excluded any more. They used to be, on the grounds that a
@@ -4801,7 +4815,7 @@ extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* ou
 		return;
 	}
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcOptionsWideScreen && !g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
@@ -4840,7 +4854,7 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 		}
 	}
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcOptionsWideScreen && !g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
@@ -5143,7 +5157,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 		{
 			int vpX = 0, vpY = 0, vpW = g_windowWidth, vpH = g_windowHeight;
 			const bool wantPillarbox =
-				!g_PcNativeRender &&
+				!g_PcOptionsWideScreen && !g_PcNativeRender &&
 				((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
 				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 			if (wantPillarbox && g_windowHeight > 0) {
@@ -5650,6 +5664,9 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
  * full-screen through the selected look. No-op when g_cfg_postProcess <= 0. */
 void GR_PostProcess(void)
 {
+	/* The showcase has already applied the settings in its own renderer. Keep
+	 * black menus/text neutral rather than grading the small viewport twice. */
+	if(g_PcOptionsWideScreen)return;
 	/* Also run when an image adjustment is off-neutral or the calibration bar is
 	 * requested, so brightness/contrast/saturation apply with no filter selected. */
 	const int bcsActive = GR_ImageAdjustActive() &&
@@ -7287,6 +7304,8 @@ void GR_SwapWindow()
 		 * presents nothing (a black window) when an FBO is still bound at
 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		/* The optional school showcase reads its own finished framebuffer only. */
+		if(g_PsyX_MenuPreviewCapture)g_PsyX_MenuPreviewCapture();
 		SDL_GL_SwapWindow(g_window);
 		if (g_internalFBO)
 			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
