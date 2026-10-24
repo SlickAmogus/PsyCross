@@ -157,6 +157,13 @@ extern float						g_PsyX_FlashlightColor[3];   /* additive RGB at full strength 
 extern float						g_PsyX_FlashlightInnerCos;   /* cos(inner half-angle) */
 extern float						g_PsyX_FlashlightOuterCos;   /* cos(outer half-angle) */
 extern float						g_PsyX_FlashlightRange;      /* distance falloff, view-space units */
+/* Other players' flashlights (co-op): extra cones with no shadows, the same
+ * size, colour and range as ours. View space, like g_PsyX_FlashlightPos; the
+ * game sets the count every frame (0 = none). */
+#define PSYX_PARTNER_LIGHTS_MAX 4
+extern int							g_PsyX_PartnerLightCount;
+extern float						g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
 
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
