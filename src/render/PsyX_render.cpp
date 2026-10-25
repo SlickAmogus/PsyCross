@@ -7252,6 +7252,69 @@ void GR_DiagGLError(const char* where)
 		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
 }
 
+static char s_shotPath[1024];
+static int  s_shotPending = 0;
+
+void GR_RequestScreenshot(const char* path)
+{
+	if (!path || !path[0])
+		path = "SCREENSHOT.BMP";
+	strncpy(s_shotPath, path, sizeof(s_shotPath) - 1);
+	s_shotPath[sizeof(s_shotPath) - 1] = 0;
+	s_shotPending = 1;
+}
+
+/* Framebuffer 0 holds the finished frame at this point on every path: the
+ * present blit has run when there is an internal target, and the scene was
+ * drawn straight into it otherwise. RGBA is the one format both desktop GL and
+ * ES guarantee for glReadPixels. */
+static void GR_WritePendingScreenshot(void)
+{
+	if (!s_shotPending)
+		return;
+	s_shotPending = 0;
+
+	const int w = (g_internalFBO != 0 && g_presentWidth > 0) ? g_presentWidth : g_windowWidth;
+	const int h = (g_internalFBO != 0 && g_presentHeight > 0) ? g_presentHeight : g_windowHeight;
+	if (w <= 0 || h <= 0)
+		return;
+
+	u_char* pixels = (u_char*)malloc((size_t)w * h * 4);
+	u_char* flipped = (u_char*)malloc((size_t)w * h * 4);
+	if (!pixels || !flipped)
+	{
+		free(pixels);
+		free(flipped);
+		return;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	if (g_internalFBO != 0)
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+
+	for (int y = 0; y < h; y++)
+		memcpy(flipped + (size_t)(h - 1 - y) * w * 4, pixels + (size_t)y * w * 4, (size_t)w * 4);
+
+	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(flipped, w, h, 32, w * 4,
+		0x000000FF, 0x0000FF00, 0x00FF0000, 0);
+	if (surface)
+	{
+		SDL_Surface* rgb = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_BGR24, 0);
+		if (rgb)
+		{
+			if (SDL_SaveBMP(rgb, s_shotPath) == 0)
+				eprintf("*screenshot: %s (%dx%d)\n", s_shotPath, w, h);
+			else
+				eprintwarn("screenshot %s failed: %s\n", s_shotPath, SDL_GetError());
+			SDL_FreeSurface(rgb);
+		}
+		SDL_FreeSurface(surface);
+	}
+	free(flipped);
+	free(pixels);
+}
+
 void GR_SwapWindow()
 {
 	{
@@ -7313,6 +7376,8 @@ void GR_SwapWindow()
 	{
 		g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 	}
+
+	GR_WritePendingScreenshot();
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	if (PsyX_Angle_Active())
