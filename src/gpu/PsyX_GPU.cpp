@@ -617,6 +617,83 @@ static const AffineEntry* AffineFind(const void* prim) {
 	return nullptr;
 }
 
+/* ---- Per-pixel lighting side channel (PsyX_PpLitPrim) ----------------------
+ * Keyed by prim address and stamped with the PGXP frame gen, exactly like the
+ * affine table above: the game builds a prim, records its corner normals, and
+ * the parse finds them when it emits that prim's vertices. */
+extern "C" { int g_PsyX_PpLitActive = 0; float g_PsyX_HeroLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; }
+struct PpLitEntry { uintptr_t key; unsigned gen; int kind; float n[12]; };
+#define PPLIT_BITS 15
+#define PPLIT_SIZE (1u << PPLIT_BITS)
+#define PPLIT_MASK (PPLIT_SIZE - 1u)
+static PpLitEntry s_ppLit[PPLIT_SIZE];
+
+extern "C" void PsyX_PpLitPrim(const void* prim, int kind, const float* n)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	PpLitEntry* e = &s_ppLit[s];
+	for (int i = 0; i < 16; i++) {
+		PpLitEntry* c = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (c->key == key || c->key == 0 || c->gen != s_pgxpGen) { e = c; break; }
+	}
+	e->key = key; e->gen = s_pgxpGen; e->kind = kind;
+	memcpy(e->n, n, sizeof(e->n));
+}
+
+static const PpLitEntry* PpLitFind(const void* prim)
+{
+	uintptr_t key = (uintptr_t)prim;
+	unsigned s = (unsigned)((key >> 2) * 2654435761u) & PPLIT_MASK;
+	for (int i = 0; i < 16; i++) {
+		const PpLitEntry* e = &s_ppLit[(s + i) & PPLIT_MASK];
+		if (e->key == key) return (e->gen == s_pgxpGen) ? e : nullptr;
+		if (e->key == 0 || e->gen != s_pgxpGen) return nullptr;
+	}
+	return nullptr;
+}
+
+/* Parallel to g_vertexBuffer, index for index. Vertices nothing lit are zero
+ * (w = 0 reads as "use the vertex colour"), written lazily up to the next lit
+ * prim so the cost stays with the prims that use it. */
+float g_ppLitBuffer[MAX_VERTEX_BUFFER_SIZE][4];
+static int s_ppLitCursor = 0;
+
+static void PpLitZeroTo(int end)
+{
+	if (end > s_ppLitCursor)
+		memset(g_ppLitBuffer[s_ppLitCursor], 0, (size_t)(end - s_ppLitCursor) * sizeof(g_ppLitBuffer[0]));
+	if (end > s_ppLitCursor)
+		s_ppLitCursor = end;
+}
+
+extern "C" const float* PsyX_PpLitBufferFinish(int count)
+{
+	PpLitZeroTo(count);
+	return g_ppLitBuffer[0];
+}
+
+/* map[i] = which prim corner buffer vertex i came from. Anything the near
+ * clipper or the size cull reshaped no longer lines up with the corners, so it
+ * stays on the vertex colour. */
+static void PpLitFill(const void* prim, int first, int emitted, int expected, bool reshaped, const int* map)
+{
+	const PpLitEntry* e = (emitted == expected && !reshaped) ? PpLitFind(prim) : nullptr;
+	PpLitZeroTo(first);
+	if (e == nullptr) {
+		PpLitZeroTo(first + emitted);
+		return;
+	}
+	for (int i = 0; i < emitted; i++) {
+		const float* n = &e->n[map[i] * 3];
+		g_ppLitBuffer[first + i][0] = n[0];
+		g_ppLitBuffer[first + i][1] = n[1];
+		g_ppLitBuffer[first + i][2] = n[2];
+		g_ppLitBuffer[first + i][3] = (float)e->kind;
+	}
+	s_ppLitCursor = first + emitted;
+}
+
 static bool s_curPgxpAffine = false;
 static bool s_curNoFlashlight = false;
 static void PGXP_BeginPrim(const void* prim) {
@@ -959,7 +1036,18 @@ int g_DrawPrimMode = 0;
  * static faces — rugs on floors, paper on desks, distant road/wall panels — stop
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
-enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2 };
+enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 };
+/* ACTOR: a character prim armed with its own per-vertex SZ by the game's
+ * skeleton drawers (PsyX_SetNextPrimSzActor while g_PsxActorDepth is set).
+ * Unarmed, those drawers reach the capture with the GTE FIFO's SZ, which the
+ * lighting steps have clobbered: with PGXP off each prim took a stale flat
+ * depth, and with it on the flat bucket seed tied every prim of a bucket. Either
+ * way overlapping surfaces (Harry's belt under the jacket hem, a high-poly
+ * model's mouth behind its lips) flickered as the pose moved. Armed prims take
+ * per-vertex depth instead -- from the PGXP W when it exists (shader,
+ * a_extra.w == 2, without the world's far-push so they still win against the
+ * floor they stand on), else from the SZ. */
+extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
 /* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
  * bucket shares that one bucket, so painter order cannot sort the distant town
  * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
@@ -1140,6 +1228,18 @@ extern "C" float PsyX_GetItemDepthSzMax(void)
 extern "C" void PsyX_NoteItemDepthSz(unsigned int sz)
 {
 	if (sz > g_szMaxThisFrame) g_szMaxThisFrame = sz;
+}
+
+/* Corners in prim order; a triangle passes n = 3 (the parse reads a triangle's
+ * corners from slots 1..3, the FIFO's SZ1..SZ3). */
+extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3, int n)
+{
+	if (n == 3) { s3 = s2; s2 = s1; s1 = s0; }
+	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
+	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
+	g_primSzNextValid = 1;
+	g_primSzNextKind = SZ_KIND_ACTOR;
+	g_primSzNextFar = 0;
 }
 
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
@@ -1423,6 +1523,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	 * it (s_primAlphaPending) and reset it to 255. */
 	s_primAlphaPending = (g_PsxPgxpDbg & 4) ? 255 : PsyX_LookupGteAlpha(polyTag);
 
+
 	float sv0, sv1, sv2, sv3 = 0.0f;
 	if (isQuad) {
 		sv0 = (float)sz[0]; sv1 = (float)sz[1];
@@ -1434,6 +1535,29 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	float sz_avg = isQuad ? (sv0 + sv1 + sv2 + sv3) * 0.25f
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
+
+	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
+	{
+		const float sv[4] = { sv0, sv1, sv2, sv3 };
+		const int n = isQuad ? 4 : 3;
+		for (int i = 0; i < n; i++)
+		{
+			float z;
+			if (pgxpWorldPath)
+			{
+				z = PgxpNdcFromViewZ(sv[i]);
+				vertex[i]._p1 = 2;
+			}
+			else
+			{
+				z = 1.0f - 2.0f * sv[i] / (float)g_szMaxPrevFrame;
+				if (z < -1.0f) z = -1.0f;
+				if (z >  1.0f) z =  1.0f;
+			}
+			vertex[i].z = z;
+		}
+		return;
+	}
 
 	/* Item pass (g_PsyX_ForceItemDepth): TRUE per-vertex depth. A flat
 	 * per-poly average cannot order a large foreshortened face against
@@ -1946,6 +2070,7 @@ void ClearSplits()
 	currentSplitDebugText = nullptr;
 	g_PsxFrameVerts += g_vertexIndex;
 	g_vertexIndex = 0;
+	s_ppLitCursor = 0;
 	g_splitIndex = 0;
 	g_splits[0].kind = GPU_SPLIT_LEGACY;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
@@ -3213,6 +3338,7 @@ static void AddModernSplit(unsigned int handle)
 	GPUDrawSplit& split = g_splits[++g_splitIndex];
 	split.kind = GPU_SPLIT_MODERN;
 	split.modernHandle = handle;
+	split.drawenv = activeDrawEnv;
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
 }
@@ -3463,7 +3589,7 @@ void DrawAllSplits()
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
-			GR_DrawModernMesh(g_splits[i].modernHandle);
+			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
 			DrawFarMeshSplit(g_splits[i]);
 		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
@@ -3650,8 +3776,11 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 			//      VirtualQuery; rely on the 1<<20 node safety counter.
 			uintptr_t nextPtr = reinterpret_cast<uintptr_t>(nextPrim(basePacket));
 			if (nextPtr < 0x10000 ||
-			    nextPtr == static_cast<uintptr_t>(-1) ||
-			    nextPtr >= 0x7FFFFFFFFFFFULL) {
+			    nextPtr == static_cast<uintptr_t>(-1)
+#if defined(_WIN32)
+			    || nextPtr >= 0x7FFFFFFFFFFFULL
+#endif
+			) {
 				static int s_badNextLogged = 0;
 				if (s_badNextLogged < 16) {
 					eprintinfo("[OT] bad nextPtr=0x%llX at %p — chain walk halted\n",
@@ -4064,7 +4193,14 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 			firstVertex[1]._p0 = poly->p1;  // v1
 			firstVertex[2]._p0 = poly->p2;  // v2
 
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 3);
 			g_vertexIndex += PgxpEmitPoly(firstVertex, 3);
+			if (g_PsyX_PpLitActive)
+			{
+				static const int s_triCorners[3] = { 0, 1, 2 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 3, ppReshaped, s_triCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
@@ -4126,7 +4262,16 @@ static int ProcessGouraudPoly(P_TAG* polyTag)
 
 			TriangulateQuad();
 
+			const int ppFirst = g_vertexIndex;
+			const bool ppReshaped = g_PsyX_PpLitActive && g_PsxUsePgxp && PgxpNearClipEligible(firstVertex, 6);
 			WM_CYC(8, g_vertexIndex += PgxpEmitPoly(firstVertex, 6));
+			if (g_PsyX_PpLitActive)
+			{
+				/* MakeVertexQuad takes x0 x1 x3 x2 and TriangulateQuad expands that
+				 * to corners 0 1 2 / 1 2 3. */
+				static const int s_quadCorners[6] = { 0, 1, 2, 1, 2, 3 };
+				PpLitFill(polyTag, ppFirst, g_vertexIndex - ppFirst, 6, ppReshaped, s_quadCorners);
+			}
 
 #if defined(DEBUG_POLY_COUNT)
 			polygon_count++;
