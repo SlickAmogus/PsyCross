@@ -8132,10 +8132,10 @@ void GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int num_vertice
 	Pc_ModernVertex_Upload(vertices, num_vertices);
 }
 
-struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; };
+struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; int indexCount; };
 extern "C" int Pc_ModernMesh_PrepareDraw(unsigned int, PcModernDrawBinding*);
 
-int GR_DrawModernMesh(unsigned int mesh_handle)
+int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 {
 	PcModernDrawBinding binding; GTEShader* modern;
 	if (!Pc_ModernMesh_PrepareDraw(mesh_handle, &binding) || binding.vertexCount < 3)
@@ -8170,8 +8170,22 @@ int GR_DrawModernMesh(unsigned int mesh_handle)
 	 * frame; the carousel only looked correct because 448 happened to match it.
 	 * Derive it the same way the legacy path does (GR_SetOffscreenState reads
 	 * activeDispEnv.disp.w/h) so both cases are right for the same reason. */
-	GR_Ortho2D(0.0f, (float)activeDispEnv.disp.w, (float)activeDispEnv.disp.h, 0.0f, -1.0f, 1.0f);
-	GR_DrawTriangles(0, count / 3);
+	/* A skinned character (handle bit 31) is part of the world pass, so it takes
+	 * the world's projection -- Hor+, vertical crop, hfov -- exactly as the
+	 * legacy split before it did, or it lands off its own shadow in widescreen. */
+	if ((mesh_handle & 0x80000000u) && env != NULL)
+	{
+		GR_SetupClipMode(&env->clip, env->dfe);
+		GR_SetOffscreenState(&env->clip, !env->dfe);
+	}
+	else
+		GR_Ortho2D(0.0f, (float)activeDispEnv.disp.w, (float)activeDispEnv.disp.h, 0.0f, -1.0f, 1.0f);
+	/* Skinned characters upload each vertex once and index it, instead of a
+	 * copy per triangle corner (a 40k-triangle model was ~8 MB a frame). */
+	if (binding.indexCount > 0)
+		glDrawElements(GL_TRIANGLES, binding.indexCount, GL_UNSIGNED_INT, 0);
+	else
+		GR_DrawTriangles(0, count / 3);
 	glBindVertexArray(g_glVertexArray[g_curVertexBuffer ^ 1]);
 	glBindBuffer(GL_ARRAY_BUFFER, g_glVertexBuffer[g_curVertexBuffer ^ 1]);
 	glUseProgram(0);
