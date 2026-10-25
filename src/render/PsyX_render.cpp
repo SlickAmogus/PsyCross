@@ -1289,7 +1289,7 @@ static void GR_ResolveBackend(void)
 
 	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
 	{
-		eprintwarn("Render backend '%s' needs ANGLE (libEGL.dll + libGLESv2.dll) next to the game; falling back to native OpenGL\n",
+		eprintwarn("Render backend '%s' needs ANGLE (libEGL + libGLESv2) next to the game; falling back to native OpenGL\n",
 			PsyX_Backend_GetName(requested));
 		requested = PSYX_BACKEND_GL;
 	}
@@ -1322,6 +1322,13 @@ static void GR_ResolveBackend(void)
 }
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+
+#if defined(__APPLE__)
+/* ANGLE's Metal backend draws into a CAMetalLayer. SDL owns one through a Metal
+ * view on the window; its layer is what eglCreateWindowSurface is handed. */
+static SDL_MetalView s_metalView = NULL;
+#endif
+
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
@@ -1332,7 +1339,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	 * from our own EGL display instead, and ANGLE wants a plain window to make
 	 * its swapchain against, so the flag is dropped there. */
 	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
+	{
 		windowFlags &= ~SDL_WINDOW_OPENGL;
+#if defined(__APPLE__)
+		windowFlags |= SDL_WINDOW_METAL;
+#endif
+	}
 #endif
 
 #if defined(__ANDROID__)
@@ -1418,6 +1430,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		SDL_VERSION(&wmInfo.version);
 		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
 			nativeWindow = (void*)wmInfo.info.win.window;
+#elif defined(__APPLE__)
+		s_metalView = SDL_Metal_CreateView(g_window);
+		if (s_metalView)
+			nativeWindow = SDL_Metal_GetLayer(s_metalView);
+		else
+			eprintwarn("SDL_Metal_CreateView failed: %s\n", SDL_GetError());
 #endif
 
 		if (!PsyX_Angle_Create(nativeWindow, g_grActiveBackend, g_cfg_msaaSamples))
@@ -1425,6 +1443,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 			eprintwarn("Backend '%s' could not be initialised through ANGLE; falling back to native OpenGL\n",
 				PsyX_Backend_GetName(g_grActiveBackend));
 
+#if defined(__APPLE__)
+			if (s_metalView)
+			{
+				SDL_Metal_DestroyView(s_metalView);
+				s_metalView = NULL;
+			}
+			/* SDL refuses a window flagged for both Metal and OpenGL. */
+			windowFlags &= ~SDL_WINDOW_METAL;
+#endif
 			SDL_DestroyWindow(g_window);
 			g_window = NULL;
 
@@ -1889,6 +1916,15 @@ void GR_Shutdown()
 	/* After the GL objects above: destroying the EGL context first would make
 	 * every one of those deletes a call with nothing current. */
 	PsyX_Angle_Destroy();
+
+#if defined(__APPLE__) && (defined(RENDERER_OGL) || defined(RENDERER_OGLES))
+	/* The EGL surface held the layer; only now can the view go. */
+	if (s_metalView)
+	{
+		SDL_Metal_DestroyView(s_metalView);
+		s_metalView = NULL;
+	}
+#endif
 }
 
 void GR_UpdateSwapIntervalState(int swapInterval)

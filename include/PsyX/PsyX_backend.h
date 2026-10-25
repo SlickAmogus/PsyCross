@@ -35,6 +35,7 @@ typedef enum
 	PSYX_BACKEND_VULKAN,	/* ANGLE -> Vulkan */
 	PSYX_BACKEND_WARP,		/* ANGLE -> D3D11 WARP (Microsoft's CPU rasterizer) */
 	PSYX_BACKEND_SOFTWARE,	/* ANGLE -> SwiftShader (CPU raster, no GPU needed) */
+	PSYX_BACKEND_METAL,		/* ANGLE -> Metal (macOS) */
 
 	PSYX_BACKEND_COUNT
 } PsyXBackend;
@@ -80,8 +81,10 @@ extern const char*	PsyX_Backend_GetDescription(int backend);
 /* Whether this backend is reached through ANGLE rather than a native driver. */
 extern int			PsyX_Backend_IsTranslated(int backend);
 
-/* 1 when ANGLE's libEGL/libGLESv2 are actually loadable next to the exe. A
- * translated backend cannot be honoured without them. */
+/* 1 when ANGLE's libEGL/libGLESv2 are actually loadable: next to the exe on
+ * Windows; on macOS in SDL_GetBasePath (the exe directory, or Contents/Resources
+ * in a bundle) or the bundle's Contents/Frameworks. A translated backend cannot
+ * be honoured without them. */
 extern int			PsyX_Backend_AngleAvailable(void);
 
 /* Which GLSL dialect a shader body is written in. The PC port has both. */
@@ -126,7 +129,8 @@ extern const char*	PsyX_Shader_Preamble(int fragmentStage, int dialect);
 extern int			PsyX_Angle_Active(void);
 
 /* Bring up EGL on an existing native window. nativeWindow is an HWND on
- * Windows. Returns 1 on success; on failure nothing is left current and the
+ * Windows and a CALayer (the CAMetalLayer of an SDL Metal view) on Apple
+ * platforms. Returns 1 on success; on failure nothing is left current and the
  * caller should fall back to native GL. */
 extern int			PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples);
 

@@ -2,6 +2,22 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define PSYX_STRICMP _stricmp
+#else
+#include <strings.h>
+#define PSYX_STRICMP strcasecmp
+#endif
+
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <unistd.h>
+#include <SDL2/SDL.h>
+#endif
+
+/* The EGL bootstrap below is built wherever ANGLE is a shipped option: Windows
+ * (D3D11 / Vulkan / WARP / SwiftShader) and Apple platforms (Metal). */
+#if defined(_WIN32) || defined(__APPLE__)
+#define PSYX_ANGLE_BOOTSTRAP 1
 #endif
 
 #include "PsyX/PsyX_backend.h"
@@ -53,6 +69,7 @@ typedef unsigned	EGLenum;
 #define PSYX_EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE	0x320B
 #define PSYX_EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE			0x3450
 #define PSYX_EGL_PLATFORM_ANGLE_DEVICE_TYPE_SWIFTSHADER_ANGLE 0x3487
+#define PSYX_EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE			0x3489
 
 typedef struct
 {
@@ -85,6 +102,13 @@ static const BackendInfo s_backends[] =
 	{ PSYX_BACKEND_SOFTWARE, "software", PSYX_EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
 	                                        PSYX_EGL_PLATFORM_ANGLE_DEVICE_TYPE_SWIFTSHADER_ANGLE,
 	                                                                            "Software raster (SwiftShader)" },
+	/* Apple's OpenGL and OpenGL ES are both deprecated; this runs the same ES 3.0
+	 * path against ANGLE's Metal backend. On Windows ANGLE has no Metal device, so
+	 * selecting it there fails in eglGetPlatformDisplayEXT or eglInitialize and
+	 * falls back to GL like any other unavailable device. */
+	{ PSYX_BACKEND_METAL,    "metal",    PSYX_EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+	                                        PSYX_EGL_PLATFORM_ANGLE_DEVICE_TYPE_HARDWARE_ANGLE,
+	                                                                            "Metal (via ANGLE)"             },
 };
 
 static const BackendInfo* Backend_Find(int backend)
@@ -104,11 +128,7 @@ int PsyX_Backend_FromName(const char* name)
 
 	for (int i = 0; i < (int)(sizeof(s_backends) / sizeof(s_backends[0])); i++)
 	{
-#ifdef _WIN32
-		if (_stricmp(name, s_backends[i].name) == 0)
-#else
-		if (strcasecmp(name, s_backends[i].name) == 0)
-#endif
+		if (PSYX_STRICMP(name, s_backends[i].name) == 0)
 			return s_backends[i].backend;
 	}
 
@@ -117,13 +137,14 @@ int PsyX_Backend_FromName(const char* name)
 	 * giving them the working DXGI-hookable path is better than dropping them
 	 * to GL without a word. */
 #ifdef _WIN32
-	if (_stricmp(name, "dx11") == 0 || _stricmp(name, "directx11") == 0) return PSYX_BACKEND_D3D11;
-	if (_stricmp(name, "dx12") == 0 || _stricmp(name, "d3d12") == 0 || _stricmp(name, "directx12") == 0) return PSYX_BACKEND_D3D11;
-	if (_stricmp(name, "dx9") == 0 || _stricmp(name, "d3d9") == 0) return PSYX_BACKEND_D3D11;
-	if (_stricmp(name, "vk") == 0)   return PSYX_BACKEND_VULKAN;
-	if (_stricmp(name, "opengl") == 0) return PSYX_BACKEND_GL;
-	if (_stricmp(name, "swiftshader") == 0 || _stricmp(name, "cpu") == 0) return PSYX_BACKEND_SOFTWARE;
+	if (PSYX_STRICMP(name, "dx11") == 0 || PSYX_STRICMP(name, "directx11") == 0) return PSYX_BACKEND_D3D11;
+	if (PSYX_STRICMP(name, "dx12") == 0 || PSYX_STRICMP(name, "d3d12") == 0 || PSYX_STRICMP(name, "directx12") == 0) return PSYX_BACKEND_D3D11;
+	if (PSYX_STRICMP(name, "dx9") == 0 || PSYX_STRICMP(name, "d3d9") == 0) return PSYX_BACKEND_D3D11;
+	if (PSYX_STRICMP(name, "vk") == 0)   return PSYX_BACKEND_VULKAN;
+	if (PSYX_STRICMP(name, "opengl") == 0) return PSYX_BACKEND_GL;
+	if (PSYX_STRICMP(name, "swiftshader") == 0 || PSYX_STRICMP(name, "cpu") == 0) return PSYX_BACKEND_SOFTWARE;
 #endif
+	if (PSYX_STRICMP(name, "mtl") == 0) return PSYX_BACKEND_METAL;
 
 	return PSYX_BACKEND_GL;
 }
@@ -147,7 +168,57 @@ int PsyX_Backend_IsTranslated(int backend)
  * EGL bootstrap (translated backends only)
  * ------------------------------------------------------------------------ */
 
+#if defined(PSYX_ANGLE_BOOTSTRAP)
+
+/* One spelling for the two dynamic loaders. ANGLE is a pair of modules on every
+ * platform: libEGL(.dll/.dylib) holds EGL, libGLESv2 holds GL. */
 #ifdef _WIN32
+typedef HMODULE PsyXLib;
+static PsyXLib	Lib_Open(const char* path)             { return LoadLibraryA(path); }
+static void*	Lib_Sym(PsyXLib lib, const char* name) { return (void*)GetProcAddress(lib, name); }
+static void		Lib_Close(PsyXLib lib)                 { FreeLibrary(lib); }
+#else
+typedef void*	PsyXLib;
+static PsyXLib	Lib_Open(const char* path)             { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+static void*	Lib_Sym(PsyXLib lib, const char* name) { return dlsym(lib, name); }
+static void		Lib_Close(PsyXLib lib)                 { dlclose(lib); }
+#endif
+
+#if defined(__APPLE__)
+/* Where the ANGLE dylibs live, relative to SDL_GetBasePath: the executable's
+ * directory for a plain build (pc_port/angle/ is copied there), and in an app
+ * bundle Contents/Resources, whose sibling Contents/Frameworks is where the
+ * packager puts them next to SDL and OpenAL. libEGL dlopens libGLESv2 from its
+ * own directory, so both must sit in the same place. */
+static const char* Angle_Dir(void)
+{
+	static char s_dir[1024];
+	static int  s_probed = 0;
+
+	if (s_probed)
+		return s_dir[0] ? s_dir : NULL;
+	s_probed = 1;
+
+	char* base = SDL_GetBasePath();	/* "<...>/build/" or "<App>.app/Contents/Resources/" */
+	if (!base)
+		return NULL;
+
+	const char* rel[2] = { "", "../Frameworks/" };
+	for (int i = 0; i < 2; i++)
+	{
+		char egl[1024], gles[1024];
+		snprintf(egl,  sizeof(egl),  "%s%slibEGL.dylib",    base, rel[i]);
+		snprintf(gles, sizeof(gles), "%s%slibGLESv2.dylib", base, rel[i]);
+		if (access(egl, R_OK) == 0 && access(gles, R_OK) == 0)
+		{
+			snprintf(s_dir, sizeof(s_dir), "%s%s", base, rel[i]);
+			break;
+		}
+	}
+	SDL_free(base);
+	return s_dir[0] ? s_dir : NULL;
+}
+#endif
 
 typedef EGLDisplay	(*PFN_eglGetPlatformDisplayEXT)(EGLenum, void*, const EGLint*);
 typedef EGLBoolean	(*PFN_eglInitialize)(EGLDisplay, EGLint*, EGLint*);
@@ -165,8 +236,11 @@ typedef EGLint		(*PFN_eglGetError)(void);
 
 static struct
 {
-	HMODULE		egl;
-	HMODULE		glesv2;
+	PsyXLib		egl;
+	PsyXLib		glesv2;
+#if defined(__APPLE__)
+	void*		glesv2Base;	/* image base of libGLESv2, see PsyX_Angle_GetProcAddress */
+#endif
 	EGLDisplay	display;
 	EGLSurface	surface;
 	EGLContext	context;
@@ -197,20 +271,45 @@ static int Angle_LoadEntryPoints(void)
 	if (s_egl.egl)
 		return 1;
 
-	s_egl.egl = LoadLibraryA("libEGL.dll");
+#ifdef _WIN32
+	const char* eglPath  = "libEGL.dll";
+	const char* glesPath = "libGLESv2.dll";
+#else
+	char eglPath[1024], glesPath[1024];
+	const char* dir = Angle_Dir();
+	if (!dir)
+	{
+		PsyX_Log_Warning("[Psy-X] ANGLE: libEGL.dylib + libGLESv2.dylib not found next to the game or in Contents/Frameworks\n");
+		return 0;
+	}
+	snprintf(eglPath,  sizeof(eglPath),  "%slibEGL.dylib",    dir);
+	snprintf(glesPath, sizeof(glesPath), "%slibGLESv2.dylib", dir);
+#endif
+
+	s_egl.egl = Lib_Open(eglPath);
 	if (!s_egl.egl)
 	{
-		PsyX_Log_Warning("[Psy-X] ANGLE: libEGL.dll could not be loaded\n");
+		PsyX_Log_Warning("[Psy-X] ANGLE: %s could not be loaded\n", eglPath);
 		return 0;
 	}
 
 	/* Held open so the GL entry points stay resolvable for the process
 	 * lifetime; ANGLE splits EGL and GL across the two modules. */
-	s_egl.glesv2 = LoadLibraryA("libGLESv2.dll");
+	s_egl.glesv2 = Lib_Open(glesPath);
+#if defined(__APPLE__)
+	s_egl.glesv2Base = NULL;
+	if (s_egl.glesv2)
+	{
+		Dl_info info;
+		void* probe = Lib_Sym(s_egl.glesv2, "glGetString");
+		if (probe && dladdr(probe, &info))
+			s_egl.glesv2Base = info.dli_fbase;
+	}
+#endif
 
 	#define EGL_BIND(field, name) \
-		s_egl.field = (PFN_##name)(void*)GetProcAddress(s_egl.egl, #name); \
-		if (!s_egl.field) { FreeLibrary(s_egl.egl); s_egl.egl = NULL; return 0; }
+		s_egl.field = (PFN_##name)Lib_Sym(s_egl.egl, #name); \
+		if (!s_egl.field) { Lib_Close(s_egl.egl); s_egl.egl = NULL; return 0; }
 
 	EGL_BIND(GetPlatformDisplayEXT, eglGetPlatformDisplayEXT)
 	EGL_BIND(Initialize,            eglInitialize)
@@ -249,8 +348,16 @@ int PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples)
 		PSYX_EGL_NONE
 	};
 
+	/* The native display handle. Windows ANGLE accepts -1 here (its legacy
+	 * EGL_SOFTWARE_DISPLAY_ANGLE value) and has always been called that way; on
+	 * Apple platforms anything but EGL_DEFAULT_DISPLAY (0) is rejected. */
+#ifdef _WIN32
+	void* nativeDisplay = (void*)(-1);
+#else
+	void* nativeDisplay = NULL;
+#endif
 	s_egl.display = s_egl.GetPlatformDisplayEXT(PSYX_EGL_PLATFORM_ANGLE_ANGLE,
-		(void*)(-1) /* EGL_DEFAULT_DISPLAY */, displayAttribs);
+		nativeDisplay, displayAttribs);
 
 	if (s_egl.display == NULL)
 	{
@@ -381,12 +488,28 @@ void* PsyX_Angle_GetProcAddress(const char* name)
 	 * fall back to the module export table. */
 	void* p = s_egl.GetProcAddress_(name);
 	if (!p && s_egl.glesv2)
-		p = (void*)GetProcAddress(s_egl.glesv2, name);
+	{
+		p = Lib_Sym(s_egl.glesv2, name);
+#if defined(__APPLE__)
+		/* dlsym searches the module's dependencies too, and ANGLE's libGLESv2
+		 * reaches Apple's OpenGL.framework through Cocoa. Without this check
+		 * every desktop-only name (glPolygonMode, glGetTexImage, glMapBuffer,
+		 * glDrawBuffer, glClearDepth) resolves to Apple's GL, which has no
+		 * context here and crashes on first use; g_grCaps must see them as
+		 * absent, as on Windows. Only a symbol from libGLESv2's own image counts. */
+		if (p)
+		{
+			Dl_info info;
+			if (!s_egl.glesv2Base || !dladdr(p, &info) || info.dli_fbase != s_egl.glesv2Base)
+				p = NULL;
+		}
+#endif
+	}
 
 	return p;
 }
 
-#else /* !_WIN32 */
+#else /* !PSYX_ANGLE_BOOTSTRAP */
 
 int   PsyX_Angle_Active(void) { return 0; }
 int   PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples) { (void)nativeWindow; (void)backend; (void)msaaSamples; return 0; }
@@ -495,9 +618,11 @@ int PsyX_Backend_AngleAvailable(void)
 
 	s_cached = Angle_ProbeDir("");
 	return s_cached;
+#elif defined(__APPLE__)
+	return Angle_Dir() != NULL;
 #else
-	/* Linux/macOS: ANGLE is not shipped with the game there — the native GL
-	 * driver is the sane path, and Vulkan users are served by Zink/mesa. */
+	/* Linux: ANGLE is not shipped with the game there — the native GL driver is
+	 * the sane path, and Vulkan users are served by Zink/mesa. */
 	return 0;
 #endif
 }
