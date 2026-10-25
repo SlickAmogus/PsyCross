@@ -1087,8 +1087,19 @@ void PsyX_Sys_DoPollEvent()
 						extern int g_surfaceWidth, g_surfaceHeight;
 						extern void GR_ApplyRenderScale(void);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+						/* The event carries window POINTS, but g_surfaceWidth/Height
+						 * are tracked in drawable PIXELS (what init read from
+						 * SDL_GL_GetDrawableSize). On a 3x iPhone the point size
+						 * taken as pixels makes PsyX_MapWindowToViewport think render
+						 * scaling is on and multiply every touch by three, so no
+						 * finger ever lands inside the picture: every tap is "out of
+						 * view" and the game cannot be started. Read pixels. */
+						SDL_GL_GetDrawableSize(g_window, &g_surfaceWidth, &g_surfaceHeight);
+#else
 						g_surfaceWidth  = event.window.data1;
 						g_surfaceHeight = event.window.data2;
+#endif
 						GR_ApplyRenderScale();
 					}
 					GR_ResetDevice();
