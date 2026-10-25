@@ -2340,12 +2340,12 @@ int g_PsxFogToBlack = 0;
  * to GL_SRC_ALPHA, and it is resolved per texel (not after the bilinear mix)
  * so a colour-0 texel still reads as a hole when its neighbours do not. */
 #define GPU_PACK_RG_FUNC\
-	"	uniform sampler2D s_rgLut;\n"
+	"	uniform highp sampler2D s_rgLut;\n"
 
 #define GPU_DECODE_RG_FUNC\
 	"	vec4 lut(vec2 rg) {\n"\
 	"		vec2 idx = (floor(rg * 255.0 + 0.5) + 0.5) * (1.0 / 256.0);\n"\
-	"		vec4 t = texture2D(s_rgLut, idx);\n"\
+	"		highp vec4 t = texture2D(s_rgLut, idx);\n"\
 	"		vec3 c = floor(t.rgb * 255.0 + 0.5) * (1.0 / 256.0);\n"\
 	"		return vec4(c, (rg.x + rg.y == 0.0) ? 0.0 : (t.w > 0.25 ? 0.5 : 1.0));\n"\
 	"	}\n"
@@ -2599,15 +2599,31 @@ int g_PsxFogToBlack = 0;
  * slightly differently, so floor() lands one bucket off and colours / palette
  * lookups corrupt. Snap each channel to its exact integer byte right at the
  * source so all downstream math is bit-exact on every driver (a no-op where
- * normalisation is already exact). */
+ * normalisation is already exact).
+ *
+ * The snap itself has to run in highp. A GLSL ES sampler2D with no qualifier
+ * is lowp (`precision highp float` does not cover samplers), the literals in
+ * this expression carry no precision of their own, and the result was only
+ * promoted on return -- so on an ES driver that evaluates lowp as fp16 (every
+ * Apple GPU; Adreno and Mali as well) the whole snap ran in half precision
+ * and returned k/255 to only ten bits. For k = 0xD0 and 0x90 the fp16 product
+ * k * (1/255) is exactly halfway between two halves and rounds to even,
+ * downward: 208/255 came back as 0.81543 instead of 0.81569, the 4-bit decode
+ * saw v = 12.996 for a high nibble of 13, floor(v + 0.001) gave 12, and the
+ * low nibble became 15.9 -- a CLUT index of 16, one past the palette. On the
+ * iPad that read whatever VRAM held beside the CLUT and put a blue texel on
+ * every transparent texel that shares a byte with palette index 13: rows 3
+ * and 8 of each capital-height glyph in the dialog font. The sampler is
+ * declared highp and the arithmetic runs on a highp copy, so the snap lands
+ * on the exact byte again; desktop GL accepts and ignores both qualifiers. */
 #if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
 #define GPU_FETCH_VRAM_FUNC\
-		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	uniform highp sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { highp vec2 raw = texture2D(s_texture, uv).ra; return floor(raw * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #else
 #define GPU_FETCH_VRAM_FUNC\
-		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	uniform highp sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { highp vec2 raw = texture2D(s_texture, uv).rg; return floor(raw * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #endif
 
 /* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
