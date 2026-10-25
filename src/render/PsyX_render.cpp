@@ -467,7 +467,10 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
  * PsyX_GPU/PsyX_GTE cannot drift apart. */
 extern "C" int GR_NeedViewSpaceData(void)
 {
-	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_textureFilter > 0) ? 1 : 0;
+	/* A partner's beam needs the view positions even in the Classic flashlight
+	 * mode with PGXP and filtering off, the defaults. */
+	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_textureFilter > 0 ||
+	        g_PsyX_PartnerLightCount > 0) ? 1 : 0;
 }
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
@@ -578,6 +581,7 @@ float g_PsyX_FlashlightRange    = 4000.0f;
 int   g_PsyX_PartnerLightCount = 0;
 float g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
 float g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
+float g_PsyX_PartnerLightColor[3] = { 0.0f, 0.0f, 0.0f };
 /* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
  * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
  * [ / ] + backslash and persisted as config key flashlight_size. */
@@ -2062,6 +2066,7 @@ typedef struct
 	GLint flOuterCosLoc;
 	GLint flRangeLoc;
 	GLint plCountLoc;
+	GLint plColorLoc;
 	GLint plPosLoc;
 	GLint plDirLoc;
 	GLint shadowOnLoc;
@@ -2114,6 +2119,7 @@ GLint u_flInnerCosLoc;
 GLint u_flOuterCosLoc;
 GLint u_flRangeLoc;
 GLint u_plCountLoc;
+GLint u_plColorLoc;
 GLint u_plPosLoc;
 GLint u_plDirLoc;
 GLint u_shadowOnLoc;
@@ -2629,6 +2635,7 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_flOuterCos;\n"\
 	"	uniform float u_flRange;\n"\
 	"	uniform int u_plCount;\n"\
+	"	uniform vec3 u_plColor;\n"\
 	"	uniform vec3 u_plPos[4];\n"\
 	"	uniform vec3 u_plDir[4];\n"\
 	"	uniform int u_shadowOn;\n"\
@@ -2765,7 +2772,7 @@ int g_PsxFogToBlack = 0;
 	"					float pd = length(pL);\n"\
 	"					pL /= max(pd, 0.0001);\n"\
 	"					float pc = smoothstep(u_flOuterCos, u_flInnerCos, dot(-pL, pD));\n"\
-	"					plSum += u_flColor * (pc * clamp(1.0 - pd / u_flRange, 0.0, 1.0));\n"\
+	"					plSum += u_plColor * (pc * clamp(1.0 - pd / u_flRange, 0.0, 1.0));\n"\
 	"				}\n"\
 	"			}\n"\
 	"			fragColor.rgb += flAlbedo * plSum * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
@@ -3474,6 +3481,7 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->flOuterCosLoc = glGetUniformLocation(sh->shader, "u_flOuterCos");
 	sh->flRangeLoc = glGetUniformLocation(sh->shader, "u_flRange");
 	sh->plCountLoc = glGetUniformLocation(sh->shader, "u_plCount");
+	sh->plColorLoc = glGetUniformLocation(sh->shader, "u_plColor");
 	sh->plPosLoc = glGetUniformLocation(sh->shader, "u_plPos");
 	sh->plDirLoc = glGetUniformLocation(sh->shader, "u_plDir");
 
@@ -3864,6 +3872,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
 		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
 		u_plPosLoc = shader->plPosLoc;
 		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
@@ -3904,6 +3913,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
 		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
 		u_plPosLoc = shader->plPosLoc;
 		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
@@ -3944,6 +3954,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
 		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
 		u_plPosLoc = shader->plPosLoc;
 		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
@@ -3989,6 +4000,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
 		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
 		u_plPosLoc = shader->plPosLoc;
 		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
@@ -4105,13 +4117,13 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	if (u_flRangeLoc != -1)
 		UC_1f(u_flRangeLoc, g_PsyX_FlashlightRange);
 	{
-		const int plCount = g_PsyX_UsePerPixelFlashlight
-		                  ? (g_PsyX_PartnerLightCount < 0 ? 0 : (g_PsyX_PartnerLightCount > PSYX_PARTNER_LIGHTS_MAX ? PSYX_PARTNER_LIGHTS_MAX : g_PsyX_PartnerLightCount))
-		                  : 0;
+		const int plCount = g_PsyX_PartnerLightCount < 0 ? 0 : (g_PsyX_PartnerLightCount > PSYX_PARTNER_LIGHTS_MAX ? PSYX_PARTNER_LIGHTS_MAX : g_PsyX_PartnerLightCount);
 		if (u_plCountLoc != -1)
 			UC_1i(u_plCountLoc, plCount);
 		if (plCount > 0)
 		{
+			if (u_plColorLoc != -1)
+				UC_3fv(u_plColorLoc, g_PsyX_PartnerLightColor);
 			if (u_plPosLoc != -1)
 				UC_3fvN(u_plPosLoc, g_PsyX_PartnerLightPos, PSYX_PARTNER_LIGHTS_MAX);
 			if (u_plDirLoc != -1)

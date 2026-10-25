@@ -164,6 +164,7 @@ extern float						g_PsyX_FlashlightRange;      /* distance falloff, view-space u
 extern int							g_PsyX_PartnerLightCount;
 extern float						g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
 extern float						g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightColor[3];
 
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
