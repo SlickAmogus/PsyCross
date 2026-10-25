@@ -3498,6 +3498,8 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_uvlim, "a_uvlim");
 	glBindAttribLocation(program, a_farP0, "a_farP0");
 	glBindAttribLocation(program, a_farP1, "a_farP1");
+	glBindAttribLocation(program, a_skinNormal, "a_skinNormal");
+	glBindAttribLocation(program, a_skinTangent, "a_skinTangent");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -8134,6 +8136,7 @@ void GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int num_vertice
 
 struct PcModernDrawBinding { unsigned int textureId; int texFormat, vertexCount; int nativeWidth, nativeHeight; int offsetX, offsetY; int hiresWidth, hiresHeight; int indexCount; };
 extern "C" int Pc_ModernMesh_PrepareDraw(unsigned int, PcModernDrawBinding*);
+extern "C" void Pc_ModernMesh_ApplyLighting(unsigned int, unsigned int);
 
 int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 {
@@ -8161,6 +8164,9 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	 * a desync that also made the next GR_SetDepthFuncAlways(0) early-out. */
 	GR_SetDepthFuncAlways(0);
 	GR_SetTextureShader(texture, (TexFormat)format, modern);
+	/* Per-pixel character lighting: the game side owns the light uniforms and
+	 * the normal map, and clears them for every mesh that is not a skin. */
+	Pc_ModernMesh_ApplyLighting(mesh_handle, modern->shader);
 	GR_SetOverrideTextureSize(binding.nativeWidth, binding.nativeHeight, binding.offsetX, binding.offsetY, binding.hiresWidth, binding.hiresHeight);
 	/* Item OTs are drawn in the ACTIVE display coordinate space, which is not a
 	 * constant: the inventory carousel runs a 320x448 double-buffer (vertices for
