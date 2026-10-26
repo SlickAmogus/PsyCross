@@ -297,6 +297,9 @@ typedef struct GrModernVertex
 	u_char r, g, b, a;
 	char tcx, tcy, fog, reserved;
 	float ppx, ppy, ppw, nx, ny, nz, vsx, vsy, vsz;
+	/* Skinned characters lit per pixel: view-space normal (w unused) and
+	 * tangent (w = bitangent sign). Zero on every other modern mesh. */
+	float snx, sny, snz, snw, stx, sty, stz, stw;
 } GrModernVertex;
 #pragma pack(pop)
 
@@ -314,6 +317,9 @@ typedef enum
 	a_uvlim,
 	a_farP0,
 	a_farP1,
+	a_skinNormal,
+	a_skinTangent,
+	a_ppNormal,
 } ShaderAttrib;
 
 typedef enum
@@ -430,6 +436,8 @@ extern void			GR_SetOffscreenState(const RECT16* offscreenRect, int enable);
 extern void			GR_SetupClipMode(const RECT16* clipRect, int enable);
 extern void			GR_SetViewPort(int x, int y, int width, int height);
 extern void			GR_SetTexture(TextureID texture, TexFormat texFormat);
+extern void			GR_SetTextureMixed(TextureID texture);
+extern void			GR_InvalidateViewScissorCache(void);
 extern void			GR_SetOverrideTextureSize(int width, int height, int offsetX, int offsetY, int hiresW, int hiresH);
 extern void			GR_SetWireframe(int enable);
 
@@ -438,7 +446,7 @@ extern void			GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned cha
 extern void			GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_UpdateVertexBuffer(const GrVertex* vertices, int count);
 extern void			GR_UpdateModernVertexBuffer(const GrModernVertex* vertices, int count);
-extern int			GR_DrawModernMesh(unsigned int mesh_handle);
+extern int			GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env);
 extern void			GR_DrawTriangles(int start_vertex, int triangles);
 
 /* Flashlight shadow map depth pre-pass (see g_PsyX_UseFlashlightShadows). Call
