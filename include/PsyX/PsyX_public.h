@@ -138,6 +138,34 @@ extern int							g_PsyX_NoShadowCast;
  * view-space FIFO as g_PsyX_NoShadowCast. */
 extern float						g_PsyX_CharaFade;
 
+/* PC port: optional per-pixel lighting for the stock world and characters.
+ * The PSX lights every vertex with the GTE and Gouraud-shades the colour
+ * across the face; with this on, the game hands the renderer each lit prim's
+ * view-space corner normals and the frame's light, and the shader re-runs the
+ * same GTE light sum at every pixel. Off (g_PsyX_PpLitActive 0) nothing is
+ * recorded, uploaded or bound, and the shader skips the branch on a uniform. */
+extern int							g_PsyX_PpLitActive;
+typedef struct PsyX_PpLight
+{
+	int		mode;			/* g_WorldEnvWork.field_0: 1 point, 2 directional, 0 none */
+	float	lightPos[3];	/* view space, same units as the GTE view-space capture */
+	float	lightDir[3];	/* the light row (field_74) rotated into view space, Q12 */
+	float	tint[3];		/* world tint, 0..255 */
+	float	lc[3];			/* colour matrix column 0, Q12 */
+	float	bk[3];			/* back colour, 0..255 */
+	float	ambient;		/* field_20 */
+	float	cap;			/* field_3 */
+	float	dqa;			/* depth-cue A the light divide runs under */
+} PsyX_PpLight;
+extern void PsyX_PpLitSetLight(const PsyX_PpLight* light);
+/* kind 1 = world (func_80057658 / func_80057A3C), 2 = character (func_8005AA08).
+ * n holds the corners' view-space normals as the game stores them (inward),
+ * x0 y0 z0 x1 ..., in the prim's own corner order (3 or 4). */
+extern void PsyX_PpLitPrim(const void* prim, int kind, const float* n);
+/* Fill light for characters drawn per pixel, a direction in view space toward
+ * the light and a 0..1 strength. 0 strength leaves the lighting untouched. */
+extern float						g_PsyX_HeroLight[4];
+
 /* Optional per-sound sample replacement. A voice plays from an SPU address; the
  * host may answer that address with its own PCM (any length or rate) instead of
  * the ADPCM resident there, which is how loose-file sound mods bypass both the
@@ -164,6 +192,14 @@ extern float						g_PsyX_FlashlightColor[3];   /* additive RGB at full strength 
 extern float						g_PsyX_FlashlightInnerCos;   /* cos(inner half-angle) */
 extern float						g_PsyX_FlashlightOuterCos;   /* cos(outer half-angle) */
 extern float						g_PsyX_FlashlightRange;      /* distance falloff, view-space units */
+/* Other players' flashlights (co-op): extra cones with no shadows, the same
+ * size, colour and range as ours. View space, like g_PsyX_FlashlightPos; the
+ * game sets the count every frame (0 = none). */
+#define PSYX_PARTNER_LIGHTS_MAX 4
+extern int							g_PsyX_PartnerLightCount;
+extern float						g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightColor[3];
 
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
@@ -267,6 +303,14 @@ extern int         PsyX_Pad_DeviceCount(void);
 extern const char* PsyX_Pad_DeviceName(int n);
 extern int         PsyX_Pad_PreferredControllerConnected(void);
 extern void        PsyX_Pad_ApplyPreferredController(void);
+/* PC port split screen (pc_split_screen.c): which SDL game controllers this
+ * process may open. mode 0 = any (default), 1 = only the device at index
+ * deviceId, 2 = every device but that one. Pads already open that the filter
+ * excludes are closed, the rest adopted; pads also keep reporting while the
+ * window is unfocused, since the two windows share one desktop. */
+extern void PsyX_Pad_SetDeviceFilter(int mode, int deviceId);
+/* 1 = the keyboard and mouse never reach the emulated pad (Player 2's window). */
+extern int g_PsyX_NoKeyboardMouse;
 
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);

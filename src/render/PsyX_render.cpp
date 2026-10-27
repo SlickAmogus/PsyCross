@@ -559,7 +559,10 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
  * PsyX_GPU/PsyX_GTE cannot drift apart. */
 extern "C" int GR_NeedViewSpaceData(void)
 {
-	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_textureFilter > 0) ? 1 : 0;
+	/* A partner's beam needs the view positions even in the Classic flashlight
+	 * mode with PGXP and filtering off, the defaults. */
+	return (g_PsyX_UsePerPixelFlashlight || g_PsxUsePgxp || g_cfg_textureFilter > 0 || g_PsyX_PpLitActive ||
+	        g_PsyX_PartnerLightCount > 0) ? 1 : 0;
 }
 /* 1 = bilinear-filter menu / 2D-only frames (those set g_PsxDitherSuppressed),
  * independent of the 3D psx_dither setting. Passed to the sampler as bilinearFilter==2. */
@@ -667,6 +670,10 @@ float g_PsyX_FlashlightColor[3] = { 1.0f, 1.0f, 1.0f };
 float g_PsyX_FlashlightInnerCos = 0.94f;  /* ~20 deg */
 float g_PsyX_FlashlightOuterCos = 0.76f;  /* ~41 deg */
 float g_PsyX_FlashlightRange    = 4000.0f;
+int   g_PsyX_PartnerLightCount = 0;
+float g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
+float g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
+float g_PsyX_PartnerLightColor[3] = { 0.0f, 0.0f, 0.0f };
 /* PC port: flashlight cone coverage-area multiplier, applied to Inner/OuterCos at
  * push time (1.0 = base cone; 1.5 default = ~1.5x coverage). Live-editable via
  * [ / ] + backslash and persisted as config key flashlight_size. */
@@ -2308,6 +2315,10 @@ typedef struct
 	GLint flInnerCosLoc;
 	GLint flOuterCosLoc;
 	GLint flRangeLoc;
+	GLint plCountLoc;
+	GLint plColorLoc;
+	GLint plPosLoc;
+	GLint plDirLoc;
 	GLint shadowOnLoc;
 	GLint shadowMatrixLoc;
 	GLint shadowBiasLoc;
@@ -2357,6 +2368,10 @@ GLint u_flColorLoc;
 GLint u_flInnerCosLoc;
 GLint u_flOuterCosLoc;
 GLint u_flRangeLoc;
+GLint u_plCountLoc;
+GLint u_plColorLoc;
+GLint u_plPosLoc;
+GLint u_plDirLoc;
 GLint u_shadowOnLoc;
 GLint u_shadowMatrixLoc;
 GLint u_shadowBiasLoc;
@@ -2751,6 +2766,7 @@ int g_PsxFogToBlack = 0;
 	"	attribute vec3 a_normal; // .z = character fade (0 lit, 1 faded out)\n"\
 	"	attribute float a_geom3d; // 1 = GTE-projected primitive (world geometry)\n"\
 	"	attribute vec4 a_uvlim; // per-poly UV bounds (texels), all-zero = none\n"\
+	"	attribute vec4 a_ppNormal;\n"\
 	"	uniform mat4 Projection;\n"\
 	"	uniform mat4 Projection3D;\n"\
 	"	uniform int u_pgxpEnabled;\n"\
@@ -2829,6 +2845,7 @@ int g_PsxFogToBlack = 0;
 	 * and with PGXP on it is 0.0 for world prims that took the affine path.
 	 * That is why bilinear filtered menu text and missed the world. */\
 	"		v_geom3d = a_geom3d;\n"\
+	"		v_ppN = vec4(a_ppNormal.xyz, (a_ppNormal.w > 0.5) ? a_ppNormal.w * 8.0 + a_texcoord.z : 0.0);\n"\
 	"		v_uvlim = a_uvlim;\n"\
 	/* The legacy affine screen path has gl_Position.w == 1, so v_viewpos is not
 	 * perspective-correct there. Encode receiver position over view Z, adjusted
@@ -2870,6 +2887,10 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_flInnerCos;\n"\
 	"	uniform float u_flOuterCos;\n"\
 	"	uniform float u_flRange;\n"\
+	"	uniform int u_plCount;\n"\
+	"	uniform vec3 u_plColor;\n"\
+	"	uniform vec3 u_plPos[4];\n"\
+	"	uniform vec3 u_plDir[4];\n"\
 	"	uniform int u_shadowOn;\n"\
 	"	uniform sampler2D u_shadowTex;\n"\
 	"	uniform mat4 u_shadowMatrix;\n"\
@@ -2879,6 +2900,71 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_shadowStrength;\n"\
 	"	uniform vec2 u_shadowClip;\n"\
 	"	uniform float u_shadowFadeDist;\n"\
+	"	uniform int u_ppOn;\n"\
+	"	uniform int u_ppMode;\n"\
+	"	uniform vec3 u_ppLightPos;\n"\
+	"	uniform vec3 u_ppLightDir;\n"\
+	"	uniform vec3 u_ppTint;\n"\
+	"	uniform vec3 u_ppLC;\n"\
+	"	uniform vec3 u_ppBK;\n"\
+	"	uniform vec4 u_ppWorld;\n"\
+	"	uniform vec4 u_ppHero;\n"\
+	"	uniform int u_ppHeroOn;\n"\
+	"	vec3 PpHero(vec3 m, vec3 Nout) {\n"\
+	"		float h = max(dot(Nout, u_ppHero.xyz), 0.0);\n"\
+	"		float lum = dot(m, vec3(0.299, 0.587, 0.114));\n"\
+	"		return m * mix(1.0, 0.6 + 0.7 * h, u_ppHero.w) + vec3(u_ppHero.w * 0.45 * h * max(1.0 - lum, 0.0));\n"\
+	"	}\n"\
+	"	vec3 PpDivide(vec3 d, float b) {\n"\
+	"		float sz = clamp(dot(d, d) / 4096.0, 8.0, 65535.0);\n"\
+	"		float a = clamp(dot(u_ppLightDir, d) / 4096.0, -32768.0, 32767.0);\n"\
+	"		b = clamp(b, -32768.0, 32767.0);\n"\
+	"		return floor(vec3(clamp(16.0 * a / sz, 0.0, 2047.0), clamp(16.0 * b / sz, 0.0, 2047.0), clamp(u_ppWorld.z * 256.0 / sz, 0.0, 4096.0)));\n"\
+	"	}\n"\
+	"	float PpShade(vec3 t) {\n"\
+	"		float a = max(floor((t.x * t.y + t.y * floor(t.z / 16.0)) / 32.0) - 16.0, 0.0);\n"\
+	"		return a + min(floor(t.x * 0.5) + floor(t.z * 0.25), 48.0);\n"\
+	"	}\n"\
+	"	vec4 PpLitColor() {\n"\
+	"		if ((u_ppOn == 0 && u_ppHeroOn == 0) || v_ppN.w < 4.0) return v_color;\n"\
+	"		float kind = floor(v_ppN.w / 8.0);\n"\
+	"		float bright = v_ppN.w - kind * 8.0;\n"\
+	"		float nl = length(v_ppN.xyz);\n"\
+	"		if (nl < 1e-6) return v_color;\n"\
+	"		vec3 N = v_ppN.xyz * (4064.0 / nl);\n"\
+	"		vec3 rgb;\n"\
+	"		if (u_ppOn == 0) {\n"\
+	"			if (kind < 1.5) return v_color;\n"\
+	"			rgb = v_color.rgb;\n"\
+	"		} else if (kind < 1.5) {\n"\
+	"			float shade;\n"\
+	"			if (u_ppMode == 1) {\n"\
+	"				vec3 d = v_viewpos - u_ppLightPos;\n"\
+	"				shade = min(PpShade(PpDivide(d, dot(N, d) / 4096.0)) + floor(u_ppWorld.x / 32.0), u_ppWorld.y);\n"\
+	"			} else {\n"\
+	"				shade = min(floor((clamp(dot(u_ppLightDir, N) / 4096.0, 0.0, 32767.0) + u_ppWorld.x) / 32.0), 255.0);\n"\
+	"			}\n"\
+	"			return vec4(min(floor(u_ppTint * shade / 128.0), 255.0) / 255.0 * bright, v_color.a);\n"\
+	"		} else {\n"\
+	"			vec3 bk = u_ppBK;\n"\
+	"			vec3 row;\n"\
+	"			if (u_ppMode == 1) {\n"\
+	"				vec3 d = v_viewpos - u_ppLightPos;\n"\
+	"				float dl = max(length(d), 1.0);\n"\
+	"				float s0 = min(floor(PpShade(PpDivide(d, dl)) * 0.5), u_ppWorld.y);\n"\
+	"				float q = floor(s0 * 0.25);\n"\
+	"				float a2 = (q > 40.0) ? s0 - 40.0 : s0 - q;\n"\
+	"				row = clamp(d / dl * 32.0 * a2, -5734.0, 5734.0);\n"\
+	"				bk += floor(u_ppTint * min(q, 40.0) / 128.0);\n"\
+	"			} else {\n"\
+	"				row = u_ppLightDir * 0.5;\n"\
+	"			}\n"\
+	"			float ir = clamp(dot(row, N) / 4096.0, 0.0, 32767.0);\n"\
+	"			rgb = floor(clamp(bk + u_ppLC * ir / 65536.0, 0.0, 255.0)) / 255.0 * bright;\n"\
+	"		}\n"\
+	"		if (u_ppHeroOn > 0) rgb = PpHero(rgb, -N / 4064.0);\n"\
+	"		return vec4(rgb, v_color.a);\n"\
+	"	}\n"\
 	/* Window depth [0,1] -> linear distance along the light's forward axis, using the shadow frustum's near/far (u_shadowClip). Lets us measure how far a receiver sits BEHIND its occluder in world units. */\
 	"	float shLinDepth(float zw) {\n"\
 	"		float ndc = zw * 2.0 - 1.0;\n"\
@@ -2891,7 +2977,7 @@ int g_PsxFogToBlack = 0;
  * override surfaces was visible as unfogged distant walls). */
 #define GPU_LIT_TAIL\
 	"		vec3 flAlbedo = fragColor.rgb;\n"\
-	"		fragColor *= v_color;\n"\
+	"		fragColor *= PpLitColor();\n"\
 	/* Untextured prims sample the white placeholder, so their texture "albedo"
 	 * is 1.0 — the beam would add full-white light onto geometry whose real
 	 * color is the (often dark) vertex color, and stacked additive layers then
@@ -2991,6 +3077,23 @@ int g_PsxFogToBlack = 0;
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
 	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
 	"			}\n"\
+	"		}\n"\
+	/* Other players' flashlights: the modern cone without shadows, added on top\
+	 * of whatever the local light did (dimmed scene or the plain PSX-lit one). */\
+	"		if (u_plCount > 0 && u_fogToBlack == 0 && v_viewpos.z > 0.0) {\n"\
+	"			vec3 plSum = vec3(0.0);\n"\
+	"			for (int pi = 0; pi < 4; pi++) {\n"\
+	"				if (pi < u_plCount) {\n"\
+	"					vec3 pDr = u_plDir[pi];\n"\
+	"					vec3 pD = (dot(pDr, pDr) > 1e-12) ? normalize(pDr) : vec3(0.0, 0.0, 1.0);\n"\
+	"					vec3 pL = u_plPos[pi] - v_viewpos;\n"\
+	"					float pd = length(pL);\n"\
+	"					pL /= max(pd, 0.0001);\n"\
+	"					float pc = smoothstep(u_flOuterCos, u_flInnerCos, dot(-pL, pD));\n"\
+	"					plSum += u_plColor * (pc * clamp(1.0 - pd / u_flRange, 0.0, 1.0));\n"\
+	"				}\n"\
+	"			}\n"\
+	"			fragColor.rgb += flAlbedo * plSum * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
 	"		}\n"\
 	"		float fogAmt = clamp(v_fogAmount * u_fogStrength, 0.0, 1.0);\n"\
 	/* Plain PSX fog: the ramp reaches full fog at the map's fog distance and the
@@ -3095,6 +3198,7 @@ const char* gte_shader_4 =
 	"varying float v_geom3d;\n"
 	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
+	"varying vec4 v_ppN;\n"
 	"varying float v_texfmt;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -3114,6 +3218,7 @@ const char* gte_shader_8 =
 	"varying float v_geom3d;\n"
 	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
+	"varying vec4 v_ppN;\n"
 	"varying float v_texfmt;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -3133,6 +3238,7 @@ const char* gte_shader_16 =
 	"varying float v_geom3d;\n"
 	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
+	"varying vec4 v_ppN;\n"
 	"varying float v_texfmt;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -3152,6 +3258,7 @@ const char* gte_shader_mix =
 	"varying float v_geom3d;\n"
 	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
+	"varying vec4 v_ppN;\n"
 	"varying float v_texfmt;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -3171,6 +3278,7 @@ const char* gte_shader_32_rgba =
 	"varying float v_geom3d;\n"
 	"AFFINE_VARYING vec4 v_uvlim;\n"
 	"varying vec4 v_shadowViewPos;\n"
+	"varying vec4 v_ppN;\n"
 	"varying float v_texfmt;\n"
 	"#ifdef VERTEX\n"
 	GTE_VERTEX_SHADER
@@ -3518,6 +3626,7 @@ ShaderID GR_Shader_Compile(const char* source)
 	glBindAttribLocation(program, a_farP1, "a_farP1");
 	glBindAttribLocation(program, a_skinNormal, "a_skinNormal");
 	glBindAttribLocation(program, a_skinTangent, "a_skinTangent");
+	glBindAttribLocation(program, a_ppNormal, "a_ppNormal");
 
 	glLinkProgram(program);
 	if(GR_Shader_CheckProgramStatus(program) == 0)
@@ -3695,15 +3804,24 @@ static void UC_3fv(GLint loc, const float* v)
 		glUniform3fv(loc, 1, v);
 }
 
+static void UC_3fvN(GLint loc, const float* v, int count)
+{
+	if (GR_UniformChanged(loc, v, 3 * count))
+		glUniform3fv(loc, count, v);
+}
+
 static void UC_M4(GLint loc, const float* m)
 {
 	if (GR_UniformChanged(loc, m, 16))
 		glUniformMatrix4fv(loc, 1, GL_FALSE, m);
 }
 
+static void GR_PpLitForget(GLuint prog);
+
 static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 {
 	sh->shader = shader;
+	GR_PpLitForget(shader);
 	GR_UniformCacheReset();
 
 #if USE_OPENGL
@@ -3733,6 +3851,10 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->flInnerCosLoc = glGetUniformLocation(sh->shader, "u_flInnerCos");
 	sh->flOuterCosLoc = glGetUniformLocation(sh->shader, "u_flOuterCos");
 	sh->flRangeLoc = glGetUniformLocation(sh->shader, "u_flRange");
+	sh->plCountLoc = glGetUniformLocation(sh->shader, "u_plCount");
+	sh->plColorLoc = glGetUniformLocation(sh->shader, "u_plColor");
+	sh->plPosLoc = glGetUniformLocation(sh->shader, "u_plPos");
+	sh->plDirLoc = glGetUniformLocation(sh->shader, "u_plDir");
 
 	/* A uniform that resolves to -1 was dropped by the compiler, which on a
 	 * translated backend (ANGLE -> D3D11/Vulkan) is how the per-pixel flashlight
@@ -4115,6 +4237,85 @@ void GR_SetShader(const ShaderID shader)
 }
 
 
+/* Per-pixel lighting uniforms (PsyX_PpLitSetLight). Only the 32-bit override
+ * shader and the VRAM samplers carry them; locations are cached per program
+ * and a block is re-sent only when it differs from what that program has. */
+static PsyX_PpLight s_ppLight;
+
+extern "C" void PsyX_PpLitSetLight(const PsyX_PpLight* light)
+{
+	s_ppLight = *light;
+}
+
+struct PpLitBlock { int on, mode; float pos[3], dir[3], tint[3], lc[3], bk[3], world[4], hero[4]; };
+struct PpLitProgram { GLuint prog; int valid, located; GLint loc[10]; PpLitBlock sent; };
+static PpLitProgram s_ppProg[32];
+
+static void GR_PpLitForget(GLuint prog)
+{
+	for (int i = 0; i < 32; i++)
+		if (s_ppProg[i].prog == prog)
+			s_ppProg[i].valid = s_ppProg[i].located = 0;
+}
+
+static void GR_PpLitUniforms(GLuint prog)
+{
+	static const char* const names[10] = { "u_ppOn", "u_ppMode", "u_ppLightPos", "u_ppLightDir", "u_ppTint",
+	                                       "u_ppLC", "u_ppBK", "u_ppWorld", "u_ppHero", "u_ppHeroOn" };
+	PpLitProgram* p = NULL;
+	PpLitBlock b;
+	int i;
+
+	for (i = 0; i < 32 && s_ppProg[i].prog != 0; i++)
+		if (s_ppProg[i].prog == prog)
+			break;
+	if (i == 32)
+		return;
+	p = &s_ppProg[i];
+	if (!p->located)
+	{
+		p->prog = prog;
+		p->located = 1;
+		for (int k = 0; k < 10; k++)
+			p->loc[k] = glGetUniformLocation(prog, names[k]);
+	}
+	if (p->loc[0] < 0 && p->loc[8] < 0)
+		return;
+
+	memset(&b, 0, sizeof(b));
+	b.on = (g_PsyX_PpLitActive && s_ppLight.mode != 0) ? 1 : 0;
+	b.mode = s_ppLight.mode;
+	if (b.on)
+	{
+		memcpy(b.pos, s_ppLight.lightPos, sizeof(b.pos));
+		memcpy(b.dir, s_ppLight.lightDir, sizeof(b.dir));
+		memcpy(b.tint, s_ppLight.tint, sizeof(b.tint));
+		memcpy(b.lc, s_ppLight.lc, sizeof(b.lc));
+		memcpy(b.bk, s_ppLight.bk, sizeof(b.bk));
+		b.world[0] = s_ppLight.ambient;
+		b.world[1] = s_ppLight.cap;
+		b.world[2] = s_ppLight.dqa;
+	}
+	memcpy(b.hero, g_PsyX_HeroLight, sizeof(b.hero));
+	if (p->valid && memcmp(&b, &p->sent, sizeof(b)) == 0)
+		return;
+	p->sent = b;
+	p->valid = 1;
+	if (p->loc[0] >= 0) glUniform1i(p->loc[0], b.on);
+	if (p->loc[1] >= 0) glUniform1i(p->loc[1], b.mode);
+	if (b.on)
+	{
+		if (p->loc[2] >= 0) glUniform3fv(p->loc[2], 1, b.pos);
+		if (p->loc[3] >= 0) glUniform3fv(p->loc[3], 1, b.dir);
+		if (p->loc[4] >= 0) glUniform3fv(p->loc[4], 1, b.tint);
+		if (p->loc[5] >= 0) glUniform3fv(p->loc[5], 1, b.lc);
+		if (p->loc[6] >= 0) glUniform3fv(p->loc[6], 1, b.bk);
+		if (p->loc[7] >= 0) glUniform4fv(p->loc[7], 1, b.world);
+	}
+	if (p->loc[8] >= 0) glUniform4fv(p->loc[8], 1, b.hero);
+	if (p->loc[9] >= 0) glUniform1i(p->loc[9], b.hero[3] > 0.0f ? 1 : 0);
+}
+
 static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShader* shader)
 {
 	switch (texFormat)
@@ -4147,6 +4348,10 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flInnerCosLoc = shader->flInnerCosLoc;
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
+		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
+		u_plPosLoc = shader->plPosLoc;
+		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
 		u_shadowMatrixLoc = shader->shadowMatrixLoc;
 		u_shadowBiasLoc = shader->shadowBiasLoc;
@@ -4184,6 +4389,10 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flInnerCosLoc = shader->flInnerCosLoc;
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
+		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
+		u_plPosLoc = shader->plPosLoc;
+		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
 		u_shadowMatrixLoc = shader->shadowMatrixLoc;
 		u_shadowBiasLoc = shader->shadowBiasLoc;
@@ -4221,6 +4430,10 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flInnerCosLoc = shader->flInnerCosLoc;
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
+		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
+		u_plPosLoc = shader->plPosLoc;
+		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
 		u_shadowMatrixLoc = shader->shadowMatrixLoc;
 		u_shadowBiasLoc = shader->shadowBiasLoc;
@@ -4263,6 +4476,10 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_flInnerCosLoc = shader->flInnerCosLoc;
 		u_flOuterCosLoc = shader->flOuterCosLoc;
 		u_flRangeLoc = shader->flRangeLoc;
+		u_plCountLoc = shader->plCountLoc;
+		u_plColorLoc = shader->plColorLoc;
+		u_plPosLoc = shader->plPosLoc;
+		u_plDirLoc = shader->plDirLoc;
 		u_shadowOnLoc = shader->shadowOnLoc;
 		u_shadowMatrixLoc = shader->shadowMatrixLoc;
 		u_shadowBiasLoc = shader->shadowBiasLoc;
@@ -4376,6 +4593,20 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 	}
 	if (u_flRangeLoc != -1)
 		UC_1f(u_flRangeLoc, g_PsyX_FlashlightRange);
+	{
+		const int plCount = g_PsyX_PartnerLightCount < 0 ? 0 : (g_PsyX_PartnerLightCount > PSYX_PARTNER_LIGHTS_MAX ? PSYX_PARTNER_LIGHTS_MAX : g_PsyX_PartnerLightCount);
+		if (u_plCountLoc != -1)
+			UC_1i(u_plCountLoc, plCount);
+		if (plCount > 0)
+		{
+			if (u_plColorLoc != -1)
+				UC_3fv(u_plColorLoc, g_PsyX_PartnerLightColor);
+			if (u_plPosLoc != -1)
+				UC_3fvN(u_plPosLoc, g_PsyX_PartnerLightPos, PSYX_PARTNER_LIGHTS_MAX);
+			if (u_plDirLoc != -1)
+				UC_3fvN(u_plDirLoc, g_PsyX_PartnerLightDir, PSYX_PARTNER_LIGHTS_MAX);
+		}
+	}
 
 	/* Flashlight shadow map: same gate as the depth pre-pass in DrawAllSplits, so the
 	 * shader only samples the shadow texture on frames one was actually rendered. */
@@ -4536,6 +4767,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 		UC_1f(u_anisoTapsLoc, taps);
 	}
+
+	GR_PpLitUniforms(shader->shader);
 
 	if (g_dbg_texturelessMode) {
 		texture = g_whiteTexture;
@@ -8372,6 +8605,8 @@ extern "C" void GR_FarMeshEnd(void)
 	GR_FarMeshRestoreFrameVao();
 }
 
+extern "C" const float* PsyX_PpLitBufferFinish(int count);
+
 void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 {
 	if (num_vertices >= MAX_VERTEX_BUFFER_SIZE)
@@ -8501,6 +8736,41 @@ void GR_UpdateVertexBuffer(const GrVertex* vertices, int num_vertices)
 		 * mesh path calls it with its own buffer bound. */
 		g_vboBaseVertex           = (int)(offset / vtxSize);
 		s_vboOffset[curBuf & 1]   = offset + needed;
+	}
+	/* The per-pixel lighting stream lives in its own buffer so the frame's
+	 * vertex layout, and every frame with the option off, is untouched. Off, the
+	 * attribute reads its constant zero: "no normal, use the vertex colour".
+	 * Draws index the vertex ring from g_vboBaseVertex, and every attribute
+	 * with them, so this stream is written at that same vertex offset. */
+	{
+		static GLuint s_ppLitVbo = 0;
+		static int    s_ppLitCap = 0;
+		if (g_PsyX_PpLitActive)
+		{
+			GLint        prev  = 0;
+			const int    first = g_vboBaseVertex;
+			const float* lit   = PsyX_PpLitBufferFinish(num_vertices);
+			if (s_ppLitVbo == 0)
+				glGenBuffers(1, &s_ppLitVbo);
+			glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prev);
+			glBindBuffer(GL_ARRAY_BUFFER, s_ppLitVbo);
+			if (s_ppLitCap < MAX_VERTEX_BUFFER_SIZE)
+			{
+				s_ppLitCap = MAX_VERTEX_BUFFER_SIZE;
+				glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)s_ppLitCap * 4 * sizeof(float), NULL, GL_STREAM_DRAW);
+			}
+			glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)first * 4 * sizeof(float),
+			                (GLsizeiptr)num_vertices * 4 * sizeof(float), lit);
+			glVertexAttribPointer(a_ppNormal, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), NULL);
+			glEnableVertexAttribArray(a_ppNormal);
+			glBindBuffer(GL_ARRAY_BUFFER, (GLuint)prev);
+		}
+		else
+			glDisableVertexAttribArray(a_ppNormal);
+		/* The generic default is (0,0,0,1), which would read as a lit world
+		 * vertex in every VAO that never enables this array (items, skins,
+		 * whole-map far meshes). */
+		glVertexAttrib4f(a_ppNormal, 0.0f, 0.0f, 0.0f, 0.0f);
 	}
 #else
 #error

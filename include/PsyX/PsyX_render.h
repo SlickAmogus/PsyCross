@@ -321,6 +321,7 @@ typedef enum
 	a_farP1,
 	a_skinNormal,
 	a_skinTangent,
+	a_ppNormal,
 } ShaderAttrib;
 
 typedef enum
