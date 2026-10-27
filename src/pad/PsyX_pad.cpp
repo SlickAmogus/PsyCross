@@ -38,6 +38,21 @@ char					g_cfg_preferredController[128] = "";
 int						g_cfg_controllerMovement = 2;
 int						g_cfg_disableDpadMovement = 0; /* 1 = controller D-pad no longer drives movement (freed for action binds); keyboard arrows unaffected */
 
+/* PC port split screen: two copies of the game share one PC, so each may open
+ * only its own pads. 0 = any device, 1 = only g_PsyX_PadFilterDevice (Player
+ * 2's window), 2 = every device but that one (Player 1's). Player 2's window
+ * also never reads the keyboard or mouse: those are Player 1's. */
+int						g_PsyX_PadFilterMode   = 0;
+int						g_PsyX_PadFilterDevice = -1;
+extern "C" { int g_PsyX_NoKeyboardMouse = 0; }
+
+static int PsyX_Pad_DeviceAllowed(Sint32 deviceId)
+{
+	if (g_PsyX_PadFilterMode == 1) return deviceId == g_PsyX_PadFilterDevice;
+	if (g_PsyX_PadFilterMode == 2) return deviceId != g_PsyX_PadFilterDevice;
+	return 1;
+}
+
 PsyXController			g_controllers[MAX_CONTROLLERS];
 
 /* PSX PadSetAct semantics: the game registers a LIVE actuator buffer once
@@ -600,6 +615,9 @@ static void PsyX_Pad_Reconcile(SDL_JoystickID gone)
 	}
 
 	pref = PsyX_Pad_PreferredDeviceIndex(gone);
+	/* Split screen: a pad the other window owns is never ours, preferred or not. */
+	if (pref >= 0 && !PsyX_Pad_DeviceAllowed(pref))
+		pref = -1;
 	if (pref >= 0)
 	{
 		const SDL_JoystickID want = SDL_JoystickGetDeviceInstanceID(pref);
@@ -634,7 +652,7 @@ static void PsyX_Pad_Reconcile(SDL_JoystickID gone)
 	{
 		SDL_JoystickID id;
 
-		if (!SDL_IsGameController(i))
+		if (!SDL_IsGameController(i) || !PsyX_Pad_DeviceAllowed(i))
 			continue;
 		id = SDL_JoystickGetDeviceInstanceID(i);
 		if (id == gone || PsyX_Pad_SlotOfInstance(id) >= 0)
@@ -762,6 +780,47 @@ extern "C" void PsyX_Pad_ApplyPreferredController(void)
 	eprintinfo("[PAD] preferred controller: %s\n",
 		g_cfg_preferredController[0] ? g_cfg_preferredController : "(automatic)");
 	PsyX_Pad_Reconcile(-1);
+}
+
+extern "C" void PsyX_Pad_SetDeviceFilter(int mode, int deviceId)
+{
+	int i, j, n;
+
+	g_PsyX_PadFilterMode   = mode;
+	g_PsyX_PadFilterDevice = deviceId;
+
+	/* Only one of the two windows has the focus, and both must keep reading
+	 * their pads. SDL re-reads this hint when it changes. */
+	SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+
+	/* Close what the filter now excludes. A slot's device index can be stale
+	 * (plug order), so the open pad is matched to a current index by instance. */
+	n = SDL_NumJoysticks();
+	for (i = 0; i < MAX_CONTROLLERS; i++)
+	{
+		PsyXController* c = &g_controllers[i];
+		int             allowed = 0;
+
+		if (!c->gc)
+			continue;
+		for (j = 0; j < n; j++)
+		{
+			if (SDL_JoystickGetDeviceInstanceID(j) == c->instanceId)
+			{
+				allowed = PsyX_Pad_DeviceAllowed(j);
+				break;
+			}
+		}
+		if (!allowed)
+		{
+			eprintinfo("[PAD] slot %d released to the other split-screen window\n", i);
+			PsyX_Pad_CloseController(i);
+		}
+	}
+
+	/* Adopt what it now allows. */
+	PsyX_Pad_Reconcile(-1);
+	eprintinfo("[PAD] device filter mode %d device %d\n", mode, deviceId);
 }
 
 void PsyX_Pad_InternalPadUpdates()
@@ -1385,6 +1444,9 @@ u_short PsyX_Pad_UpdateKeyboardInput()
 
 	SDL_PumpEvents();
 
+	/* Player 2's split-screen window: the keyboard and mouse are Player 1's. */
+	if (g_PsyX_NoKeyboardMouse)
+		return 0xFFFF;
 	/* Report every distinct key this machine can produce, once each.
 	 *
 	 * An arcade cabinet's controls are an encoder emitting scancodes nobody can

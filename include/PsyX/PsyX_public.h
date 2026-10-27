@@ -192,6 +192,14 @@ extern float						g_PsyX_FlashlightColor[3];   /* additive RGB at full strength 
 extern float						g_PsyX_FlashlightInnerCos;   /* cos(inner half-angle) */
 extern float						g_PsyX_FlashlightOuterCos;   /* cos(outer half-angle) */
 extern float						g_PsyX_FlashlightRange;      /* distance falloff, view-space units */
+/* Other players' flashlights (co-op): extra cones with no shadows, the same
+ * size, colour and range as ours. View space, like g_PsyX_FlashlightPos; the
+ * game sets the count every frame (0 = none). */
+#define PSYX_PARTNER_LIGHTS_MAX 4
+extern int							g_PsyX_PartnerLightCount;
+extern float						g_PsyX_PartnerLightPos[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightDir[PSYX_PARTNER_LIGHTS_MAX * 3];
+extern float						g_PsyX_PartnerLightColor[3];
 
 /* PC port (Silent Hill): runtime master gate for PGXP perspective correction.
  * Set this from game code AFTER PsyX_Initialise. When the binary is built with
@@ -295,6 +303,14 @@ extern int         PsyX_Pad_DeviceCount(void);
 extern const char* PsyX_Pad_DeviceName(int n);
 extern int         PsyX_Pad_PreferredControllerConnected(void);
 extern void        PsyX_Pad_ApplyPreferredController(void);
+/* PC port split screen (pc_split_screen.c): which SDL game controllers this
+ * process may open. mode 0 = any (default), 1 = only the device at index
+ * deviceId, 2 = every device but that one. Pads already open that the filter
+ * excludes are closed, the rest adopted; pads also keep reporting while the
+ * window is unfocused, since the two windows share one desktop. */
+extern void PsyX_Pad_SetDeviceFilter(int mode, int deviceId);
+/* 1 = the keyboard and mouse never reach the emulated pad (Player 2's window). */
+extern int g_PsyX_NoKeyboardMouse;
 
 /* Screen size of emulated PSX viewport with widescreen offsets */
 extern void PsyX_GetPSXWidescreenMappedViewport(struct _RECT16* rect);
