@@ -1869,6 +1869,24 @@ int GR_InitialiseGLExt()
 		int realW = 0, realH = 0;
 		SDL_GetWindowSize(g_window, &realW, &realH);
 		GR_ApplyPresentSize(realW, realH);
+
+		/* That decision drops a render_scale target built a moment earlier in
+		 * init and resets the render size to the window, and nothing derived it
+		 * again until a resize: render_scale did nothing at all on a device
+		 * whose surface never resizes after startup (Fire TV drew every frame
+		 * at 1080p with render_scale = 0.25). iOS keeps the drawable size it
+		 * already published, since its window size is in points. */
+		if (g_cfg_renderScale > 0.0f && g_cfg_renderScale < 0.999f)
+		{
+#if !defined(PSYX_IOS)
+			if (realW > 0 && realH > 0)
+			{
+				g_surfaceWidth  = realW;
+				g_surfaceHeight = realH;
+			}
+#endif
+			GR_ApplyRenderScale();
+		}
 	}
 
 	return 1;
