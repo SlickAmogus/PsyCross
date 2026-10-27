@@ -2400,12 +2400,12 @@ int g_PsxFogToBlack = 0;
  * to GL_SRC_ALPHA, and it is resolved per texel (not after the bilinear mix)
  * so a colour-0 texel still reads as a hole when its neighbours do not. */
 #define GPU_PACK_RG_FUNC\
-	"	uniform sampler2D s_rgLut;\n"
+	"	uniform highp sampler2D s_rgLut;\n"
 
 #define GPU_DECODE_RG_FUNC\
 	"	vec4 lut(vec2 rg) {\n"\
 	"		vec2 idx = (floor(rg * 255.0 + 0.5) + 0.5) * (1.0 / 256.0);\n"\
-	"		vec4 t = texture2D(s_rgLut, idx);\n"\
+	"		highp vec4 t = texture2D(s_rgLut, idx);\n"\
 	"		vec3 c = floor(t.rgb * 255.0 + 0.5) * (1.0 / 256.0);\n"\
 	"		return vec4(c, (rg.x + rg.y == 0.0) ? 0.0 : (t.w > 0.25 ? 0.5 : 1.0));\n"\
 	"	}\n"
@@ -2687,15 +2687,31 @@ int g_PsxFogToBlack = 0;
  * slightly differently, so floor() lands one bucket off and colours / palette
  * lookups corrupt. Snap each channel to its exact integer byte right at the
  * source so all downstream math is bit-exact on every driver (a no-op where
- * normalisation is already exact). */
+ * normalisation is already exact).
+ *
+ * The snap itself has to run in highp. A GLSL ES sampler2D with no qualifier
+ * is lowp (`precision highp float` does not cover samplers), the literals in
+ * this expression carry no precision of their own, and the result was only
+ * promoted on return -- so on an ES driver that evaluates lowp as fp16 (every
+ * Apple GPU; Adreno and Mali as well) the whole snap ran in half precision
+ * and returned k/255 to only ten bits. For k = 0xD0 and 0x90 the fp16 product
+ * k * (1/255) is exactly halfway between two halves and rounds to even,
+ * downward: 208/255 came back as 0.81543 instead of 0.81569, the 4-bit decode
+ * saw v = 12.996 for a high nibble of 13, floor(v + 0.001) gave 12, and the
+ * low nibble became 15.9 -- a CLUT index of 16, one past the palette. On the
+ * iPad that read whatever VRAM held beside the CLUT and put a blue texel on
+ * every transparent texel that shares a byte with palette index 13: rows 3
+ * and 8 of each capital-height glyph in the dialog font. The sampler is
+ * declared highp and the arithmetic runs on a highp copy, so the snap lands
+ * on the exact byte again; desktop GL accepts and ignores both qualifiers. */
 #if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
 #define GPU_FETCH_VRAM_FUNC\
-		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	uniform highp sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { highp vec2 raw = texture2D(s_texture, uv).ra; return floor(raw * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #else
 #define GPU_FETCH_VRAM_FUNC\
-		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	uniform highp sampler2D s_texture;\n"\
+		"	vec2 VRAM(vec2 uv) { highp vec2 raw = texture2D(s_texture, uv).rg; return floor(raw * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #endif
 
 /* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
@@ -7860,6 +7876,70 @@ void GR_DiagGLError(const char* where)
 	s_nextMs[slot] = now + 3000u;
 }
 
+static char s_shotPath[1024];
+static int  s_shotPending = 0;
+
+void GR_RequestScreenshot(const char* path)
+{
+	if (!path || !path[0])
+		path = "SCREENSHOT.BMP";
+	strncpy(s_shotPath, path, sizeof(s_shotPath) - 1);
+	s_shotPath[sizeof(s_shotPath) - 1] = 0;
+	s_shotPending = 1;
+}
+
+/* The window framebuffer holds the finished frame at this point on every
+ * path: the present blit has run when there is an internal target, and the
+ * scene was drawn straight into it otherwise. PSYX_DEFAULT_FBO rather than 0:
+ * on iOS the screen is the framebuffer SDL built around the CAEAGLLayer. RGBA
+ * is the one format both desktop GL and ES guarantee for glReadPixels. */
+static void GR_WritePendingScreenshot(void)
+{
+	if (!s_shotPending)
+		return;
+	s_shotPending = 0;
+
+	const int w = (g_internalFBO != 0 && g_presentWidth > 0) ? g_presentWidth : g_windowWidth;
+	const int h = (g_internalFBO != 0 && g_presentHeight > 0) ? g_presentHeight : g_windowHeight;
+	if (w <= 0 || h <= 0)
+		return;
+
+	u_char* pixels = (u_char*)malloc((size_t)w * h * 4);
+	u_char* flipped = (u_char*)malloc((size_t)w * h * 4);
+	if (!pixels || !flipped)
+	{
+		free(pixels);
+		free(flipped);
+		return;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	if (g_internalFBO != 0)
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+
+	for (int y = 0; y < h; y++)
+		memcpy(flipped + (size_t)(h - 1 - y) * w * 4, pixels + (size_t)y * w * 4, (size_t)w * 4);
+
+	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(flipped, w, h, 32, w * 4,
+		0x000000FF, 0x0000FF00, 0x00FF0000, 0);
+	if (surface)
+	{
+		SDL_Surface* rgb = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_BGR24, 0);
+		if (rgb)
+		{
+			if (SDL_SaveBMP(rgb, s_shotPath) == 0)
+				eprintf("*screenshot: %s (%dx%d)\n", s_shotPath, w, h);
+			else
+				eprintwarn("screenshot %s failed: %s\n", s_shotPath, SDL_GetError());
+			SDL_FreeSurface(rgb);
+		}
+		SDL_FreeSurface(surface);
+	}
+	free(flipped);
+	free(pixels);
+}
+
 void GR_SwapWindow()
 {
 	{
@@ -7921,6 +8001,8 @@ void GR_SwapWindow()
 	{
 		g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 	}
+
+	GR_WritePendingScreenshot();
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	/* Nothing in this renderer checks glGetError, so a state or format the

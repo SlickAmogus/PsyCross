@@ -458,6 +458,11 @@ extern void			GR_ShadowPassBegin(void);
 extern void			GR_ShadowPassDraw(int start_vertex, int num_verts);
 extern void			GR_ShadowPassEnd(void);
 
+/* Save the next presented frame (what the window shows, after the present
+ * blit) as an upright 24-bit BMP. Read in GR_SwapWindow before the swap, so it
+ * is valid on every backend and does not need the screen to be visible. */
+extern void			GR_RequestScreenshot(const char* path);
+
 extern void			GR_PushDebugLabel(const char* label);
 extern void			GR_PopDebugLabel();
 

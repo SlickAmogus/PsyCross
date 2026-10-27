@@ -1087,8 +1087,19 @@ void PsyX_Sys_DoPollEvent()
 						extern int g_surfaceWidth, g_surfaceHeight;
 						extern void GR_ApplyRenderScale(void);
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+						/* The event carries window POINTS, but g_surfaceWidth/Height
+						 * are tracked in drawable PIXELS (what init read from
+						 * SDL_GL_GetDrawableSize). On a 3x iPhone the point size
+						 * taken as pixels makes PsyX_MapWindowToViewport think render
+						 * scaling is on and multiply every touch by three, so no
+						 * finger ever lands inside the picture: every tap is "out of
+						 * view" and the game cannot be started. Read pixels. */
+						SDL_GL_GetDrawableSize(g_window, &g_surfaceWidth, &g_surfaceHeight);
+#else
 						g_surfaceWidth  = event.window.data1;
 						g_surfaceHeight = event.window.data2;
+#endif
 						GR_ApplyRenderScale();
 					}
 					GR_ResetDevice();
@@ -1341,27 +1352,88 @@ void PsyX_EndScene()
 		GR_PostProcess();
 	}
 
+	/* Headless verification: PSYX_AUTOSHOT="<frame>[:<path>]" saves that
+	 * presented frame through GR_RequestScreenshot; "every:<n>:<path>" saves
+	 * every n-th frame instead, with the frame number appended to the name.
+	 * PSYX_AUTOQUIT="<frame>" exits once that frame has been presented. All
+	 * read once, all inert when unset. */
+	{
+		static int  s_autoParsed = 0;
+		static long s_autoShotFrame = -1, s_autoShotEvery = 0, s_autoQuitFrame = -1;
+		static char s_autoShotPath[1024];
+		static long s_frame = 0;
 
-	GR_SwapWindow();
+		if (!s_autoParsed)
+		{
+			s_autoParsed = 1;
+			const char* shot = getenv("PSYX_AUTOSHOT");
+			const char* quit = getenv("PSYX_AUTOQUIT");
+			if (shot && shot[0])
+			{
+				const char* spec = shot;
+				const int   every = strncmp(spec, "every:", 6) == 0;
+				char*       end = NULL;
+				long        n;
+
+				if (every)
+					spec += 6;
+				n = strtol(spec, &end, 10);
+				if (end == spec || (*end != 0 && *end != ':') || n < 0 || (every && n == 0))
+					eprintwarn("PSYX_AUTOSHOT '%s' is not <frame>[:<path>] or every:<n>:<path>; ignored\n", shot);
+				else
+				{
+					if (every)
+						s_autoShotEvery = n;
+					else
+						s_autoShotFrame = n;
+					strncpy(s_autoShotPath, *end == ':' ? end + 1 : "SCREENSHOT.BMP", sizeof(s_autoShotPath) - 1);
+				}
+			}
+			if (quit && quit[0])
+			{
+				char* end = NULL;
+				long  n = strtol(quit, &end, 10);
+				if (end == quit || *end != 0 || n < 0)
+					eprintwarn("PSYX_AUTOQUIT '%s' is not a frame number; ignored\n", quit);
+				else
+					s_autoQuitFrame = n;
+			}
+		}
+
+		if (s_frame == s_autoShotFrame)
+			GR_RequestScreenshot(s_autoShotPath);
+		else if (s_autoShotEvery > 0 && s_frame > 0 && (s_frame % s_autoShotEvery) == 0)
+		{
+			/* Insert the frame number before the extension, if the last '.' is
+			 * in the file name rather than in a directory. */
+			char path[1100];
+			const char* dot = strrchr(s_autoShotPath, '.');
+			if (dot && !strchr(dot, '/') && !strchr(dot, '\\'))
+				snprintf(path, sizeof(path), "%.*s-%06ld%s", (int)(dot - s_autoShotPath), s_autoShotPath, s_frame, dot);
+			else
+				snprintf(path, sizeof(path), "%s-%06ld.bmp", s_autoShotPath, s_frame);
+			GR_RequestScreenshot(path);
+		}
+
+		GR_SwapWindow();
+
+		if (s_autoQuitFrame >= 0 && s_frame >= s_autoQuitFrame)
+		{
+			/* A plain exit, not PsyX_Shutdown: this is a test harness hook, and
+			 * the log simply ends here. */
+			eprintf("PSYX_AUTOQUIT at frame %ld\n", s_frame);
+			fflush(NULL);
+			exit(0);
+		}
+		s_frame++;
+	}
 }
 
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 void PsyX_TakeScreenshot()
 {
-	u_char* pixels = (u_char*)malloc(g_windowWidth * g_windowHeight * 4);
-	
-#if defined(RENDERER_OGL)
-	glReadPixels(0, 0, g_windowWidth, g_windowHeight, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
-#elif defined(RENDERER_OGLES)
-	glReadPixels(0, 0, g_windowWidth, g_windowHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels);	// FIXME: is that correct format?
-#endif
-
-	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(pixels, g_windowWidth, g_windowHeight, 8 * 4, g_windowWidth * 4, 0, 0, 0, 0);
-
-	SDL_SaveBMP(surface, "SCREENSHOT.BMP");
-	SDL_FreeSurface(surface);
-
-	free(pixels);
+	/* Taken at the next present, from the window framebuffer, on every backend. */
+	GR_RequestScreenshot("SCREENSHOT.BMP");
 }
 #endif
 
