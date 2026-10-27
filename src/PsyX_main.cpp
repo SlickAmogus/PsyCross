@@ -1334,6 +1334,12 @@ uint PsyX_CalcFPS();
  * NULL = nothing extra drawn. */
 extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
 
+/* PC port, browser build: called every time the page is about to yield to the
+ * browser (each vsync wait, and the CD spooler's waits). The game has no
+ * threads there, so this is how work that must keep running through movies
+ * and loads (the online client's socket) gets its turn. NULL = nothing. */
+extern "C" void (*g_PsyX_FrameYieldHook)(void) = NULL;
+
 void PsyX_EndScene()
 {
 	if (!begin_scene_flag)
@@ -1656,6 +1662,8 @@ void PsyX_WaitForTimestep(int count)
 		do
 		{
 #ifdef __EMSCRIPTEN__
+			if (g_PsyX_FrameYieldHook)
+				g_PsyX_FrameYieldHook();
 			emscripten_sleep(0);
 #endif
 			/* Low-end: yield instead of spinning. This loop otherwise burns a

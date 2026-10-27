@@ -1033,6 +1033,9 @@ EM_BOOL emCDSpoolerCallback(double time, void* userData)
 //-----------------------------------------------------
 // reads sector from LEV file
 //-----------------------------------------------------
+#ifdef __EMSCRIPTEN__
+extern void (*g_PsyX_FrameYieldHook)(void); /* PsyX_main.cpp */
+#endif
 void _eCdControlF_ReadS(int sector)
 {
 #ifdef __EMSCRIPTEN__
@@ -1042,6 +1045,8 @@ void _eCdControlF_ReadS(int sector)
 	{
 		while (g_emCDSpoolerRunning)
 		{
+			if (g_PsyX_FrameYieldHook)
+				g_PsyX_FrameYieldHook();
 			emscripten_sleep(0);
 		}
 	}
