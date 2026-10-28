@@ -662,6 +662,43 @@ static void Test_MasterVolumeDirectAndSweep()
     printf("[OK] Master volume: Direct live-mirror + Sweep envelope + raw/current distinction\n");
 }
 
+static void Test_MasterExemptVoice()
+{
+    SPUCore spu;
+    uint8_t* ram = spu.RamData();
+    spu.SetMasterVolume(0, 0);
+
+    const uint32_t addr = 0x6000;
+    WriteConstAdpcmBlock(ram, addr, 0, 0, 0x07, 7); // constant positive sample, loops on itself
+    SpuVoiceAttr a = MakeAttr(0);
+    a.addr = addr;
+    a.loop_addr = addr;
+    a.pitch = static_cast<unsigned short>(kPitchUnity);
+    a.volume.left = a.volume.right = static_cast<short>(0x3FFF);
+    spu.SetVoiceAttrIndexed(0, a);
+    spu.SetKey(KeyCmd_OnEnvOff, SPU_VOICECH(0));
+
+    int16_t frames[16 * 2];
+    spu.RenderFrames(frames, 16);
+    assert(frames[15 * 2 + 0] == 0 && frames[15 * 2 + 1] == 0); // master 0 silences it
+
+    spu.SetVoiceMasterExempt(SPU_VOICECH(0), true);
+    assert(spu.GetVoiceMasterExemptMask() == static_cast<uint32_t>(SPU_VOICECH(0)));
+    spu.RenderFrames(frames, 16);
+    assert(frames[15 * 2 + 0] > 0 && frames[15 * 2 + 1] > 0);
+
+    SPUCore::SplitOutput split;
+    memset(&split, 0, sizeof(split));
+    spu.RenderFrames(nullptr, 1, &split);
+    assert(split.masterExempt == static_cast<uint32_t>(SPU_VOICECH(0)));
+
+    spu.SetVoiceMasterExempt(SPU_VOICECH(0), false);
+    spu.RenderFrames(frames, 16);
+    assert(frames[15 * 2 + 0] == 0 && frames[15 * 2 + 1] == 0);
+
+    printf("[OK] Master-exempt voice is mixed after master volume\n");
+}
+
 static void Test_CdSilenceOnUnderflow()
 {
     SPUCore spu;
@@ -709,6 +746,7 @@ int main()
     Test_SharedNoiseGenerator();
     Test_PerVoiceVolumeSweep();
     Test_MasterVolumeDirectAndSweep();
+    Test_MasterExemptVoice();
     Test_CdSilenceOnUnderflow();
 
     printf("\nAll PsyX_SPUCore standalone tests passed.\n");
