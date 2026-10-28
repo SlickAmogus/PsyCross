@@ -7373,6 +7373,9 @@ void GR_DiagGLError(const char* where)
 
 	eprintwarn("[GLDIAG] GL error 0x%04X at %s (backend=%s)\n",
 		(unsigned)err, where, PsyX_Backend_GetName(g_grActiveBackend));
+
+	if (err == 0x0507 /* GL_CONTEXT_LOST */)
+		PsyX_Backend_OnContextLost(where);
 }
 
 void GR_SwapWindow()
