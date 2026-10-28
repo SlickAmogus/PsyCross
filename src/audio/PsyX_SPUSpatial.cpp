@@ -359,10 +359,11 @@ void RenderBlock(void)
     g_core->RenderFrames(NULL, kBlockFrames, &split);
     SDL_UnlockMutex(g_coreMutex);
 
-    /* Master volume last, matching where the hardware applies it. */
-    /* Folded into each source's gain instead of scaling the sum, which is the
-     * same product, so a master-exempt voice (the pause menu's cues while the
-     * game's own fade holds master at 0) can skip it. */
+    /* Master volume after the voice mix and before the final clamp, matching
+     * where the hardware applies it. */
+    /* Folded into each source's gain instead of scaling the sum (the same
+     * product up to float rounding), so a master-exempt voice (the pause menu's
+     * cues while the game's own fade holds master at 0) can skip it. */
     const float mvRaw = (float)(split.masterL > split.masterR ? split.masterL : split.masterR)
                       / 32767.0f;
     const float master = mvRaw <= 0.0f ? 0.0f : (mvRaw > 1.0f ? 1.0f : mvRaw);
