@@ -652,6 +652,7 @@ int g_PsxFeedbackStoreAllowed = 0;
  * re-presents it under the new frame's prims. The game sets the flag on
  * freeze ENTRY (same tick) and clears it on exit. */
 int g_PsxPresentLastFrame = 0;
+int g_PsxFreezeCaptureHold = 0;
 static GLuint g_freezeFrameTex = 0;
 static GLuint g_freezeFrameFBO = 0;
 static int    g_freezeFrameW = 0;
@@ -6152,6 +6153,10 @@ void GR_CaptureLastFrame(void)
 		g_freezePresentedThisFrame = 0;
 		return;
 	}
+
+	/* Pause menu leaves for the save/options screens and must come back to the moment of pausing. */
+	if (g_PsxFreezeCaptureHold)
+		return;
 
 	if (!g_freezeFrameTex)
 	{
