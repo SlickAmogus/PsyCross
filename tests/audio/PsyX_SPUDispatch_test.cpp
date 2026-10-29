@@ -66,6 +66,7 @@ void PsyX_SPUSoftware_GetCommonAttr(SpuCommonAttr*) {}
 void PsyX_SPUSoftware_GetReverbModeParam(SpuReverbAttr*) {}
 int PsyX_SPUSoftware_ClearReverbWorkArea() { return 0; }
 void PsyX_SPUSoftware_ConfigureOutput(int, int, int, int) {}
+void PsyX_SPUSoftware_SetKeyOnMasterExempt(int) {}
 int PsyX_SPUSoftware_ConfigureRenderer(int renderer, int, int, int)
 {
 	g_softwareRenderer = renderer;

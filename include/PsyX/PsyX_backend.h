@@ -84,6 +84,19 @@ extern int			PsyX_Backend_IsTranslated(int backend);
  * translated backend cannot be honoured without them. */
 extern int			PsyX_Backend_AngleAvailable(void);
 
+/* A translated backend whose device is lost (GL_CONTEXT_LOST / EGL_CONTEXT_LOST)
+ * never recovers: every later draw is dropped and the window stays black.
+ * Rebuilding every texture, buffer and FBO in place is not something the
+ * renderer can do, so the loss is answered by closing normally and starting the
+ * game again on native GL. Safe to call from any frame; acts once. */
+extern void			PsyX_Backend_OnContextLost(const char* where);
+
+/* Register with atexit BEFORE anything else (so it runs last, after the window,
+ * GL and log are gone). When a context loss requested it, starts the exe again
+ * with "-renderer gl" appended and waits for it, so a launcher such as Steam
+ * keeps seeing the game as running; exits with the new process's code. */
+extern void			PsyX_Backend_RelaunchAtExit(void);
+
 /* Which GLSL dialect a shader body is written in. The PC port has both. */
 typedef enum
 {
