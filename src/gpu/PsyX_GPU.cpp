@@ -11,6 +11,7 @@
 #include <string.h>
 #include <SDL_timer.h>
 #include <algorithm>
+#include <vector>
 
 #include "psx/gtereg.h"
 
@@ -3423,7 +3424,9 @@ int g_PsxDbgAddMode = 1;
 
 unsigned PsyX_PerfUs(void);
 
-void DrawSplit(const GPUDrawSplit& split)
+static bool s_itemTransparencyPass = false;
+
+void DrawSplit(const GPUDrawSplit& split, int splitIndex = -1)
 {
 	const unsigned s_splitT0 = PsyX_PerfUs();   /* [PERF4] state setup starts here */
 	const bool isAdditive = (split.blendMode == BM_ADD || split.blendMode == BM_ADD_QUATER_SOURCE);
@@ -3469,6 +3472,10 @@ void DrawSplit(const GPUDrawSplit& split)
 
 	GR_SetBlendMode(split.blendMode);
 
+	/* An isolated item's translucent shell must not occlude its contents. */
+	if (s_itemTransparencyPass)
+		glDepthMask(split.blendMode == BM_NONE ? GL_TRUE : GL_FALSE);
+
 	/* PGXP coplanar fix (docs/PGXP_PR51_Vetting.md): draw static-world opaque
 	 * geometry with GL_ALWAYS instead of GL_LEQUAL, keeping GR_SetBlendMode's
 	 * depth test+write on. Coplanar world faces then resolve by painter (OT)
@@ -3493,7 +3500,7 @@ void DrawSplit(const GPUDrawSplit& split)
 	    (int)split.startVertex < s_ipVertHi &&
 	    (int)(split.startVertex + split.numVerts) > s_ipVertLo)
 	{
-		ItemProbe_RecordSplitGl((int)(&split - (const GPUDrawSplit*)g_splits), (int)split.blendMode,
+		ItemProbe_RecordSplitGl(splitIndex >= 0 ? splitIndex : (int)(&split - (const GPUDrawSplit*)g_splits), (int)split.blendMode,
 		                        (int)split.numVerts, (int)split.drawenv.dfe);
 	}
 
@@ -3508,6 +3515,8 @@ void DrawSplit(const GPUDrawSplit& split)
 		GR_DrawTriangles(g_vboBaseVertex + split.startVertex, split.numVerts / 3);
 		g_PsyX_UsDraw += PsyX_PerfUs() - tDraw;
 	}
+	if (s_itemTransparencyPass)
+		glDepthMask(GL_TRUE);
 
 	if (split.debugText)
 		GR_PopDebugLabel();
@@ -3644,8 +3653,61 @@ void DrawAllSplits()
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
 
+	/* Isolated TMD items can contain an opaque interior inside a translucent
+	 * shell (the Unknown Liquid bottle). Submit opaque geometry first, then
+	 * blend shell triangles back-to-front without writing depth. OT buckets
+	 * are too coarse to order these intersecting batches during rotation.
+	 * Other blend modes and non-legacy commands are ordering barriers. World
+	 * and UI passes outside the item-depth bracket retain their original order. */
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
+		if (g_PsyX_ForceItemDepth)
+		{
+			int end = i;
+			bool hasTransparency = false;
+			for (; end <= g_splitIndex; end++)
+			{
+				const GPUDrawSplit& s = g_splits[end];
+				if (s.kind != GPU_SPLIT_LEGACY ||
+				    (s.blendMode != BM_NONE && s.blendMode != BM_AVERAGE))
+					break;
+				bool finite = true;
+				for (unsigned v = s.startVertex; v < s.startVertex + s.numVerts; v++)
+					finite &= isfinite(g_vertexBuffer[v].z);
+				if (!finite)
+					break;
+				hasTransparency |= s.blendMode == BM_AVERAGE;
+			}
+			if (hasTransparency)
+			{
+				struct ItemTriangle { int split; unsigned vertex; float depth; };
+				std::vector<ItemTriangle> transparent;
+				s_itemTransparencyPass = true;
+				for (int j = i; j < end; j++)
+				{
+					const GPUDrawSplit& s = g_splits[j];
+					if (s.blendMode == BM_NONE)
+						DrawSplit(s);
+					else
+						for (unsigned v = s.startVertex; v + 2 < s.startVertex + s.numVerts; v += 3)
+							transparent.push_back({j, v, (g_vertexBuffer[v].z +
+								g_vertexBuffer[v + 1].z + g_vertexBuffer[v + 2].z) / 3.0f});
+				}
+				std::stable_sort(transparent.begin(), transparent.end(),
+					/* Projection negates z: smaller stored z is farther away. */
+					[](const ItemTriangle& a, const ItemTriangle& b) { return a.depth < b.depth; });
+				for (const ItemTriangle& t : transparent)
+				{
+					GPUDrawSplit s = g_splits[t.split];
+					s.startVertex = t.vertex;
+					s.numVerts = 3;
+					DrawSplit(s, t.split);
+				}
+				s_itemTransparencyPass = false;
+				i = end - 1;
+				continue;
+			}
+		}
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
 			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)

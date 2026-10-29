@@ -911,6 +911,22 @@ uint32_t SPUCore::GetVoicePitchModEnableMask() const
     return mask;
 }
 
+void SPUCore::SetVoiceMasterExempt(uint32_t voiceBitmask, bool exempt)
+{
+    for (int i = 0; i < kNumVoices; ++i)
+        if (voiceBitmask & SPU_VOICECH(i))
+            m_voices[i].masterExempt = exempt;
+}
+
+uint32_t SPUCore::GetVoiceMasterExemptMask() const
+{
+    uint32_t mask = 0;
+    for (int i = 0; i < kNumVoices; ++i)
+        if (m_voices[i].masterExempt)
+            mask |= static_cast<uint32_t>(SPU_VOICECH(i));
+    return mask;
+}
+
 // ---------------------------------------------------------------------------
 // Master / CD controls
 // ---------------------------------------------------------------------------
@@ -1498,6 +1514,8 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
 
         int64_t mixL = 0;
         int64_t mixR = 0;
+        int64_t exemptL = 0;
+        int64_t exemptR = 0;
         int64_t reverbInL = 0;
         int64_t reverbInR = 0;
         int32_t prevVoiceOutX = 0; // VxOUTX(x-1) for PMON; voice 0 has no predecessor
@@ -1560,8 +1578,16 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
 
             int32_t voiceL = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolL) >> 15);
             int32_t voiceR = static_cast<int32_t>((static_cast<int64_t>(envScaled) * v.curVolR) >> 15);
-            mixL += voiceL;
-            mixR += voiceR;
+            if (v.masterExempt)
+            {
+                exemptL += voiceL;
+                exemptR += voiceR;
+            }
+            else
+            {
+                mixL += voiceL;
+                mixR += voiceR;
+            }
             if (v.reverbSend)
             {
                 reverbInL += voiceL;
@@ -1573,6 +1599,8 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
         {
             mixL = 0;
             mixR = 0;
+            exemptL = 0;
+            exemptR = 0;
             reverbInL = 0;
             reverbInR = 0;
         }
@@ -1644,8 +1672,8 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
         else
             StepVolumeSweep(m_curMasterVolR, m_masterSweepCounterR, m_masterVolModeR, m_masterVolR);
 
-        mixL = (static_cast<int64_t>(clampedL) * m_curMasterVolL) >> 15;
-        mixR = (static_cast<int64_t>(clampedR) * m_curMasterVolR) >> 15;
+        mixL = ((static_cast<int64_t>(clampedL) * m_curMasterVolL) >> 15) + exemptL;
+        mixR = ((static_cast<int64_t>(clampedR) * m_curMasterVolR) >> 15) + exemptR;
 
         if (outInterleavedLR)
         {
@@ -1666,6 +1694,7 @@ void SPUCore::RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutpu
         }
         split->masterL = m_curMasterVolL;
         split->masterR = m_curMasterVolR;
+        split->masterExempt = GetVoiceMasterExemptMask();
     }
 }
 
@@ -1792,6 +1821,8 @@ void SPUCore::RenderHighRateSubframe(double* left, double* right)
     const uint32_t oversample = m_renderer == RendererMode::Reference ? 8u : 4u;
     double mixL = 0.0;
     double mixR = 0.0;
+    double exemptL = 0.0;
+    double exemptR = 0.0;
     double reverbInL = 0.0;
     double reverbInR = 0.0;
 
@@ -1836,8 +1867,16 @@ void SPUCore::RenderHighRateSubframe(double* left, double* right)
         const double envScaled = raw * (static_cast<double>(v.envLevel) / 32768.0);
         const double voiceL = envScaled * (static_cast<double>(v.curVolL) / 32768.0);
         const double voiceR = envScaled * (static_cast<double>(v.curVolR) / 32768.0);
-        mixL += voiceL;
-        mixR += voiceR;
+        if (v.masterExempt)
+        {
+            exemptL += voiceL;
+            exemptR += voiceR;
+        }
+        else
+        {
+            mixL += voiceL;
+            mixR += voiceR;
+        }
         if (v.reverbSend)
         {
             reverbInL += voiceL;
@@ -1848,6 +1887,7 @@ void SPUCore::RenderHighRateSubframe(double* left, double* right)
     if (m_muted)
     {
         mixL = mixR = 0.0;
+        exemptL = exemptR = 0.0;
         reverbInL = reverbInR = 0.0;
     }
 
@@ -1894,8 +1934,8 @@ void SPUCore::RenderHighRateSubframe(double* left, double* right)
         mixL = ApplyClip(mixL, m_clipMode);
         mixR = ApplyClip(mixR, m_clipMode);
     }
-    mixL *= static_cast<double>(m_curMasterVolL) / 32768.0;
-    mixR *= static_cast<double>(m_curMasterVolR) / 32768.0;
+    mixL = mixL * (static_cast<double>(m_curMasterVolL) / 32768.0) + exemptL;
+    mixR = mixR * (static_cast<double>(m_curMasterVolR) / 32768.0) + exemptR;
     *left = ApplyClip(mixL, m_clipMode);
     *right = ApplyClip(mixR, m_clipMode);
 }

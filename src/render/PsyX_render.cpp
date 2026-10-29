@@ -753,6 +753,7 @@ int g_PsxFeedbackStoreAllowed = 0;
  * freeze ENTRY (same tick) and clears it on exit. */
 int g_PsxPresentLastFrame = 0;
 
+int g_PsxFreezeCaptureHold = 0;
 static GLuint g_freezeFrameTex = 0;
 static GLuint g_freezeFrameFBO = 0;
 static int    g_freezeFrameW = 0;
@@ -6564,6 +6565,10 @@ void GR_CaptureLastFrame(void)
 		return;
 	}
 
+	/* Pause menu leaves for the save/options screens and must come back to the moment of pausing. */
+	if (g_PsxFreezeCaptureHold)
+		return;
+
 	/* Low-end: this is a full-screen copy on EVERY frame, purely so that a pause
 	 * which may never come has an image ready. Capturing every 4th frame makes
 	 * the frozen image at most 3 frames stale -- invisible on a pause screen --
@@ -7932,6 +7937,9 @@ void GR_DiagGLError(const char* where)
 		s_hits[slot]  = 0;
 		s_nextMs[slot] = 0;
 	}
+
+	if (err == 0x0507 /* GL_CONTEXT_LOST */)
+		PsyX_Backend_OnContextLost(where);
 
 	s_hits[slot]++;
 	now = (unsigned)SDL_GetTicks();
