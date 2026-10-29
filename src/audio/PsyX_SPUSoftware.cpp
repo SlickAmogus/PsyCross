@@ -69,6 +69,12 @@ int    s_nextAzQ12    = 0;
 int    s_nextAzValid  = 0;
 Uint32 s_nextAzThread = 0;
 Uint32 s_nextAzMs     = 0;
+
+/* Master-exempt key-ons (SPUCore::SetVoiceMasterExempt), armed around the PC
+ * pause menu's cue. Same thread contract as the azimuth stash: a sequencer
+ * note-on keyed while it is armed must stay under the game's master mute. */
+int    s_keyOnExempt       = 0;
+Uint32 s_keyOnExemptThread = 0;
 uint32_t g_idealNativePhase = 0;
 
 void EnsureConfig()
@@ -492,6 +498,9 @@ void PsyX_SPUAL_GetCommonAttr(SpuCommonAttr* attr)
 void PsyX_SPUAL_SetKey(int onOff, u_int voiceBits)
 {
     SDL_LockMutex(g_spuMutex);
+    if (onOff == SPU_ON)
+        g_spu().SetVoiceMasterExempt(voiceBits,
+            s_keyOnExempt && s_keyOnExemptThread == (Uint32)SDL_ThreadID());
     g_spu().SetKey(onOff, voiceBits);
     SDL_UnlockMutex(g_spuMutex);
 }
@@ -563,6 +572,12 @@ PSX_API_EXPORT void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuthQ12)
 PSX_API_EXPORT void PsyX_SPUAL_ClearNextKeyOnAzimuth(void)
 {
     s_nextAzValid = 0;
+}
+
+PSX_API_EXPORT void PsyX_SPUAL_SetKeyOnMasterExempt(int on)
+{
+    s_keyOnExemptThread = (Uint32)SDL_ThreadID();
+    s_keyOnExempt       = on ? 1 : 0;
 }
 
 PSX_API_EXPORT void PsyX_SPUAL_SetVoiceAzimuth(int voiceIdx, int azimuthQ12)
