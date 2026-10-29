@@ -32,6 +32,7 @@
 #define PsyX_SPUAL_GetSurroundActive PSYX_SPUAL_BACKEND_NAME(GetSurroundActive)
 #define PsyX_SPUAL_SetNextKeyOnAzimuth PSYX_SPUAL_BACKEND_NAME(SetNextKeyOnAzimuth)
 #define PsyX_SPUAL_ClearNextKeyOnAzimuth PSYX_SPUAL_BACKEND_NAME(ClearNextKeyOnAzimuth)
+#define PsyX_SPUAL_SetKeyOnMasterExempt PSYX_SPUAL_BACKEND_NAME(SetKeyOnMasterExempt)
 #define PsyX_SPUAL_SetVoiceAzimuth PSYX_SPUAL_BACKEND_NAME(SetVoiceAzimuth)
 #define PsyX_SPUAL_GetKeyStatus PSYX_SPUAL_BACKEND_NAME(GetKeyStatus)
 #define PsyX_SPUAL_GetAllKeysStatus PSYX_SPUAL_BACKEND_NAME(GetAllKeysStatus)

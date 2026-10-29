@@ -58,6 +58,7 @@ int PsyX_SPUSoftware_ClearReverbWorkArea();
 void PsyX_SPUSoftware_ConfigureOutput(int, int, int, int);
 int PsyX_SPUSoftware_ConfigureRenderer(int, int, int, int);
 void PsyX_SPUSoftware_ConfigureSpatial(int, int);
+void PsyX_SPUSoftware_SetKeyOnMasterExempt(int);
 int PsyX_SPUSoftware_PushXaFrames(const short*, u_int, int, int);
 void PsyX_SPUSoftware_ResetXa();
 void PsyX_SPUSoftware_FinishXa();
@@ -213,6 +214,10 @@ int PsyX_SPUAL_GetSurroundActive() { DISPATCH_RETURN(GetSurroundActive, ()); }
 void PsyX_SPUAL_SetNextKeyOnAzimuth(int azimuth) { DISPATCH_VOID(SetNextKeyOnAzimuth, (azimuth)); }
 void PsyX_SPUAL_ClearNextKeyOnAzimuth() { DISPATCH_VOID(ClearNextKeyOnAzimuth, ()); }
 void PsyX_SPUAL_SetVoiceAzimuth(int voice, int azimuth) { DISPATCH_VOID(SetVoiceAzimuth, (voice, azimuth)); }
+void PsyX_SPUAL_SetKeyOnMasterExempt(int on)
+{
+	if (UseSoftware()) PsyX_SPUSoftware_SetKeyOnMasterExempt(on);
+}
 int PsyX_SPUAL_GetKeyStatus(u_int voiceBit) { DISPATCH_RETURN(GetKeyStatus, (voiceBit)); }
 void PsyX_SPUAL_GetAllKeysStatus(char* status) { DISPATCH_VOID(GetAllKeysStatus, (status)); }
 int PsyX_SPUAL_SetMute(int onOff) { DISPATCH_RETURN(SetMute, (onOff)); }
