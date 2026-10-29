@@ -109,9 +109,10 @@ void PopMatrix()
 {
 	if (matrixLevel > 0)
 	{
+		MATRIX *m;
 		currentMatrix--;
 		matrixLevel--;
-		MATRIX* m = &stack[matrixLevel];//$t7
+		m = &stack[matrixLevel]; //$t7
 
 		gte_SetRotMatrix(m);
 		gte_SetTransMatrix(m);
@@ -296,13 +297,13 @@ void LocalLight(SVECTOR* v0, VECTOR* v1)
 
 int RotAverageNclip4(SVECTOR* v0, SVECTOR* v1, SVECTOR* v2, SVECTOR* v3, long* sxy0, long* sxy1, long* sxy2, long* sxy3, long* p, long* otz, long* flag)
 {
+	int opz;
 	gte_ldv3(v0, v1, v2);
 	gte_rtpt();
 	gte_stflg(flag);
 
 	gte_nclip();
 
-	int opz;
 	gte_stopz(&opz);
 
 	if (opz > 0)
@@ -709,6 +710,8 @@ MATRIX* RotMatrix(SVECTOR* r, MATRIX* m)
 
 MATRIX* RotMatrixYXZ(SVECTOR* r, MATRIX* m)
 {
+	int x0;
+	int z0;
 	// correct Psy-Q implementation
 	int c0, c1, c2;
 	int s0, s1, s2;
@@ -726,13 +729,13 @@ MATRIX* RotMatrixYXZ(SVECTOR* r, MATRIX* m)
 	m->m[1][2] = -s0;
 
 	// X-axis
-	int x0 = FIXED(s1 * s0);
+	x0 = FIXED(s1 * s0);
 	m->m[0][0] = FIXED(c1 * c2) + FIXED(x0 * s2);
 	m->m[0][1] = FIXED(x0 * c2) - FIXED(c1 * s2);
 	m->m[0][2] = FIXED(s1 * c0);
 
 	// Z-axis
-	int z0 = FIXED(c1 * s0);
+	z0 = FIXED(c1 * s0);
 	m->m[2][1] = FIXED(s1 * s2) + FIXED(z0 * c2);
 	m->m[2][0] = FIXED(z0 * s2) - FIXED(s1 * c2);
 	m->m[2][2] = FIXED(c1 * c0);
@@ -963,9 +966,10 @@ void SetDQB(int iDQB)
 
 void SetFogNear(int a, int h)
 {
+	int depthQ;
 	//Error division by 0
 	assert(h != 0);
-	int depthQ = -(((a << 2) + a) << 6);
+	depthQ = -(((a << 2) + a) << 6);
 	assert(h != -1 && depthQ != 0x8000);
 	SetDQA(depthQ / h);
 	SetDQB(20971520);
@@ -973,6 +977,7 @@ void SetFogNear(int a, int h)
 
 void SetFogNearFar(int a, int b, int h)
 {
+	int dqa;
 	if (b - a < 100)
 		return;
 
@@ -983,7 +988,7 @@ void SetFogNearFar(int a, int b, int h)
 	assert(h != 0);
 	assert(h != -1 && (((-a * b) / (b - a)) << 8) != 32768);
 
-	int dqa = (-a * b / (b - a) << 8) / h;
+	dqa = (-a * b / (b - a) << 8) / h;
 
 	SetDQA(MAX(MIN(dqa, 32767), -32767));
 	SetDQB((b << 12) / (b - a) << 12);
