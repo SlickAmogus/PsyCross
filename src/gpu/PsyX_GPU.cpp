@@ -852,7 +852,7 @@ int overrideTextureOffsetY = 0;
 int overrideTextureHiresW = 0;
 int overrideTextureHiresH = 0;
 /* overrideTexture is the 1:1 capture of the previous frame and the split samples
- * it by gl_FragCoord (GR_FeedbackScreenTexture). Set per primitive in the SPRT
+ * it by gl_FragCoord or its UVs (GR_FeedbackSampleTexture). Set per primitive in the SPRT
  * path, cleared wherever overrideTexture is assigned. */
 static int overrideFeedbackScreen = 0;
 
