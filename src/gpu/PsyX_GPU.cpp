@@ -4409,30 +4409,35 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
 				return 4;
 
-			/* An opaque copy of a display buffer onto the same spot of the draw
-			 * buffer (Screen_BackgroundMotionBlur's tiles) reads the previous
-			 * frame at render resolution, by screen position. The offset is
-			 * absolute VRAM and the clip origin is the draw buffer's, so
-			 * x0 + ofs - clip is where the tile lands within the buffer. */
-			if (s_curPrimIsFeedback && !semiTrans && !s_curPrimIsScratch && overrideTexture == 0)
+			/* A reader of a display buffer (Screen_BackgroundMotionBlur's tiles,
+			 * the per-map dream overlays) or of the scene-scratch rect (the
+			 * soft-focus strips) samples that frame's render-resolution capture
+			 * instead of VRAM. The offset is absolute VRAM and the clip origin
+			 * is the draw buffer's, so x0 + ofs - clip is where the tile lands
+			 * within the buffer; a copy onto its own position is sampled by
+			 * screen position, anything else through its UVs. */
+			if ((s_curPrimIsFeedback || s_curPrimIsScratch) && overrideTexture == 0)
 			{
-				const int tp   = activeDrawEnv.tpage;
-				const int srcX = (tp & 0xF) * 64 + poly->u0;
-				const int srcY = ((tp >> 4) & 1) * 256 + poly->v0;
-				const int dstX = poly->x0 + activeDrawEnv.ofs[0] - activeDrawEnv.clip.x;
-				const int dstY = poly->y0 + activeDrawEnv.ofs[1] - activeDrawEnv.clip.y;
-				const unsigned int fbTex = GR_FeedbackScreenTexture(srcX, srcY, dstX, dstY, poly->w, poly->h);
+				const int tp    = activeDrawEnv.tpage;
+				const int pageX = (tp & 0xF) * 64;
+				const int pageY = ((tp >> 4) & 1) * 256;
+				const int dstX  = poly->x0 + activeDrawEnv.ofs[0] - activeDrawEnv.clip.x;
+				const int dstY  = poly->y0 + activeDrawEnv.ofs[1] - activeDrawEnv.clip.y;
+				int mode = 0, offX = 0, offY = 0, natW = 0, natH = 0;
+				const unsigned int fbTex = GR_FeedbackSampleTexture(s_curPrimIsScratch ? 1 : 0, pageX, pageY,
+				                                                    poly->u0, poly->v0, dstX, dstY, poly->w, poly->h,
+				                                                    &mode, &offX, &offY, &natW, &natH);
 
-				if (fbTex != 0)
+				if (fbTex != 0 && mode != 0)
 				{
 					overrideTexture        = (TextureID)fbTex;
-					overrideTextureWidth   = 320;
-					overrideTextureHeight  = 224;
-					overrideTextureOffsetX = 0;
-					overrideTextureOffsetY = 0;
+					overrideTextureWidth   = natW;
+					overrideTextureHeight  = natH;
+					overrideTextureOffsetX = offX;
+					overrideTextureOffsetY = offY;
 					overrideTextureHiresW  = 0;
 					overrideTextureHiresH  = 0;
-					overrideFeedbackScreen = 1;
+					overrideFeedbackScreen = mode | (semiTrans ? 4 : 0);
 				}
 			}
 

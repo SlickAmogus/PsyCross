@@ -302,14 +302,18 @@ extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
 extern int			g_PsxFeedbackExact;
 extern int			g_cfg_dreamFeedback;
 
-/* Screen-space feedback for an OPAQUE prim that copies a display buffer onto the
- * same position of the draw buffer (the loading trail, the door fade): the 1:1
- * capture of the previous frame to sample by gl_FragCoord, or 0 to sample the
- * VRAM rect. The draw side pushes the state per split with
- * GR_SetFeedbackScreenSample. g_PsxFeedbackScreen = 0 disables the path
- * (console FBSCREEN) and every reader goes back to the 320x224 VRAM store. */
-extern unsigned int	GR_FeedbackScreenTexture(int srcX, int srcY, int dstX, int dstY, int w, int h);
-extern void			GR_SetFeedbackScreenSample(int on);
+/* Framebuffer feedback at render resolution. A SPRT that samples a display
+ * buffer (the loading trail, the door fade, the per-map dream overlays) or the
+ * scene-scratch rect (the soft-focus strips) gets the 1:1 capture of that
+ * frame to sample instead of the VRAM rect, with the PSX 5-bit arithmetic done
+ * in the sampler; 0 means sample VRAM as before. The draw side pushes the state
+ * per split with GR_SetFeedbackScreenSample (the split's fbScreen code).
+ * g_PsxFeedbackScreen = 0 disables the path (console FBSCREEN) and every
+ * reader goes back to the 320x224 VRAM store. */
+extern unsigned int	GR_FeedbackSampleTexture(int scratch, int pageX, int pageY, int u0, int v0,
+                                             int dstX, int dstY, int w, int h,
+                                             int* mode, int* offX, int* offY, int* natW, int* natH);
+extern void			GR_SetFeedbackScreenSample(int code);
 extern int			g_PsxFeedbackScreen;
 
 /* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
