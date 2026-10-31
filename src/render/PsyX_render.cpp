@@ -1290,7 +1290,7 @@ static void GR_ResolveBackend(void)
 
 	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
 	{
-		eprintwarn("Render backend '%s' needs ANGLE (libEGL.dll + libGLESv2.dll) next to the game; falling back to native OpenGL\n",
+		eprintwarn("Render backend '%s' needs ANGLE (libEGL + libGLESv2) next to the game; falling back to native OpenGL\n",
 			PsyX_Backend_GetName(requested));
 		requested = PSYX_BACKEND_GL;
 	}
@@ -1323,6 +1323,13 @@ static void GR_ResolveBackend(void)
 }
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+
+#if defined(__APPLE__)
+/* ANGLE's Metal backend draws into a CAMetalLayer. SDL owns one through a Metal
+ * view on the window; its layer is what eglCreateWindowSurface is handed. */
+static SDL_MetalView s_metalView = NULL;
+#endif
+
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
@@ -1333,7 +1340,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	 * from our own EGL display instead, and ANGLE wants a plain window to make
 	 * its swapchain against, so the flag is dropped there. */
 	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
+	{
 		windowFlags &= ~SDL_WINDOW_OPENGL;
+#if defined(__APPLE__)
+		windowFlags |= SDL_WINDOW_METAL;
+#endif
+	}
 #endif
 
 #if defined(__ANDROID__)
@@ -1419,6 +1431,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		SDL_VERSION(&wmInfo.version);
 		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
 			nativeWindow = (void*)wmInfo.info.win.window;
+#elif defined(__APPLE__)
+		s_metalView = SDL_Metal_CreateView(g_window);
+		if (s_metalView)
+			nativeWindow = SDL_Metal_GetLayer(s_metalView);
+		else
+			eprintwarn("SDL_Metal_CreateView failed: %s\n", SDL_GetError());
 #endif
 
 		if (!PsyX_Angle_Create(nativeWindow, g_grActiveBackend, g_cfg_msaaSamples))
@@ -1426,6 +1444,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 			eprintwarn("Backend '%s' could not be initialised through ANGLE; falling back to native OpenGL\n",
 				PsyX_Backend_GetName(g_grActiveBackend));
 
+#if defined(__APPLE__)
+			if (s_metalView)
+			{
+				SDL_Metal_DestroyView(s_metalView);
+				s_metalView = NULL;
+			}
+			/* SDL refuses a window flagged for both Metal and OpenGL. */
+			windowFlags &= ~SDL_WINDOW_METAL;
+#endif
 			SDL_DestroyWindow(g_window);
 			g_window = NULL;
 
@@ -1890,6 +1917,15 @@ void GR_Shutdown()
 	/* After the GL objects above: destroying the EGL context first would make
 	 * every one of those deletes a call with nothing current. */
 	PsyX_Angle_Destroy();
+
+#if defined(__APPLE__) && (defined(RENDERER_OGL) || defined(RENDERER_OGLES))
+	/* The EGL surface held the layer; only now can the view go. */
+	if (s_metalView)
+	{
+		SDL_Metal_DestroyView(s_metalView);
+		s_metalView = NULL;
+	}
+#endif
 }
 
 void GR_UpdateSwapIntervalState(int swapInterval)
@@ -7448,6 +7484,69 @@ static void GR_GpuTimerFrame(int beforeSwap)
 	}
 }
 
+static char s_shotPath[1024];
+static int  s_shotPending = 0;
+
+void GR_RequestScreenshot(const char* path)
+{
+	if (!path || !path[0])
+		path = "SCREENSHOT.BMP";
+	strncpy(s_shotPath, path, sizeof(s_shotPath) - 1);
+	s_shotPath[sizeof(s_shotPath) - 1] = 0;
+	s_shotPending = 1;
+}
+
+/* Framebuffer 0 holds the finished frame at this point on every path: the
+ * present blit has run when there is an internal target, and the scene was
+ * drawn straight into it otherwise. RGBA is the one format both desktop GL and
+ * ES guarantee for glReadPixels. */
+static void GR_WritePendingScreenshot(void)
+{
+	if (!s_shotPending)
+		return;
+	s_shotPending = 0;
+
+	const int w = (g_internalFBO != 0 && g_presentWidth > 0) ? g_presentWidth : g_windowWidth;
+	const int h = (g_internalFBO != 0 && g_presentHeight > 0) ? g_presentHeight : g_windowHeight;
+	if (w <= 0 || h <= 0)
+		return;
+
+	u_char* pixels = (u_char*)malloc((size_t)w * h * 4);
+	u_char* flipped = (u_char*)malloc((size_t)w * h * 4);
+	if (!pixels || !flipped)
+	{
+		free(pixels);
+		free(flipped);
+		return;
+	}
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	if (g_internalFBO != 0)
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, g_internalFBO);
+
+	for (int y = 0; y < h; y++)
+		memcpy(flipped + (size_t)(h - 1 - y) * w * 4, pixels + (size_t)y * w * 4, (size_t)w * 4);
+
+	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(flipped, w, h, 32, w * 4,
+		0x000000FF, 0x0000FF00, 0x00FF0000, 0);
+	if (surface)
+	{
+		SDL_Surface* rgb = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_BGR24, 0);
+		if (rgb)
+		{
+			if (SDL_SaveBMP(rgb, s_shotPath) == 0)
+				eprintf("*screenshot: %s (%dx%d)\n", s_shotPath, w, h);
+			else
+				eprintwarn("screenshot %s failed: %s\n", s_shotPath, SDL_GetError());
+			SDL_FreeSurface(rgb);
+		}
+		SDL_FreeSurface(surface);
+	}
+	free(flipped);
+	free(pixels);
+}
+
 void GR_SwapWindow()
 {
 	{
@@ -7509,6 +7608,8 @@ void GR_SwapWindow()
 	{
 		g_PsxVoidProbeArmed = (g_PsxVoidProbeArmed == 1) ? 2 : 0; /* second pass = tagged frame */
 	}
+
+	GR_WritePendingScreenshot();
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 	if (PsyX_Angle_Active())
