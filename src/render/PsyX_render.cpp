@@ -7383,6 +7383,71 @@ void GR_DiagGLError(const char* where)
 		PsyX_Backend_OnContextLost(where);
 }
 
+/* GPU time per frame for the game's [PERF] line: a perf report that cannot say
+ * whether the GPU or the game holds the frame back can only be guessed at.
+ * A GL_TIME_ELAPSED query spans swap to swap; results are read only once the
+ * GPU has them, a few frames on, so nothing here waits. Desktop GL only (ES has
+ * no timer query without an extension, ANGLE goes through its own swap). */
+double g_PsyX_GpuMsSum;
+int    g_PsyX_GpuMsCount;
+
+static void GR_GpuTimerFrame(int beforeSwap)
+{
+	typedef void (APIENTRY *GetQueryU64)(GLuint, GLenum, unsigned long long*);
+	enum { N = 4, TIME_ELAPSED = 0x88BF };
+	static int         s_ok = -1, s_open, s_next, s_pending[N];
+	static GLuint      s_q[N];
+	static GetQueryU64 s_get;
+	int i;
+
+	if (s_ok < 0)
+	{
+		s_ok = 0;
+		if (!g_grIsGLES && !PsyX_Angle_Active() && glGenQueries != NULL && glBeginQuery != NULL &&
+		    (SDL_GL_ExtensionSupported("GL_ARB_timer_query") || SDL_GL_ExtensionSupported("GL_EXT_timer_query")))
+		{
+			s_get = (GetQueryU64)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
+			if (s_get != NULL)
+			{
+				glGenQueries(N, s_q);
+				s_ok = 1;
+			}
+		}
+	}
+	if (!s_ok)
+		return;
+	if (beforeSwap)
+	{
+		if (s_open)
+		{
+			glEndQuery(TIME_ELAPSED);
+			s_pending[s_next] = 1;
+			s_next = (s_next + 1) % N;
+			s_open = 0;
+		}
+		return;
+	}
+	for (i = 0; i < N; i++)
+	{
+		GLuint avail = 0;
+		unsigned long long ns = 0;
+		if (!s_pending[i])
+			continue;
+		glGetQueryObjectuiv(s_q[i], GL_QUERY_RESULT_AVAILABLE, &avail);
+		if (!avail)
+			continue;
+		s_get(s_q[i], GL_QUERY_RESULT, &ns);
+		s_pending[i] = 0;
+		g_PsyX_GpuMsSum += (double)ns / 1.0e6;
+		g_PsyX_GpuMsCount++;
+	}
+	if (!s_pending[s_next])
+	{
+		glBeginQuery(TIME_ELAPSED, s_q[s_next]);
+		s_open = 1;
+	}
+}
+
 void GR_SwapWindow()
 {
 	{
@@ -7454,7 +7519,9 @@ void GR_SwapWindow()
 		 * presents nothing (a black window) when an FBO is still bound at
 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		GR_GpuTimerFrame(1);
 		SDL_GL_SwapWindow(g_window);
+		GR_GpuTimerFrame(0);
 		if (g_internalFBO)
 			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
 	}
