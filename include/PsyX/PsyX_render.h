@@ -302,6 +302,16 @@ extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
 extern int			g_PsxFeedbackExact;
 extern int			g_cfg_dreamFeedback;
 
+/* Screen-space feedback for an OPAQUE prim that copies a display buffer onto the
+ * same position of the draw buffer (the loading trail, the door fade): the 1:1
+ * capture of the previous frame to sample by gl_FragCoord, or 0 to sample the
+ * VRAM rect. The draw side pushes the state per split with
+ * GR_SetFeedbackScreenSample. g_PsxFeedbackScreen = 0 disables the path
+ * (console FBSCREEN) and every reader goes back to the 320x224 VRAM store. */
+extern unsigned int	GR_FeedbackScreenTexture(int srcX, int srcY, int dstX, int dstY, int w, int h);
+extern void			GR_SetFeedbackScreenSample(int on);
+extern int			g_PsxFeedbackScreen;
+
 /* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
  * reaches, and about which point. The effect's primitives are stretched by this
  * and the capture is stretched with them, so the blur fills the window at any
