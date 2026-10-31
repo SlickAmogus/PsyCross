@@ -6467,7 +6467,7 @@ static int      g_fbPackValid = 0; /* a frame has been captured this session */
 /* Set around the scene-scratch capture while the world ortho is widened. */
 static int      g_fbCaptureWorldWide = 0;
 
-/* Screen-space feedback for the OPAQUE 1:1 readers (GR_FeedbackScreenTexture).
+/* Render-resolution feedback (GR_FeedbackSampleTexture).
  *
  * The 320x224 VRAM store cannot reproduce what a PS1 at higher internal
  * resolution shows (DuckStation keeps the whole loop at render resolution): the
