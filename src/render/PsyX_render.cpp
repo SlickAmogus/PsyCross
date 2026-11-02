@@ -7716,6 +7716,7 @@ void GR_DiagGLError(const char* where)
  * no timer query without an extension, ANGLE goes through its own swap). */
 double g_PsyX_GpuMsSum;
 int    g_PsyX_GpuMsCount;
+int    g_PsyX_GpuTimerWanted; /* set by the game while it keeps a log; nothing runs otherwise */
 
 static void GR_GpuTimerFrame(int beforeSwap)
 {
@@ -7726,6 +7727,8 @@ static void GR_GpuTimerFrame(int beforeSwap)
 	static GetQueryU64 s_get;
 	int i;
 
+	if (!g_PsyX_GpuTimerWanted)
+		return;
 	if (s_ok < 0)
 	{
 		s_ok = 0;
