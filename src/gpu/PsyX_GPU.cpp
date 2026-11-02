@@ -11,6 +11,7 @@
 #include <string.h>
 #include <SDL_timer.h>
 #include <algorithm>
+#include <vector>
 
 #include "psx/gtereg.h"
 
@@ -885,6 +886,10 @@ int overrideTextureOffsetY = 0;
  * neighboring atlas cell (font glyph / cursor edge artifacts with packs). */
 int overrideTextureHiresW = 0;
 int overrideTextureHiresH = 0;
+/* overrideTexture is the 1:1 capture of the previous frame and the split samples
+ * it by gl_FragCoord or its UVs (GR_FeedbackSampleTexture). Set per primitive in the SPRT
+ * path, cleared wherever overrideTexture is assigned. */
+static int overrideFeedbackScreen = 0;
 
 // DR_PSYX_TEX packet state, kept separately so the hi-res override lookup
 // below can restore it on a miss instead of clobbering it to zero.
@@ -955,6 +960,7 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
 
 	s_curPrimIsGlyph = (g_PsyX_TextGlyphTest != NULL) ? g_PsyX_TextGlyphTest(tpage, clut) : 0;
+	overrideFeedbackScreen = 0;
 
 	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
 	 * addressing the left 320 VRAM columns is the display-buffer band, which is
@@ -2076,6 +2082,8 @@ struct GPUDrawSplit
 	int				overrideHiresW;
 	int				overrideHiresH;
 
+	int				fbScreen; /* textureId is the 1:1 previous-frame capture, sampled by gl_FragCoord */
+
 	int				isGlyph; /* see g_PsyX_TextGlyphTest */
 	int				mixed;   /* drawn with the all-format program (g_gte_shader_mix) */
 
@@ -2119,6 +2127,7 @@ void ClearSplits()
 	overrideTextureOffsetY = 0;
 	overrideTextureHiresW = 0;
 	overrideTextureHiresH = 0;
+	overrideFeedbackScreen = 0;
 }
 
 template<class T>
@@ -3306,6 +3315,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		 * together (same textureId!) or they'd share one offset uniform. */
 		curSplit.drawenv.tw.x == overrideTextureOffsetX &&
 		curSplit.drawenv.tw.y == overrideTextureOffsetY &&
+		curSplit.fbScreen == overrideFeedbackScreen &&
 		curSplit.drawPrimMode == g_DrawPrimMode &&
 		curSplit.drawenv.clip.x == activeDrawEnv.clip.x &&
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
@@ -3356,6 +3366,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.drawenv.tw.y = overrideTextureOffsetY;
 	split.overrideHiresW = overrideTextureHiresW;
 	split.overrideHiresH = overrideTextureHiresH;
+	split.fbScreen = overrideFeedbackScreen;
 
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
@@ -3423,7 +3434,9 @@ int g_PsxDbgAddMode = 1;
 
 unsigned PsyX_PerfUs(void);
 
-void DrawSplit(const GPUDrawSplit& split)
+static bool s_itemTransparencyPass = false;
+
+void DrawSplit(const GPUDrawSplit& split, int splitIndex = -1)
 {
 	const unsigned s_splitT0 = PsyX_PerfUs();   /* [PERF4] state setup starts here */
 	const bool isAdditive = (split.blendMode == BM_ADD || split.blendMode == BM_ADD_QUATER_SOURCE);
@@ -3459,15 +3472,22 @@ void DrawSplit(const GPUDrawSplit& split)
 		GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
+	{
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
 		                          split.drawenv.tw.x, split.drawenv.tw.y,
 		                          split.overrideHiresW, split.overrideHiresH);
+		GR_SetFeedbackScreenSample(split.fbScreen);
+	}
 
 	const bool drawOnScreen = split.drawenv.dfe;
 	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
 	GR_SetOffscreenState(&split.drawenv.clip, !drawOnScreen);
 
 	GR_SetBlendMode(split.blendMode);
+
+	/* An isolated item's translucent shell must not occlude its contents. */
+	if (s_itemTransparencyPass)
+		glDepthMask(split.blendMode == BM_NONE ? GL_TRUE : GL_FALSE);
 
 	/* PGXP coplanar fix (docs/PGXP_PR51_Vetting.md): draw static-world opaque
 	 * geometry with GL_ALWAYS instead of GL_LEQUAL, keeping GR_SetBlendMode's
@@ -3493,7 +3513,7 @@ void DrawSplit(const GPUDrawSplit& split)
 	    (int)split.startVertex < s_ipVertHi &&
 	    (int)(split.startVertex + split.numVerts) > s_ipVertLo)
 	{
-		ItemProbe_RecordSplitGl((int)(&split - (const GPUDrawSplit*)g_splits), (int)split.blendMode,
+		ItemProbe_RecordSplitGl(splitIndex >= 0 ? splitIndex : (int)(&split - (const GPUDrawSplit*)g_splits), (int)split.blendMode,
 		                        (int)split.numVerts, (int)split.drawenv.dfe);
 	}
 
@@ -3508,6 +3528,8 @@ void DrawSplit(const GPUDrawSplit& split)
 		GR_DrawTriangles(g_vboBaseVertex + split.startVertex, split.numVerts / 3);
 		g_PsyX_UsDraw += PsyX_PerfUs() - tDraw;
 	}
+	if (s_itemTransparencyPass)
+		glDepthMask(GL_TRUE);
 
 	if (split.debugText)
 		GR_PopDebugLabel();
@@ -3644,8 +3666,61 @@ void DrawAllSplits()
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
 
+	/* Isolated TMD items can contain an opaque interior inside a translucent
+	 * shell (the Unknown Liquid bottle). Submit opaque geometry first, then
+	 * blend shell triangles back-to-front without writing depth. OT buckets
+	 * are too coarse to order these intersecting batches during rotation.
+	 * Other blend modes and non-legacy commands are ordering barriers. World
+	 * and UI passes outside the item-depth bracket retain their original order. */
 	for (int i = 1; i <= g_splitIndex; i++)
 	{
+		if (g_PsyX_ForceItemDepth)
+		{
+			int end = i;
+			bool hasTransparency = false;
+			for (; end <= g_splitIndex; end++)
+			{
+				const GPUDrawSplit& s = g_splits[end];
+				if (s.kind != GPU_SPLIT_LEGACY ||
+				    (s.blendMode != BM_NONE && s.blendMode != BM_AVERAGE))
+					break;
+				bool finite = true;
+				for (unsigned v = s.startVertex; v < s.startVertex + s.numVerts; v++)
+					finite &= isfinite(g_vertexBuffer[v].z);
+				if (!finite)
+					break;
+				hasTransparency |= s.blendMode == BM_AVERAGE;
+			}
+			if (hasTransparency)
+			{
+				struct ItemTriangle { int split; unsigned vertex; float depth; };
+				std::vector<ItemTriangle> transparent;
+				s_itemTransparencyPass = true;
+				for (int j = i; j < end; j++)
+				{
+					const GPUDrawSplit& s = g_splits[j];
+					if (s.blendMode == BM_NONE)
+						DrawSplit(s);
+					else
+						for (unsigned v = s.startVertex; v + 2 < s.startVertex + s.numVerts; v += 3)
+							transparent.push_back({j, v, (g_vertexBuffer[v].z +
+								g_vertexBuffer[v + 1].z + g_vertexBuffer[v + 2].z) / 3.0f});
+				}
+				std::stable_sort(transparent.begin(), transparent.end(),
+					/* Projection negates z: smaller stored z is farther away. */
+					[](const ItemTriangle& a, const ItemTriangle& b) { return a.depth < b.depth; });
+				for (const ItemTriangle& t : transparent)
+				{
+					GPUDrawSplit s = g_splits[t.split];
+					s.startVertex = t.vertex;
+					s.numVerts = 3;
+					DrawSplit(s, t.split);
+				}
+				s_itemTransparencyPass = false;
+				i = end - 1;
+				continue;
+			}
+		}
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
 			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
@@ -4452,6 +4527,38 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
 				return 4;
 
+			/* A reader of a display buffer (Screen_BackgroundMotionBlur's tiles,
+			 * the per-map dream overlays) or of the scene-scratch rect (the
+			 * soft-focus strips) samples that frame's render-resolution capture
+			 * instead of VRAM. The offset is absolute VRAM and the clip origin
+			 * is the draw buffer's, so x0 + ofs - clip is where the tile lands
+			 * within the buffer; a copy onto its own position is sampled by
+			 * screen position, anything else through its UVs. */
+			if ((s_curPrimIsFeedback || s_curPrimIsScratch) && overrideTexture == 0)
+			{
+				const int tp    = activeDrawEnv.tpage;
+				const int pageX = (tp & 0xF) * 64;
+				const int pageY = ((tp >> 4) & 1) * 256;
+				const int dstX  = poly->x0 + activeDrawEnv.ofs[0] - activeDrawEnv.clip.x;
+				const int dstY  = poly->y0 + activeDrawEnv.ofs[1] - activeDrawEnv.clip.y;
+				int mode = 0, offX = 0, offY = 0, natW = 0, natH = 0;
+				const unsigned int fbTex = GR_FeedbackSampleTexture(s_curPrimIsScratch ? 1 : 0, pageX, pageY,
+				                                                    poly->u0, poly->v0, dstX, dstY, poly->w, poly->h,
+				                                                    &mode, &offX, &offY, &natW, &natH);
+
+				if (fbTex != 0 && mode != 0)
+				{
+					overrideTexture        = (TextureID)fbTex;
+					overrideTextureWidth   = natW;
+					overrideTextureHeight  = natH;
+					overrideTextureOffsetX = offX;
+					overrideTextureOffsetY = offY;
+					overrideTextureHiresW  = 0;
+					overrideTextureHiresH  = 0;
+					overrideFeedbackScreen = mode | (semiTrans ? 4 : 0);
+				}
+			}
+
 			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -4923,6 +5030,7 @@ static void EmitFarChain(int first)
 			overrideTextureOffsetY = m->oy;
 			overrideTextureHiresW  = m->hw;
 			overrideTextureHiresH  = m->hh;
+			overrideFeedbackScreen = 0;
 			activeDrawEnv.tpage = q->tpage;
 			if (g_PsxWholeMapProbe == 1)
 			{
@@ -5151,6 +5259,7 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
 		overrideTextureHiresW = 0; /* unknown upscale: shader clamp off */
 		overrideTextureHiresH = 0;
+		overrideFeedbackScreen = 0;
 		drPsyxTexOverride = overrideTexture;
 		drPsyxTexOverrideWidth = overrideTextureWidth;
 		drPsyxTexOverrideHeight = overrideTextureHeight;

@@ -192,6 +192,11 @@ struct SPUVoiceState
 
     bool     everKeyedOn;      // whether SetKey(On,...) has ever been issued
 
+    // Not hardware: summed after the master volume rather than before it, so
+    // the voice stays audible while the game holds master at 0 (the PC pause
+    // menu's cues during its SD_Call(3) mute). See SetVoiceMasterExempt().
+    bool     masterExempt;
+
     // -- Per-voice Left/Right volume: Direct fixed value OR Sweep envelope --
     // curVolL/R mirror the real hardware "Current Volume Left/Right"
     // register (1F801E00h+voice*4). In SPU_VOICE_DIRECT16 mode they are a
@@ -360,6 +365,12 @@ public:
     uint32_t GetVoicePitchModEnableMask() const;
     static bool IsPitchModulationImplemented() { return true; }
 
+    // Port-only (see SPUVoiceState::masterExempt). The flag outlives the
+    // sound on purpose; the backend rewrites it on every Key On, so a voice
+    // the game reuses goes back under master.
+    void     SetVoiceMasterExempt(uint32_t voiceBitmask, bool exempt);
+    uint32_t GetVoiceMasterExemptMask() const;
+
     // ---- Master / CD controls --------------------------------------------
     // SetMasterVolume forces Direct (fixed) mode for both channels - use
     // SetCommonAttr with SPU_COMMON_MVOLMODEL/R to engage a Sweep envelope
@@ -435,6 +446,7 @@ public:
         int32_t  panR[kNumVoices];      // out: live voice volume, end of block
         int32_t  masterL;               // out: live master volume, end of block
         int32_t  masterR;               // out: live master volume, end of block
+        uint32_t masterExempt;          // out: voices the caller must not scale by master
     };
     void RenderFrames(int16_t* outInterleavedLR, int frameCount, SplitOutput* split = nullptr);
     bool SetRenderer(RendererMode renderer, ClipMode clipMode = ClipMode::None);

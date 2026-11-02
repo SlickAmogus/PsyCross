@@ -224,14 +224,14 @@ void AccumulateVoice(const int16_t* mono, int frames, float azDeg, float gain)
     }
 }
 
-void AccumulateStereoBed(const int16_t* interleaved, int frames, int busL, int busR)
+void AccumulateStereoBed(const int16_t* interleaved, int frames, int busL, int busR, float gain)
 {
     float* dl = g_busAccum[busL].data();
     float* dr = g_busAccum[busR].data();
     for (int i = 0; i < frames; ++i)
     {
-        dl[i] += (float)interleaved[i * 2 + 0];
-        dr[i] += (float)interleaved[i * 2 + 1];
+        dl[i] += (float)interleaved[i * 2 + 0] * gain;
+        dr[i] += (float)interleaved[i * 2 + 1] * gain;
     }
 }
 
@@ -301,11 +301,11 @@ void PanToSpeakers(const int16_t* mono, int frames, float azDeg, float gain)
     }
 }
 
-void AddToSpeaker(const int16_t* interleaved, int frames, int stride, int offset, int ch)
+void AddToSpeaker(const int16_t* interleaved, int frames, int stride, int offset, int ch, float gain)
 {
     float* d = g_spkAccum[ch].data();
     for (int i = 0; i < frames; ++i)
-        d[i] += (float)interleaved[i * stride + offset];
+        d[i] += (float)interleaved[i * stride + offset] * gain;
 }
 
 /* Bus indices, named so the mapping below reads as the layout it describes. */
@@ -319,7 +319,7 @@ enum
 /* -3dB, for a bus that has to land between two speakers. */
 const float kHalfPower = 0.70710678f;
 
-void MixDirect(float master)
+void MixDirect(void)
 {
     const int ch  = g_directChannels;
     int16_t*  dst = g_directScratch.data();
@@ -328,7 +328,7 @@ void MixDirect(float master)
     {
         for (int k = 0; k < ch; ++k)
         {
-            float v = g_spkAccum[k][i] * master;
+            float v = g_spkAccum[k][i];
             if (v > 32767.0f)  v = 32767.0f;
             if (v < -32768.0f) v = -32768.0f;
             dst[i * ch + k] = (int16_t)v;
@@ -359,6 +359,15 @@ void RenderBlock(void)
     g_core->RenderFrames(NULL, kBlockFrames, &split);
     SDL_UnlockMutex(g_coreMutex);
 
+    /* Master volume after the voice mix and before the final clamp, matching
+     * where the hardware applies it. */
+    /* Folded into each source's gain instead of scaling the sum (the same
+     * product up to float rounding), so a master-exempt voice (the pause menu's
+     * cues while the game's own fade holds master at 0) can skip it. */
+    const float mvRaw = (float)(split.masterL > split.masterR ? split.masterL : split.masterR)
+                      / 32767.0f;
+    const float master = mvRaw <= 0.0f ? 0.0f : (mvRaw > 1.0f ? 1.0f : mvRaw);
+
     if (g_directOut)
     {
         for (int k = 0; k < g_directChannels; ++k)
@@ -376,6 +385,8 @@ void RenderBlock(void)
              * attenuation is already baked into those volumes. */
             if (PsyX_SPUSoftware_VoiceAzimuth(v, &azQ12))
                 az = (float)azQ12 * (360.0f / 4096.0f);
+            if (!(split.masterExempt & (1u << v)))
+                gain *= master;
 
             PanToSpeakers(g_voiceBuf[v].data(), kBlockFrames, az, gain);
         }
@@ -384,11 +395,13 @@ void RenderBlock(void)
         {
             const int bl = (g_directChannels == 4) ? 2 : 4;
             const int br = (g_directChannels == 4) ? 3 : 5;
-            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 0, bl);
-            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 1, br);
-            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 0, 0);
-            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 1, 1);
+            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 0, bl, master);
+            AddToSpeaker(g_wetBuf.data(), kBlockFrames, 2, 1, br, master);
+            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 0, 0, master);
+            AddToSpeaker(g_cdBuf.data(),  kBlockFrames, 2, 1, 1, master);
         }
+        MixDirect();
+        return;
     }
     else
     {
@@ -399,23 +412,14 @@ void RenderBlock(void)
     {
         float az, gain;
         VoiceAzimuthGain(split.panL[v], split.panR[v], &az, &gain);
+        if (!(split.masterExempt & (1u << v)))
+            gain *= master;
         AccumulateVoice(g_voiceBuf[v].data(), kBlockFrames, az, gain);
     }
 
-    AccumulateStereoBed(g_wetBuf.data(), kBlockFrames, kDryBuses, kDryBuses + 1);
+    AccumulateStereoBed(g_wetBuf.data(), kBlockFrames, kDryBuses, kDryBuses + 1, master);
     AccumulateStereoBed(g_cdBuf.data(), kBlockFrames, kDryBuses + kWetBuses,
-                        kDryBuses + kWetBuses + 1);
-    }
-
-    /* Master volume last, matching where the hardware applies it. */
-    const float mvRaw = (float)(split.masterL > split.masterR ? split.masterL : split.masterR)
-                      / 32767.0f;
-    const float master = mvRaw <= 0.0f ? 0.0f : (mvRaw > 1.0f ? 1.0f : mvRaw);
-
-    if (g_directOut)
-    {
-        MixDirect(master);
-        return;
+                        kDryBuses + kWetBuses + 1, master);
     }
 
     for (int b = 0; b < kTotalBuses; ++b)
@@ -424,7 +428,7 @@ void RenderBlock(void)
         int16_t* dst = g_bus[b].scratch.data();
         for (int i = 0; i < kBlockFrames; ++i)
         {
-            float s = srcBuf[i] * master;
+            float s = srcBuf[i];
             if (s > 32767.0f) s = 32767.0f;
             if (s < -32768.0f) s = -32768.0f;
             dst[i] = (int16_t)s;
