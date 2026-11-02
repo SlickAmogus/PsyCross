@@ -1511,6 +1511,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 	else if (fullscreen)
 		windowFlags |= SDL_WINDOW_FULLSCREEN;
+#if defined(__EMSCRIPTEN__)
+	/* Without it the canvas backing store is the CSS box at 1x: a 3x phone
+	 * rendered at a third of its panel and the browser scaled the result up,
+	 * which blurred every overlay drawn at "window" resolution (the quick menu
+	 * first of all). With it SDL sizes the drawable by the device pixel ratio
+	 * and the CSS box stays the window; GR_ApplyPresentSize and the point/pixel
+	 * helpers in PsyX_main.cpp treat the web like iOS from here on. */
+	windowFlags |= SDL_WINDOW_ALLOW_HIGHDPI;
+#endif
 #endif
 
 	if(g_windowWidth <= 0 || g_windowHeight <= 0)
@@ -1917,8 +1926,12 @@ static int GR_SceneAlwaysOffscreen(void)
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH)
 {
-#if defined(PSYX_IOS)
-	/* Every caller hands this WINDOW POINTS -- SDL_GetWindowSize at the end of
+#if defined(PSYX_IOS) || defined(__EMSCRIPTEN__)
+	/* (The web build too: its window is ALLOW_HIGHDPI as well, see
+	 * GR_InitialiseGLContext, so the drawable is the CSS box times the device
+	 * pixel ratio.)
+	 *
+	 * Every caller hands this WINDOW POINTS -- SDL_GetWindowSize at the end of
 	 * GR_InitialiseGLContext, and event.window.data1/2 from a resize. On a
 	 * desktop those are pixels and the distinction does not exist. On iOS with
 	 * ALLOW_HIGHDPI they are a THIRD of the drawable: 956x440 against a
