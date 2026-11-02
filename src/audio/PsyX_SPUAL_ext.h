@@ -22,6 +22,11 @@ extern int PsyX_SPUAL_ConfigureRenderer(
  * placement instead of taking its stereo downmix. */
 extern void PsyX_SPUAL_ConfigureSpatial(int enable, int speakers);
 
+/* Software backend only: while on, key-ons from the calling thread are mixed
+ * after the master volume, so they are heard while master is held at 0. The
+ * legacy backend never applies master volume, so it has nothing to exempt. */
+extern void PsyX_SPUAL_SetKeyOnMasterExempt(int on);
+
 extern int PsyX_SPUAL_PushXaFrames(
 	const short* samples, u_int frames, int sourceRate, int channels);
 extern void PsyX_SPUAL_ResetXa(void);
