@@ -2660,10 +2660,19 @@ int g_PsxFogToBlack = 0;
 	"		vec2 major = (lx >= ly) ? dPdx : dPdy;\n"\
 	"		float mn = min(lx, ly);\n"\
 	"		float ratio = (mn > 0.0001) ? (max(lx, ly) / mn) : 1.0;\n"\
-	"		float taps = clamp(floor(ratio), 1.0, u_anisoTaps);\n"\
-	"		float span = length(major) * (taps - 1.0);\n"\
-	"		if (taps <= 1.0 || span <= 0.0) { return BilinearTextureSample(P); }\n"\
-	"		if (span > 4.0) { major *= 4.0 / span; }\n"\
+	/* The taps below span |major| texels, the pixel's footprint along the
+	 * major axis. Each bilinear tap already covers about one texel, so taps a
+	 * texel apart are all the footprint needs and more only resample the same
+	 * texels. The old count came from the ratio alone and the clamp was taken
+	 * on |major| * (taps - 1), so at 8x and 16x it fired on nearly every
+	 * grazing surface and squeezed all 16 taps -- 12 dependent fetches each --
+	 * into a fraction of a texel: a point sample at 16 times the cost, and the
+	 * GPU-bound frame on cards with little texture bandwidth. With the
+	 * footprint capped at 4 texels the loop runs 5 taps at most. */\
+	"		float ext = length(major);\n"\
+	"		if (ext > 4.0) { major *= 4.0 / ext; ext = 4.0; }\n"\
+	"		float taps = clamp(min(floor(ratio), ceil(ext)), 1.0, u_anisoTaps);\n"\
+	"		if (taps <= 1.0) { return BilinearTextureSample(P); }\n"\
 	"		vec4 acc = vec4(0.0);\n"\
 	"		float cov = 0.0;\n"\
 	"		g_tapWt = 0.0;\n"\
