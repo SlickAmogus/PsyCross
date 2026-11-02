@@ -390,6 +390,20 @@ extern void			GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour);
 extern int			g_PsxFeedbackExact;
 extern int			g_cfg_dreamFeedback;
 
+/* Framebuffer feedback at render resolution. A SPRT that samples a display
+ * buffer (the loading trail, the door fade, the per-map dream overlays) or the
+ * scene-scratch rect (the soft-focus strips) gets the 1:1 capture of that
+ * frame to sample instead of the VRAM rect, with the PSX 5-bit arithmetic done
+ * in the sampler; 0 means sample VRAM as before. The draw side pushes the state
+ * per split with GR_SetFeedbackScreenSample (the split's fbScreen code).
+ * g_PsxFeedbackScreen = 0 disables the path (console FBSCREEN) and every
+ * reader goes back to the 320x224 VRAM store. */
+extern unsigned int	GR_FeedbackSampleTexture(int scratch, int pageX, int pageY, int u0, int v0,
+                                             int dstX, int dstY, int w, int h,
+                                             int* mode, int* offX, int* offY, int* natW, int* natH);
+extern void			GR_SetFeedbackScreenSample(int code);
+extern int			g_PsxFeedbackScreen;
+
 /* Widescreen feedback: how far past the 320-wide display buffer the UI ortho
  * reaches, and about which point. The effect's primitives are stretched by this
  * and the capture is stretched with them, so the blur fills the window at any

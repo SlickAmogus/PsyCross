@@ -886,6 +886,10 @@ int overrideTextureOffsetY = 0;
  * neighboring atlas cell (font glyph / cursor edge artifacts with packs). */
 int overrideTextureHiresW = 0;
 int overrideTextureHiresH = 0;
+/* overrideTexture is the 1:1 capture of the previous frame and the split samples
+ * it by gl_FragCoord or its UVs (GR_FeedbackSampleTexture). Set per primitive in the SPRT
+ * path, cleared wherever overrideTexture is assigned. */
+static int overrideFeedbackScreen = 0;
 
 // DR_PSYX_TEX packet state, kept separately so the hi-res override lookup
 // below can restore it on a miss instead of clobbering it to zero.
@@ -956,6 +960,7 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
 
 	s_curPrimIsGlyph = (g_PsyX_TextGlyphTest != NULL) ? g_PsyX_TextGlyphTest(tpage, clut) : 0;
+	overrideFeedbackScreen = 0;
 
 	/* Framebuffer-feedback consumers announce themselves here: 16bpp (tp >= 2)
 	 * addressing the left 320 VRAM columns is the display-buffer band, which is
@@ -2077,6 +2082,8 @@ struct GPUDrawSplit
 	int				overrideHiresW;
 	int				overrideHiresH;
 
+	int				fbScreen; /* textureId is the 1:1 previous-frame capture, sampled by gl_FragCoord */
+
 	int				isGlyph; /* see g_PsyX_TextGlyphTest */
 	int				mixed;   /* drawn with the all-format program (g_gte_shader_mix) */
 
@@ -2120,6 +2127,7 @@ void ClearSplits()
 	overrideTextureOffsetY = 0;
 	overrideTextureHiresW = 0;
 	overrideTextureHiresH = 0;
+	overrideFeedbackScreen = 0;
 }
 
 template<class T>
@@ -3307,6 +3315,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		 * together (same textureId!) or they'd share one offset uniform. */
 		curSplit.drawenv.tw.x == overrideTextureOffsetX &&
 		curSplit.drawenv.tw.y == overrideTextureOffsetY &&
+		curSplit.fbScreen == overrideFeedbackScreen &&
 		curSplit.drawPrimMode == g_DrawPrimMode &&
 		curSplit.drawenv.clip.x == activeDrawEnv.clip.x &&
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
@@ -3357,6 +3366,7 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	split.drawenv.tw.y = overrideTextureOffsetY;
 	split.overrideHiresW = overrideTextureHiresW;
 	split.overrideHiresH = overrideTextureHiresH;
+	split.fbScreen = overrideFeedbackScreen;
 
 	split.startVertex = g_vertexIndex;
 	split.numVerts = 0;
@@ -3462,9 +3472,12 @@ void DrawSplit(const GPUDrawSplit& split, int splitIndex = -1)
 		GR_SetTexture(split.textureId, split.texFormat);
 
 	if (split.texFormat == TF_32_BIT_RGBA)
+	{
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h,
 		                          split.drawenv.tw.x, split.drawenv.tw.y,
 		                          split.overrideHiresW, split.overrideHiresH);
+		GR_SetFeedbackScreenSample(split.fbScreen);
+	}
 
 	const bool drawOnScreen = split.drawenv.dfe;
 	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
@@ -4514,6 +4527,38 @@ static int ProcessTileAndSprt(P_TAG* polyTag)
 			if (s_curPrimIsScratch && !g_cfg_dreamFeedback)
 				return 4;
 
+			/* A reader of a display buffer (Screen_BackgroundMotionBlur's tiles,
+			 * the per-map dream overlays) or of the scene-scratch rect (the
+			 * soft-focus strips) samples that frame's render-resolution capture
+			 * instead of VRAM. The offset is absolute VRAM and the clip origin
+			 * is the draw buffer's, so x0 + ofs - clip is where the tile lands
+			 * within the buffer; a copy onto its own position is sampled by
+			 * screen position, anything else through its UVs. */
+			if ((s_curPrimIsFeedback || s_curPrimIsScratch) && overrideTexture == 0)
+			{
+				const int tp    = activeDrawEnv.tpage;
+				const int pageX = (tp & 0xF) * 64;
+				const int pageY = ((tp >> 4) & 1) * 256;
+				const int dstX  = poly->x0 + activeDrawEnv.ofs[0] - activeDrawEnv.clip.x;
+				const int dstY  = poly->y0 + activeDrawEnv.ofs[1] - activeDrawEnv.clip.y;
+				int mode = 0, offX = 0, offY = 0, natW = 0, natH = 0;
+				const unsigned int fbTex = GR_FeedbackSampleTexture(s_curPrimIsScratch ? 1 : 0, pageX, pageY,
+				                                                    poly->u0, poly->v0, dstX, dstY, poly->w, poly->h,
+				                                                    &mode, &offX, &offY, &natW, &natH);
+
+				if (fbTex != 0 && mode != 0)
+				{
+					overrideTexture        = (TextureID)fbTex;
+					overrideTextureWidth   = natW;
+					overrideTextureHeight  = natH;
+					overrideTextureOffsetX = offX;
+					overrideTextureOffsetY = offY;
+					overrideTextureHiresW  = 0;
+					overrideTextureHiresH  = 0;
+					overrideFeedbackScreen = mode | (semiTrans ? 4 : 0);
+				}
+			}
+
 			AddSplit(semiTrans, true, SplitDepthForPrim(polyTag));
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
@@ -4985,6 +5030,7 @@ static void EmitFarChain(int first)
 			overrideTextureOffsetY = m->oy;
 			overrideTextureHiresW  = m->hw;
 			overrideTextureHiresH  = m->hh;
+			overrideFeedbackScreen = 0;
 			activeDrawEnv.tpage = q->tpage;
 			if (g_PsxWholeMapProbe == 1)
 			{
@@ -5213,6 +5259,7 @@ static int ProcessPsyXPrims(P_TAG* polyTag)
 		overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
 		overrideTextureHiresW = 0; /* unknown upscale: shader clamp off */
 		overrideTextureHiresH = 0;
+		overrideFeedbackScreen = 0;
 		drPsyxTexOverride = overrideTexture;
 		drPsyxTexOverrideWidth = overrideTextureWidth;
 		drPsyxTexOverrideHeight = overrideTextureHeight;
