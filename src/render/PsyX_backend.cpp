@@ -240,6 +240,30 @@ int PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples)
 	if (!Angle_LoadEntryPoints())
 		return 0;
 
+	/* Steam installs implicit Vulkan layers (its overlay and the Fossilize
+	 * shader cache) that the loader puts into every Vulkan instance of a game
+	 * Steam launched, ANGLE's included. A Steam-launched run lost its ANGLE
+	 * Vulkan device in its first frames while the same build ran clean outside
+	 * Steam, so they are switched off through the opt-outs the layers' own
+	 * manifests declare. Steam's overlay is then absent on this backend only.
+	 * A value the user set themselves is left alone. */
+	if (info->anglePlatformType == PSYX_EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE &&
+	    (getenv("SteamAppId") || getenv("SteamGameId") || getenv("STEAM_COMPAT_APP_ID")))
+	{
+		static const char* const kSteamLayerOptOuts[] =
+		{
+			"DISABLE_VK_LAYER_VALVE_steam_overlay_1",
+			"DISABLE_VK_LAYER_VALVE_steam_fossilize_1",
+		};
+		for (int i = 0; i < 2; i++)
+		{
+			if (GetEnvironmentVariableA(kSteamLayerOptOuts[i], NULL, 0) == 0)
+				SetEnvironmentVariableA(kSteamLayerOptOuts[i], "1");
+		}
+		PsyX_Log_Warning("[Psy-X] ANGLE: launched by Steam, Steam's Vulkan overlay and shader-cache layers disabled for '%s'\n",
+			info->name);
+	}
+
 	/* This — not an environment variable — is what actually selects D3D11 vs
 	 * Vulkan vs a CPU rasterizer. */
 	const EGLint displayAttribs[] =
@@ -358,10 +382,13 @@ void PsyX_Angle_Destroy(void)
 	s_egl.active  = 0;
 }
 
+#define PSYX_EGL_CONTEXT_LOST	0x300E
+
 void PsyX_Angle_Swap(void)
 {
-	if (s_egl.active)
-		s_egl.SwapBuffers(s_egl.display, s_egl.surface);
+	if (s_egl.active && !s_egl.SwapBuffers(s_egl.display, s_egl.surface) &&
+	    s_egl.GetError() == PSYX_EGL_CONTEXT_LOST)
+		PsyX_Backend_OnContextLost("eglSwapBuffers");
 }
 
 void PsyX_Angle_SetSwapInterval(int interval)
@@ -499,5 +526,57 @@ int PsyX_Backend_AngleAvailable(void)
 	/* Linux/macOS: ANGLE is not shipped with the game there — the native GL
 	 * driver is the sane path, and Vulkan users are served by Zink/mesa. */
 	return 0;
+#endif
+}
+
+void PsyX_Exit();
+
+static int s_relaunchOnGl = 0;
+
+void PsyX_Backend_OnContextLost(const char* where)
+{
+	static int s_handled = 0;
+
+	/* Native GL has nothing to fall back to, and a relaunch onto the same
+	 * backend would just lose its device again. */
+	if (s_handled || !PsyX_Backend_IsTranslated(g_grActiveBackend))
+		return;
+	s_handled = 1;
+
+	PsyX_Log_Warning("[Psy-X] The '%s' renderer lost its graphics device (%s); restarting the game on OpenGL (native). "
+		"Set the renderer to OpenGL in the launcher to skip this.\n",
+		PsyX_Backend_GetName(g_grActiveBackend), where);
+#ifdef _WIN32
+	s_relaunchOnGl = 1;
+#endif
+	PsyX_Exit();
+}
+
+void PsyX_Backend_RelaunchAtExit(void)
+{
+#ifdef _WIN32
+	if (!s_relaunchOnGl)
+		return;
+
+	static wchar_t cmd[32768];
+	const wchar_t* self = GetCommandLineW();
+	if (wcslen(self) + 16 >= sizeof(cmd) / sizeof(cmd[0]))
+		return;
+	wcscpy(cmd, self);
+	wcscat(cmd, L" -renderer gl");
+
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+	memset(&si, 0, sizeof(si));
+	si.cb = sizeof(si);
+	if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+		return;
+
+	DWORD code = 0;
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	GetExitCodeProcess(pi.hProcess, &code);
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	ExitProcess(code);
 #endif
 }
