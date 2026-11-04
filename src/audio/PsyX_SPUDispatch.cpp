@@ -66,6 +66,7 @@ int PsyX_SPUSoftware_IsXaDrained();
 void PsyX_SPUSoftware_SetXaMasterGain(double);
 void PsyX_SPUSoftware_SetXaPaused(int);
 u_int PsyX_SPUSoftware_GetQueuedXaFrames();
+int PsyX_SPUSoftware_SetAuxMix(void (*)(void*, short*, u_int, u_int), void*);
 
 #undef DECLARE_BACKEND
 }
@@ -253,6 +254,10 @@ int PsyX_SPUAL_IsXaDrained() { return UseSoftware() ? PsyX_SPUSoftware_IsXaDrain
 void PsyX_SPUAL_SetXaMasterGain(double gain) { if (UseSoftware()) PsyX_SPUSoftware_SetXaMasterGain(gain); }
 void PsyX_SPUAL_SetXaPaused(int paused) { if (UseSoftware()) PsyX_SPUSoftware_SetXaPaused(paused); }
 u_int PsyX_SPUAL_GetQueuedXaFrames() { return UseSoftware() ? PsyX_SPUSoftware_GetQueuedXaFrames() : 0; }
+int PsyX_SPUAL_SetAuxMix(void (*mix)(void*, short*, u_int, u_int), void* user)
+{
+	return UseSoftware() ? PsyX_SPUSoftware_SetAuxMix(mix, user) : 0;
+}
 
 /* Only the software SPU mixes cues. The legacy AL backend has OpenAL sources of
  * its own, which pc_ui_sound.c uses directly, so 0 there says "not handled" and
@@ -276,6 +281,10 @@ int PsyX_AudioIsXaDrained() { return PsyX_SPUAL_IsXaDrained(); }
 void PsyX_AudioSetXaMasterGain(double gain) { PsyX_SPUAL_SetXaMasterGain(gain); }
 void PsyX_AudioSetXaPaused(int paused) { PsyX_SPUAL_SetXaPaused(paused); }
 uint32_t PsyX_AudioGetQueuedXaFrames() { return PsyX_SPUAL_GetQueuedXaFrames(); }
+int PsyX_AudioSetAuxMix(PsyXAudioAuxMix mix, void* user)
+{
+	return PsyX_SPUAL_SetAuxMix((void (*)(void*, short*, u_int, u_int))mix, user);
+}
 
 #undef DISPATCH_RETURN
 #undef DISPATCH_VOID
