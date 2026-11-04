@@ -38,6 +38,11 @@ bool g_initialized = false;
 PsyXAudioConfig g_audioConfig{};
 bool g_audioConfigured = false;
 bool g_xaPaused = false;
+/* The aux mix (PsyX_AudioSetAuxMix): added to each rendered block under the
+ * SPU mutex, so a change of hook never races a block in progress. */
+void (*g_auxMix)(void*, short*, u_int, u_int) = nullptr;
+void* g_auxUser = nullptr;
+uint32_t g_nativeRate = 44100;
 PsyX::RendererMode g_renderer = PsyX::RendererMode::Exact;
 PsyX::ClipMode g_clipMode = PsyX::ClipMode::None;
 PsyXAudioDither g_dither = PSYX_AUDIO_DITHER_NONE;
@@ -172,6 +177,8 @@ uint32_t RenderAudio(void*, int16_t* output, uint32_t frames)
 
     g_spu().RenderFrames(output, static_cast<int>(frames));
     MixUiCue<int16_t>(output, frames, true);
+    if (g_auxMix)
+        g_auxMix(g_auxUser, output, frames, 44100u);
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -206,6 +213,15 @@ uint32_t RenderAudioFloat64(void*, double* output, uint32_t frames)
     }
     g_spu().RenderFramesDouble(output, static_cast<int>(frames));
     MixUiCue<double>(output, frames, false);
+    if (g_auxMix)
+    {
+        /* The doubles carry int16 scale (RenderFramesDouble copies int16 as is). */
+        static std::vector<int16_t> aux;
+        aux.assign(static_cast<size_t>(frames) * 2u, 0);
+        g_auxMix(g_auxUser, aux.data(), frames, g_nativeRate);
+        for (uint32_t i = 0; i < frames * 2u; ++i)
+            output[i] += aux[i];
+    }
     SDL_UnlockMutex(g_spuMutex);
     return frames;
 }
@@ -334,6 +350,7 @@ int PsyX_SPUAL_InitSound()
     }
 
     const uint32_t nativeRate = g_spu().GetNativeSampleRate();
+    g_nativeRate = nativeRate;
     PsyXAudioResult result = g_renderer == PsyX::RendererMode::Exact
         ? PsyX_AudioStart(&g_audioConfig, RenderAudio, nullptr)
         : PsyX_AudioStartFloat64(
@@ -703,6 +720,15 @@ int PsyX_SPUAL_PlayUiCue(const short* samples, u_int frames, int sourceRate, flo
         g_cueGain = (gain > 0.0f) ? gain : 1.0f;
     }
     SDL_UnlockMutex(g_spuMutex);
+    return 1;
+}
+
+int PsyX_SPUAL_SetAuxMix(void (*mix)(void*, short*, u_int, u_int), void* user)
+{
+    if (g_spuMutex) SDL_LockMutex(g_spuMutex);
+    g_auxMix  = mix;
+    g_auxUser = user;
+    if (g_spuMutex) SDL_UnlockMutex(g_spuMutex);
     return 1;
 }
 
