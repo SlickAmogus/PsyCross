@@ -272,6 +272,10 @@ extern int PsyX_RawControllerBindHeld(int buttonOrAxis);
 /* The picture's rect in render pixels (pillarbox rule included), from the
  * current display flags rather than the last GL_VIEWPORT. */
 extern void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* outH);
+/* Wide native menus: set g_PsxWideMenu while one is up; the 2D ortho then
+ * spans -margin..320+margin and the window is used whole. */
+extern int   g_PsxWideMenu;
+extern float PsyX_WideMenuMargin(void);
 extern const char* PsyX_Pad_ConnectedControllerName(void);
 extern int         PsyX_Pad_ConnectedControllerType(void);
 extern const char* PsyX_Pad_HeldBindName(void);
