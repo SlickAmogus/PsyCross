@@ -201,6 +201,15 @@ void PsyX_AudioSetXaMasterGain(double gain);
 void PsyX_AudioSetXaPaused(int paused);
 uint32_t PsyX_AudioGetQueuedXaFrames(void);
 
+/* Software SPU only: a stereo mix added to every rendered block, for sounds
+ * with no SPU voice of their own (the co-op voice clips). Called on the audio
+ * thread with the block just rendered, int16 interleaved stereo at
+ * sample_rate; the hook adds into it and clips. Returns 1 when the software
+ * SPU renders (the hook will run), 0 under the legacy backend. NULL clears. */
+typedef void (*PsyXAudioAuxMix)(void* user, int16_t* interleaved_stereo,
+	uint32_t frame_count, uint32_t sample_rate);
+int PsyX_AudioSetAuxMix(PsyXAudioAuxMix mix, void* user);
+
 #if defined(_LANGUAGE_C_PLUS_PLUS) || defined(__cplusplus) || defined(c_plusplus)
 }
 #endif
