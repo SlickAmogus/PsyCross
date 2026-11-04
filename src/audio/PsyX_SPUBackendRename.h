@@ -57,3 +57,4 @@
 #define PsyX_SPUAL_SetXaMasterGain PSYX_SPUAL_BACKEND_NAME(SetXaMasterGain)
 #define PsyX_SPUAL_SetXaPaused PSYX_SPUAL_BACKEND_NAME(SetXaPaused)
 #define PsyX_SPUAL_GetQueuedXaFrames PSYX_SPUAL_BACKEND_NAME(GetQueuedXaFrames)
+#define PsyX_SPUAL_SetAuxMix PSYX_SPUAL_BACKEND_NAME(SetAuxMix)
