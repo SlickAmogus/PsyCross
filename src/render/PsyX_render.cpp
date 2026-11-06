@@ -288,6 +288,12 @@ int g_PcHorPlusEnabled = 1;
  * from g_PcConfig.menuPillarbox in main_pc.c. Default on. */
 int g_PcMenuPillarbox = 1;
 
+/* Set by the game while a native menu that lays itself out for the window's
+ * aspect is up (Character Select): the 2D ortho widens as Hor+ does and the
+ * pillarbox is skipped, so prims past 0..320 show. Not under native render,
+ * whose target has no columns to spare. */
+extern "C" int g_PsxWideMenu = 0;
+
 /* Widescreen presentation mode for 3D gameplay (only used when g_PcHorPlusEnabled=1):
  *   0 = Pillarbox (PSX-faithful): render 4:3 content centered in a 16:9 frame
  *       with black bars on the sides. Characters and scene framing identical to
@@ -1000,7 +1006,7 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 
 	if (wantPillarbox && s_internalW > 0 && s_internalH > 0 && h > 0)
 	{
@@ -2152,6 +2158,8 @@ static GLuint g_shadowFBO = 0;
 static GLuint g_shadowDepthTex = 0;
 static ShaderID g_shadowDepthShader = (ShaderID)-1;
 static GLint g_shadowDepthMatrixLoc = -1;
+static GLint g_shadowDepthModeLoc = -1, g_shadowDepthFmtLoc = -1, g_shadowDepthSemiLoc = -1;
+static GLint g_shadowDepthTexelLoc = -1, g_shadowDepthOffsetLoc = -1;
 static float g_shadowLightMatrix[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
 
 float g_PsyX_FogColor[3] = { 0.0f, 0.0f, 0.0f };
@@ -4736,7 +4744,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	/* Menus are NOT excluded any more. They used to be, on the grounds that a
 	 * black clear leaves black bars anyway -- but the fall-through path at the
 	 * bottom runs with the PSX clip-rect SCISSOR still enabled, so its clear is
@@ -4790,6 +4798,23 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 extern "C" float GR_LivePixelAspect(void)
 {
 	return (float)PSX_NTSC_PIXEL_ASPECT;
+}
+
+/* Columns the wide-menu ortho adds on each side of 0..320 for this window,
+ * 0 when the picture is 4:3 or narrower or under native render. */
+extern "C" float PsyX_WideMenuMargin(void)
+{
+	const float psxW = (float)activeDispEnv.disp.w;
+	const float psxH = (float)activeDispEnv.disp.h;
+	float winAspect, horScale;
+
+	if (g_PcNativeRender || psxW <= 0.0f || psxH <= 0.0f || g_windowHeight <= 0)
+		return 0.0f;
+	winAspect = (float)g_windowWidth / (float)g_windowHeight;
+	horScale  = winAspect / (psxW / psxH);
+	if (horScale <= 1.0f)
+		return 0.0f;
+	return psxW * (horScale * (float)PSX_NTSC_PIXEL_ASPECT - 1.0f) * 0.5f;
 }
 
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
@@ -5111,7 +5136,7 @@ extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* ou
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -5150,7 +5175,7 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -5344,11 +5369,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			const float hs43   = (!g_PsxAspectRaw) ? 1.0f
 			                   : ((g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f);
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
-			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
+			if ((!g_PcHorPlusEnabled && !(g_PsxWideMenu && !g_PcNativeRender)) || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
 				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
-			} else if (g_PcWidescreenMode == 1) {
+			} else if (g_PcWidescreenMode == 1 || !g_PcHorPlusEnabled) {
 				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
 				 * preserves 1 H px = 1 V px scaling for character proportions. */
 				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
@@ -5356,7 +5381,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				/* hfov: scale the horizontal world extent around center (g_PsxWorldHScale).
 				 * 1.0 = identity (-margin..psxW+margin); >1 shrinks the ortho width = wider
 				 * models. Skipped for the UI pass so 2D UI stays aligned. */
-				const float hscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldHScale;
+				const float hscale = (g_PsxUIOrthoPass || !g_PcHorPlusEnabled) ? 1.0f : g_PsxWorldHScale;
 				const float cx     = psxW * 0.5f;
 				const float halfW  = (psxW * 0.5f + margin) / hscale;
 				fbOrthoL = cx - halfW;
@@ -5414,7 +5439,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				int dbgVpW = g_windowWidth, dbgVpX = 0;
 				const bool dbgPillar =
 					(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-					(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+					(!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu);
 				if (dbgPillar && g_windowHeight > 0 && winAspect > psxAspect) {
 					dbgVpW = (int)(g_windowHeight * psxAspect + 0.5f);
 					dbgVpX = (g_windowWidth - dbgVpW) / 2;
@@ -5453,7 +5478,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			const bool wantPillarbox =
 				!g_PcNativeRender &&
 				((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 			if (wantPillarbox && g_windowHeight > 0) {
 				const float psxAspect = 4.0f / 3.0f;
 				const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -6000,18 +6025,62 @@ void GR_PostProcess(void) {}
  * ---------------------------------------------------------------------- */
 #if USE_OPENGL
 
+/* Casters are alpha-tested against their own texture so cut-out art (fences,
+ * grates, foliage) leaves holes in the shadow. Same decode as the lit shader:
+ * VRAM word 0 is a hole on any prim; on a semi-transparent prim a texel with
+ * STP set is blended on the PS1, not solid, so it casts nothing either.
+ * u_smode: 0 = VRAM in the split's format (u_sfmt), 1 = VRAM with the format
+ * in each vertex (mixed program), 2 = hi-res RGBA override. */
 static const char* s_shadowDepthShaderSrc =
+	"varying vec4 v_texcoord;\n"
+	"varying vec4 v_page_clut;\n"
+	"varying float v_texfmt;\n"
+	"varying float v_untex;\n"
 	"#ifdef VERTEX\n"
+	"attribute vec4 a_position;\n"
+	"attribute vec4 a_texcoord;\n"
+	"attribute vec4 a_extra;\n"
 	"attribute vec3 a_viewpos;\n"
 	"attribute vec3 a_normal;\n"
 	"uniform mat4 u_shadowMatrix;\n"
+	"uniform int u_smode;\n"
+	"uniform float u_sfmt;\n"
 	"void main() {\n"
-	/* a_normal.y marks a validated view-space entry; a_normal.x suppresses casting. */
+	/* a_normal.y marks a validated view-space entry; a_normal.x > 0.5 suppresses casting. */
 	"	if (a_normal.y < 0.5 || a_viewpos.z <= 0.0 || a_normal.x > 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }\n"
 	"	gl_Position = u_shadowMatrix * vec4(a_viewpos, 1.0);\n"
+	"	v_texcoord = a_texcoord;\n"
+	"	v_texcoord.xy += a_extra.xy * 0.5;\n"
+	"	float pageXY = mod(a_position.z, 32.0);\n"
+	"	float fmt = floor(a_position.z / 32.0);\n"
+	"	v_untex = (fmt > 3.5) ? 1.0 : 0.0;\n"
+	"	v_texfmt = (u_smode == 1) ? fmt : u_sfmt;\n"
+	"	v_page_clut.x = fract(pageXY / 16.0) * 1024.0 + 0.00025;\n"
+	"	v_page_clut.y = floor(pageXY / 16.0) * 256.0 + 0.00025;\n"
+	"	v_page_clut.z = fract(a_position.w / 64.0) + 0.00025;\n"
+	"	v_page_clut.w = floor(a_position.w / 64.0) / 512.0 + 0.00025;\n"
 	"}\n"
 	"#else\n"
-	"void main() { }\n"
+	GPU_FETCH_VRAM_FUNC
+	"	const vec2 c_VRAMTexel = vec2(1.0 / 1024.0, 1.0 / 512.0);\n"
+	GPU_ARRAY_FUNC
+	GPU_SAMPLE_TEXTURE_MIX_FUNC
+	"uniform int u_smode;\n"
+	"uniform int u_semi;\n"
+	"uniform vec2 u_texelSize;\n"
+	"uniform vec2 u_texOffset;\n"
+	"void main() {\n"
+	"	if (v_untex > 0.5) { if (u_semi > 0) discard; fragColor = vec4(0.0); return; }\n"
+	"	if (u_smode == 2) {\n"
+	"		float a = texture2D(s_texture, (v_texcoord.xy + u_texOffset) * u_texelSize).a;\n"
+	"		if (a < 0.5 || (u_semi > 0 && a < 0.99)) discard;\n"
+	"	} else {\n"
+	"		vec2 rg = samplePSX(v_texcoord.xy);\n"
+	"		if (rg.x + rg.y == 0.0) discard;\n"
+	"		if (u_semi > 0 && rg.y * 255.0 > 127.5) discard;\n"
+	"	}\n"
+	"	fragColor = vec4(0.0);\n"
+	"}\n"
 	"#endif\n";
 
 static void sh_normalize3(float* v)
@@ -6167,6 +6236,11 @@ static void GR_EnsureShadowTarget(void)
 	{
 		g_shadowDepthShader = GR_Shader_Compile(s_shadowDepthShaderSrc);
 		g_shadowDepthMatrixLoc = glGetUniformLocation(g_shadowDepthShader, "u_shadowMatrix");
+		g_shadowDepthModeLoc   = glGetUniformLocation(g_shadowDepthShader, "u_smode");
+		g_shadowDepthFmtLoc    = glGetUniformLocation(g_shadowDepthShader, "u_sfmt");
+		g_shadowDepthSemiLoc   = glGetUniformLocation(g_shadowDepthShader, "u_semi");
+		g_shadowDepthTexelLoc  = glGetUniformLocation(g_shadowDepthShader, "u_texelSize");
+		g_shadowDepthOffsetLoc = glGetUniformLocation(g_shadowDepthShader, "u_texOffset");
 	}
 }
 
@@ -6254,6 +6328,31 @@ void GR_ShadowPassBegin(void)
 	glUseProgram(g_shadowDepthShader);
 	if (g_shadowDepthMatrixLoc != -1)
 		glUniformMatrix4fv(g_shadowDepthMatrixLoc, 1, GL_FALSE, g_shadowLightMatrix);
+	glActiveTexture(GL_TEXTURE0);
+	g_lastBoundTexture = (TextureID)-1;
+}
+
+void GR_ShadowPassSplit(TextureID texture, TexFormat texFormat, int mixed, int semi,
+                        int nativeW, int nativeH, int offsetX, int offsetY)
+{
+	const int   mode = (texFormat == TF_32_BIT_RGBA) ? 2 : (mixed ? 1 : 0);
+	const float fmt  = (texFormat == TF_4_BIT) ? 0.0f : (texFormat == TF_8_BIT) ? 1.0f : 2.0f;
+
+	if (g_lastBoundTexture != texture)
+	{
+		glBindTexture(GL_TEXTURE_2D, texture);
+		g_lastBoundTexture = texture;
+	}
+	glUniform1i(g_shadowDepthModeLoc, mode);
+	glUniform1f(g_shadowDepthFmtLoc, fmt);
+	glUniform1i(g_shadowDepthSemiLoc, semi ? 1 : 0);
+	if (mode == 2)
+	{
+		float ts[2]  = { 1.0f / (float)(nativeW > 0 ? nativeW : 1), 1.0f / (float)(nativeH > 0 ? nativeH : 1) };
+		float ofs[2] = { (float)offsetX, (float)offsetY };
+		glUniform2fv(g_shadowDepthTexelLoc, 1, ts);
+		glUniform2fv(g_shadowDepthOffsetLoc, 1, ofs);
+	}
 }
 
 void GR_ShadowPassDraw(int startVertex, int numVerts)
@@ -6286,6 +6385,9 @@ void GR_ShadowPassEnd(void)
 int  GR_FlashlightShadowActive(void) { return 0; }
 void GR_ShadowPassBegin(void) {}
 void GR_ShadowPassDraw(int startVertex, int numVerts) { (void)startVertex; (void)numVerts; }
+void GR_ShadowPassSplit(TextureID texture, TexFormat texFormat, int mixed, int semi,
+                        int nativeW, int nativeH, int offsetX, int offsetY)
+{ (void)texture; (void)texFormat; (void)mixed; (void)semi; (void)nativeW; (void)nativeH; (void)offsetX; (void)offsetY; }
 void GR_ShadowPassEnd(void) {}
 #endif
 
