@@ -362,6 +362,12 @@ int g_PcHorPlusEnabled = 1;
  * from g_PcConfig.menuPillarbox in main_pc.c. Default on. */
 int g_PcMenuPillarbox = 1;
 
+/* Set by the game while a native menu that lays itself out for the window's
+ * aspect is up (Character Select): the 2D ortho widens as Hor+ does and the
+ * pillarbox is skipped, so prims past 0..320 show. Not under native render,
+ * whose target has no columns to spare. */
+extern "C" int g_PsxWideMenu = 0;
+
 /* Widescreen presentation mode for 3D gameplay (only used when g_PcHorPlusEnabled=1):
  *   0 = Pillarbox (PSX-faithful): render 4:3 content centered in a 16:9 frame
  *       with black bars on the sides. Characters and scene framing identical to
@@ -1142,7 +1148,7 @@ static void GR_PresentRect(int* outX, int* outY, int* outW, int* outH)
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 
 	if (wantPillarbox && s_internalW > 0 && s_internalH > 0 && h > 0)
 	{
@@ -4995,7 +5001,7 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	/* Menus are NOT excluded any more. They used to be, on the grounds that a
 	 * black clear leaves black bars anyway -- but the fall-through path at the
 	 * bottom runs with the PSX clip-rect SCISSOR still enabled, so its clear is
@@ -5049,6 +5055,23 @@ void GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned char g, unsi
 extern "C" float GR_LivePixelAspect(void)
 {
 	return (float)PSX_NTSC_PIXEL_ASPECT;
+}
+
+/* Columns the wide-menu ortho adds on each side of 0..320 for this window,
+ * 0 when the picture is 4:3 or narrower or under native render. */
+extern "C" float PsyX_WideMenuMargin(void)
+{
+	const float psxW = (float)activeDispEnv.disp.w;
+	const float psxH = (float)activeDispEnv.disp.h;
+	float winAspect, horScale;
+
+	if (g_PcNativeRender || psxW <= 0.0f || psxH <= 0.0f || g_windowHeight <= 0)
+		return 0.0f;
+	winAspect = (float)g_windowWidth / (float)g_windowHeight;
+	horScale  = winAspect / (psxW / psxH);
+	if (horScale <= 1.0f)
+		return 0.0f;
+	return psxW * (horScale * (float)PSX_NTSC_PIXEL_ASPECT - 1.0f) * 0.5f;
 }
 
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
@@ -5370,7 +5393,7 @@ extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* ou
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -5401,7 +5424,7 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 	const bool wantPillarbox =
 		!g_PcNativeRender &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -5595,11 +5618,11 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			const float hs43   = (!g_PsxAspectRaw) ? 1.0f
 			                   : ((g_PcHorPlusEnabled && !g_PsxUIOrthoPass) ? g_PsxWorldHScale : 1.0f);
 			const float half43 = (psxW * 0.5f) / ((hs43 > 0.0f) ? hs43 : 1.0f);
-			if (!g_PcHorPlusEnabled || horScale <= 1.0f) {
+			if ((!g_PcHorPlusEnabled && !(g_PsxWideMenu && !g_PcNativeRender)) || horScale <= 1.0f) {
 				/* 2D UI or non-widescreen window: 4:3 ortho, full viewport. */
 				if (hs43 != 1.0f) { fbOrthoL = psxW * 0.5f - half43; fbOrthoR = psxW * 0.5f + half43; }
 				GR_Ortho2D(fbOrthoL, fbOrthoR, orthoBot, orthoTop, -1.0f, 1.0f);
-			} else if (g_PcWidescreenMode == 1) {
+			} else if (g_PcWidescreenMode == 1 || !g_PcHorPlusEnabled) {
 				/* Hor+ widescreen: widen ortho, full-window viewport. PSX_NTSC_PIXEL_ASPECT
 				 * preserves 1 H px = 1 V px scaling for character proportions. */
 				const float effectiveScale = horScale * PSX_NTSC_PIXEL_ASPECT;
@@ -5607,7 +5630,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				/* hfov: scale the horizontal world extent around center (g_PsxWorldHScale).
 				 * 1.0 = identity (-margin..psxW+margin); >1 shrinks the ortho width = wider
 				 * models. Skipped for the UI pass so 2D UI stays aligned. */
-				const float hscale = g_PsxUIOrthoPass ? 1.0f : g_PsxWorldHScale;
+				const float hscale = (g_PsxUIOrthoPass || !g_PcHorPlusEnabled) ? 1.0f : g_PsxWorldHScale;
 				const float cx     = psxW * 0.5f;
 				const float halfW  = (psxW * 0.5f + margin) / hscale;
 				fbOrthoL = cx - halfW;
@@ -5671,7 +5694,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				int dbgVpW = g_windowWidth, dbgVpX = 0;
 				const bool dbgPillar =
 					(g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-					(!g_PcHorPlusEnabled && g_PcMenuPillarbox);
+					(!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu);
 				if (dbgPillar && g_windowHeight > 0 && winAspect > psxAspect) {
 					dbgVpW = (int)(g_windowHeight * psxAspect + 0.5f);
 					dbgVpX = (g_windowWidth - dbgVpW) / 2;
@@ -5710,7 +5733,7 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 			const bool wantPillarbox =
 				!g_PcNativeRender &&
 				((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
+				 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
 			if (wantPillarbox && g_windowHeight > 0) {
 				const float psxAspect = 4.0f / 3.0f;
 				const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
