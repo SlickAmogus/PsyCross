@@ -3075,9 +3075,19 @@ int g_PsxFogToBlack = 0;
 	/* v_fade >= 2 marks the player's own body (game side, +2 on his fade). His
 	 * flashlight sits on his chest, so nothing of him behind that point can be in
 	 * its beam; the classic style's pulled-back origin and the wide sized cones
-	 * otherwise reach his head and shoulders. */\
+	 * otherwise reach his head and shoulders. Nor can a face of his that turns
+	 * away from the light: Classic has no N.L at all and Modern keeps 15% of the
+	 * beam on back faces, which lit the backs of his legs from his own chest.
+	 * The visible face of a closed body faces the camera, hence the flip. */\
 	"				float flFade = v_fade;\n"\
-	"				if (flFade > 1.5) { flFade -= 2.0; cone *= smoothstep(0.0, 16.0, dot(flP - u_flLightPos, flDir)); }\n"\
+	"				if (flFade > 1.5) {\n"\
+	"					flFade -= 2.0;\n"\
+	"					vec3 selfN = cross(dFdx(flP), dFdy(flP));\n"\
+	"					float selfLen = length(selfN);\n"\
+	"					selfN = (selfLen > 1e-9) ? selfN / selfLen : L;\n"\
+	"					if (dot(selfN, flP) > 0.0) selfN = -selfN;\n"\
+	"					cone *= smoothstep(0.0, 16.0, dot(flP - u_flLightPos, flDir)) * smoothstep(0.0, 0.25, dot(selfN, L));\n"\
+	"				}\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
 	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(flFade, 0.0, 1.0));\n"\
 	"			}\n"\
