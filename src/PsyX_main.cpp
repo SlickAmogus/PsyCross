@@ -974,8 +974,8 @@ void PsyX_GetScreenSize(int* screenWidth, int* screenHeight)
 /* Detected here rather than via PSYX_IOS: nothing this file includes reaches
  * PsyX_render.h, so that macro is not defined in this translation unit and the
  * branch would silently never be taken. TargetConditionals comes in through
- * platform.h. */
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+ * platform.h. The web build's window is ALLOW_HIGHDPI as well. */
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__EMSCRIPTEN__)
 	/* SDL_GetWindowSize reports POINTS. With SDL_WINDOW_ALLOW_HIGHDPI the
 	 * drawable is PIXELS — 3x larger on a modern iPhone — and everything that
 	 * consumes this function works in that pixel space: glViewport, and
@@ -999,10 +999,10 @@ void PsyX_GetScreenSize(int* screenWidth, int* screenHeight)
  * a third of its true position: touch the centre of the menu, watch the cursor
  * appear up in the top-left corner.
  *
- * No-op off iOS, where window and drawable already agree. */
+ * No-op off iOS and the web, where window and drawable already agree. */
 extern "C" void PsyX_ScaleWindowToDrawable(int* x, int* y)
 {
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+#if (defined(__APPLE__) && TARGET_OS_IPHONE) || defined(__EMSCRIPTEN__)
 	int winW = 0, winH = 0;
 
 	SDL_GetWindowSize(g_window, &winW, &winH);
