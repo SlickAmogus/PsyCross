@@ -470,6 +470,9 @@ extern void			GR_DrawTriangles(int start_vertex, int triangles);
 extern int			GR_FlashlightShadowActive(void);
 extern void			GR_ShadowPassBegin(void);
 extern void			GR_ShadowPassDraw(int start_vertex, int num_verts);
+/* Binds one caster split's texture and cut-out rule for the draws that follow. */
+extern void			GR_ShadowPassSplit(TextureID texture, TexFormat texFormat, int mixed, int semi,
+				                   int nativeW, int nativeH, int offsetX, int offsetY);
 extern void			GR_ShadowPassEnd(void);
 
 extern void			GR_PushDebugLabel(const char* label);

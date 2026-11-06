@@ -178,6 +178,11 @@ extern "C" void Shadow_Store(void* addr, float x, float y, float w, unsigned val
  * off the object up close in first person — acceptable; shadows have their own
  * on/off, and it isn't noticeable at third-person camera distances.) */
 extern "C" int g_PsyX_NoShadowCast = 0;
+/* Set by the game around its world-mesh drawers. Those vertices carry nx = -1,
+ * which lets a SEMI-TRANSPARENT world surface (a fence, a grate) cast from the
+ * texels the PS1 draws solid. Particles and effects never set it, so a muzzle
+ * flash or a blood spray stays out of the shadow map as before. */
+extern "C" int g_PsyX_SemiShadowCast = 0;
 extern "C" float g_PsyX_CharaFade = 0.0f;
 
 /* Like the PGXP ShadowEntry, each entry records the packed integer `value` of the
@@ -236,7 +241,7 @@ static const VsEntry* Vs_Get(const void* addr, unsigned value) {
  * fired when g_PsyX_UsePerPixelFlashlight). The packed vertex word is already at
  * addr when the hook fires (same contract as PGXP's Shadow_Store). */
 extern "C" void VShadow_Store(void* addr, float vx, float vy, float vz, float ofx, float ofy, float h) {
-	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : 0.0f, *(const unsigned*)addr, ofx, ofy, h,
+	Vs_Put(addr, vx, vy, vz, g_PsyX_NoShadowCast ? 1.0f : (g_PsyX_SemiShadowCast ? -1.0f : 0.0f), *(const unsigned*)addr, ofx, ofy, h,
 	       g_PsyX_CharaFade);
 }
 
@@ -3537,11 +3542,13 @@ void DrawSplit(const GPUDrawSplit& split, int splitIndex = -1)
 
 extern int g_dbg_polygonSelected;
 
-static bool ShadowTriangleCanCast(const GrVertex* vertex)
+static bool ShadowTriangleCanCast(const GrVertex* vertex, bool semi)
 {
 	for (int i = 0; i < 3; i++)
 	{
 		if (vertex[i].ny < 0.5f || vertex[i].nx > 0.5f || !(vertex[i].vsz > 0.0f))
+			return false;
+		if (semi && vertex[i].nx > -0.5f)
 			return false;
 		/* Geometry sanity, not just provenance: !(vsz>0) rejects NaN but +inf
 		 * passes it, and vsx/vsy were never checked. One non-finite/huge caster
@@ -3568,29 +3575,34 @@ static bool ShadowTriangleCanCast(const GrVertex* vertex)
  * the world batch nor disturbs GL state. The map therefore always holds the
  * last world batch, which is what the lit shader samples on frames that do
  * not rebuild it. */
+static void ShadowCasterRun(const GPUDrawSplit& split, bool semi, bool& passBegun, int first, int count)
+{
+	if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
+	GR_ShadowPassSplit(split.textureId, split.texFormat, split.mixed, semi,
+	                   split.drawenv.tw.w, split.drawenv.tw.h, split.drawenv.tw.x, split.drawenv.tw.y);
+	GR_ShadowPassDraw(split.startVertex + first, count);
+}
+
 static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 {
+	const bool semi = (split.blendMode != BM_NONE);
 	int runStart = -1;
 	for (int offset = 0; offset + 2 < split.numVerts; offset += 3)
 	{
-		if (ShadowTriangleCanCast(&g_vertexBuffer[split.startVertex + offset]))
+		if (ShadowTriangleCanCast(&g_vertexBuffer[split.startVertex + offset], semi))
 		{
 			if (runStart < 0)
 				runStart = offset;
 		}
 		else if (runStart >= 0)
 		{
-			if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
-			GR_ShadowPassDraw(split.startVertex + runStart, offset - runStart);
+			ShadowCasterRun(split, semi, passBegun, runStart, offset - runStart);
 			runStart = -1;
 		}
 	}
 
 	if (runStart >= 0)
-	{
-		if (!passBegun) { GR_ShadowPassBegin(); passBegun = true; }
-		GR_ShadowPassDraw(split.startVertex + runStart, split.numVerts - runStart);
-	}
+		ShadowCasterRun(split, semi, passBegun, runStart, split.numVerts - runStart);
 }
 
 //
@@ -3638,15 +3650,16 @@ void DrawAllSplits()
 		g_PsyX_UsVbo += PsyX_PerfUs() - t0;
 	}
 
-	/* Flashlight shadow map: depth-only pre-pass over the OPAQUE splits from the
-	 * light POV, into the shadow FBO, while the frame VAO is still bound. Only
-	 * BM_NONE (opaque) casts — every semi-transparent mode is skipped so effects
-	 * don't throw hard shadows: additive/subtractive (fire, blood) AND the 50/50
-	 * BM_AVERAGE the PC muzzle flash uses (a quad at the muzzle, right next to the
-	 * close flashlight, was flashing a huge gun/magazine silhouette on the wall
-	 * for the frame or two it existed). Caster eligibility is checked per
-	 * triangle so an invalid or suppressed vertex cannot stretch the remaining
-	 * vertices into a false shadow. */
+	/* Flashlight shadow map: depth pre-pass from the light POV, into the shadow
+	 * FBO, while the frame VAO is still bound. The depth shader samples each
+	 * caster's texture and drops its holes, so a fence or a grate throws its
+	 * pattern rather than a solid slab. Opaque splits cast every textured texel
+	 * the screen shows. Semi-transparent splits cast only from world meshes
+	 * (nx == -1, g_PsyX_SemiShadowCast) and only from the texels the PS1 draws
+	 * solid (STP clear): effects stay out -- additive fire and blood, and the
+	 * BM_AVERAGE muzzle flash that once flashed a gun silhouette on the wall.
+	 * Caster eligibility is checked per triangle so an invalid or suppressed
+	 * vertex cannot stretch the remaining vertices into a false shadow. */
 	if (GR_FlashlightShadowActive())
 	{
 		bool passBegun = false;
@@ -3655,7 +3668,7 @@ void DrawAllSplits()
 			const GPUDrawSplit& s = g_splits[i];
 			if (s.kind != GPU_SPLIT_LEGACY || s.numVerts < 3)
 				continue;
-			if (s.blendMode != BM_NONE)
+			if (s.fbScreen)
 				continue;
 			DrawShadowCasters(s, passBegun);
 		}
