@@ -3091,8 +3091,15 @@ int g_PsxFogToBlack = 0;
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
+	/* v_fade >= 2 marks the player's own body (game side, +2 on his fade). His
+	 * flashlight sits on his chest, so nothing of him behind that point can be in
+	 * its beam; the classic style's pulled-back origin and the wide sized cones
+	 * otherwise reach his head and shoulders. The backs of his legs facing away
+	 * from the beam stay lit on purpose: the PSX lights them too. */\
+	"				float flFade = v_fade;\n"\
+	"				if (flFade > 1.5) { flFade -= 2.0; cone *= smoothstep(0.0, 16.0, dot(flP - u_flLightPos, flDir)); }\n"\
 	"				vec3 fl = u_flColor * (cone * atten * ndl * shadow);\n"\
-	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(v_fade, 0.0, 1.0));\n"\
+	"				fragColor.rgb += flAlbedo * fl * (1.0 - clamp(flFade, 0.0, 1.0));\n"\
 	"			}\n"\
 	"		}\n"\
 	/* Other players' flashlights: the modern cone without shadows, added on top\
