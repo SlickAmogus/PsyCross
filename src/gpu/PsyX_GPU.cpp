@@ -3077,6 +3077,20 @@ static void PgxpNearClipReproject(GrVertex* v, float ofsX, float ofsY)
  * 6 -> 12 verts (each straddling triangle yields up to 2). */
 static int PgxpNearClipEmit(GrVertex* v, int count)
 {
+	/* A fully tracked polygon wholly behind the clip plane has no visible
+	 * fragment. The straddler-only eligibility test below used to pass it
+	 * through unchanged: MakeVertex had already fallen back to affine, so GTE
+	 * saturated coordinates painted a screen-space quad from behind the eye.
+	 * Keep explicitly affine materials and untracked/UI packets unchanged. */
+	if (g_PsxUsePgxp && g_PsxPgxpNearClip && !s_curPgxpAffine && count > 0)
+	{
+		bool whollyBehind = true;
+		for (int i = 0; i < count; i++)
+			if (v[i].ny < 0.5f || v[i].vsz >= g_PgxpNearZ)
+				whollyBehind = false;
+		if (whollyBehind)
+			return 0;
+	}
 	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
 		return count;
 
