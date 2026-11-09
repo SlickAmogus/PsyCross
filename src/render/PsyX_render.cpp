@@ -2978,7 +2978,12 @@ int g_PsxFogToBlack = 0;
 	"	vec3 PpHero(vec3 m, vec3 Nout) {\n"\
 	"		float h = max(dot(Nout, u_ppHero.xyz), 0.0);\n"\
 	"		float lum = dot(m, vec3(0.299, 0.587, 0.114));\n"\
-	"		return m * mix(1.0, 0.6 + 0.7 * h, u_ppHero.w) + vec3(u_ppHero.w * 0.45 * h * max(1.0 - lum, 0.0));\n"\
+	/* Character lighting already contains the game's fade, but the added fill
+	 * does not. Do not relight a disappearing character. The +2 marker belongs
+	 * to Harry and must not make his ordinary body fade out. */\
+	"		float fade = (v_fade > 1.5) ? v_fade - 2.0 : v_fade;\n"\
+	"		float fill = u_ppHero.w * (1.0 - clamp(fade, 0.0, 1.0));\n"\
+	"		return m * mix(1.0, 0.6 + 0.7 * h, u_ppHero.w) + vec3(fill * 0.45 * h * max(1.0 - lum, 0.0));\n"\
 	"	}\n"\
 	"	vec3 PpDivide(vec3 d, float b) {\n"\
 	"		float sz = clamp(dot(d, d) / 4096.0, 8.0, 65535.0);\n"\
