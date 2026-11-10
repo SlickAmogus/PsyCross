@@ -3195,6 +3195,57 @@ static inline bool PsxTriOversized(const GrVertex* v)
 	return (mxx - mnx) > 1023 || (mxy - mny) > 511;
 }
 
+/* What a frame asked of the renderer, summed for the game's [PERF] line and
+ * zeroed by it. A slow window used to say only how long it took; these say
+ * whether it was many draw calls, many texture binds, or a few triangles
+ * covering the screen many times over. Counting only: nothing reads them
+ * back into the frame. */
+extern "C" {
+	unsigned int g_PsxPerfSplits, g_PsxPerfBinds, g_PsxPerfFilterSets, g_PsxPerfTris, g_PsxPerfBigTris;
+	unsigned int g_PsxPerfCharaVerts, g_PsxPerfFrames;
+	double       g_PsxPerfCover;      /* screens of triangle area, all frames */
+	double       g_PsxPerfCoverWorst; /* the same for the heaviest single frame */
+	unsigned int g_PsxPerfFrameId;
+}
+static double s_perfCoverFrame;
+
+extern "C" void PsyX_PerfFrameEnd(void)
+{
+	if (s_perfCoverFrame > g_PsxPerfCoverWorst)
+		g_PsxPerfCoverWorst = s_perfCoverFrame;
+	g_PsxPerfCover += s_perfCoverFrame;
+	s_perfCoverFrame = 0.0;
+	g_PsxPerfFrames++;
+	g_PsxPerfFrameId++;
+}
+
+/* A triangle's share of the screen, from its bounding box clipped to a
+ * generous view (PSX units; half the box is the triangle). Precise vertices
+ * are bounded only by the guard band, so one near the camera can span the
+ * whole target many times: the affine path's size rule never sees those. */
+static inline void PerfCountTri(const GrVertex* v)
+{
+	float mnx = 1e9f, mxx = -1e9f, mny = 1e9f, mxy = -1e9f;
+
+	for (int i = 0; i < 3; i++)
+	{
+		const float x = v[i].ppw > 0.0f ? v[i].ppx : (float)v[i].x;
+		const float y = v[i].ppw > 0.0f ? v[i].ppy : (float)v[i].y;
+		if (x < mnx) mnx = x;
+		if (x > mxx) mxx = x;
+		if (y < mny) mny = y;
+		if (y > mxy) mxy = y;
+	}
+	float w = mxx - mnx, h = mxy - mny;
+
+	g_PsxPerfTris++;
+	if (w > 1023.0f || h > 511.0f)
+		g_PsxPerfBigTris++;
+	if (w > 448.0f) w = 448.0f;
+	if (h > 240.0f) h = 240.0f;
+	s_perfCoverFrame += (double)(w * h) * 0.5 / (320.0 * 240.0);
+}
+
 /* Emit one 3D poly's freshly built triangle list: near-clip when eligible,
  * then the PSX size rule on whatever stayed affine. Returns the vertex count
  * g_vertexIndex advances by. The size rule runs ONLY when the whole poly is on
@@ -3206,6 +3257,9 @@ static inline bool PsxTriOversized(const GrVertex* v)
 static int PgxpEmitPoly(GrVertex* v, int count)
 {
 	count = PgxpNearClipEmit(v, count);
+
+	for (int tri = 0; tri + 2 < count; tri += 3)
+		PerfCountTri(&v[tri]);
 
 	if (!g_PsxPolySizeCull || g_PsxWholeMapFar)
 		return count;
@@ -3407,6 +3461,8 @@ static bool s_itemTransparencyPass = false;
 void DrawSplit(const GPUDrawSplit& split, int splitIndex = -1)
 {
 	const bool isAdditive = (split.blendMode == BM_ADD || split.blendMode == BM_ADD_QUATER_SOURCE);
+
+	g_PsxPerfSplits++;
 
 	if (g_PsxDbgAddMode == 0 && isAdditive)
 		return;
