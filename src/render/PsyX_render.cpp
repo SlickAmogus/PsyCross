@@ -7893,14 +7893,20 @@ void GR_DiagGLError(const char* where)
  * no timer query without an extension, ANGLE goes through its own swap). */
 double g_PsyX_GpuMsSum;
 int    g_PsyX_GpuMsCount;
+/* Samples that passed the depth test, swap to swap, on the same ring. The
+ * game's cover figure is bounding boxes on paper; this is what the card was
+ * really made to shade, which is the only way to tell a frame that is slow
+ * because it paints the screen fifty times from one that is slow for another
+ * reason. */
+double g_PsyX_GpuSamplesSum;
 int    g_PsyX_GpuTimerWanted; /* set by the game while it keeps a log; nothing runs otherwise */
 
 static void GR_GpuTimerFrame(int beforeSwap)
 {
 	typedef void (APIENTRY *GetQueryU64)(GLuint, GLenum, unsigned long long*);
-	enum { N = 4, TIME_ELAPSED = 0x88BF };
+	enum { N = 4, TIME_ELAPSED = 0x88BF, SAMPLES_PASSED = 0x8914 };
 	static int         s_ok = -1, s_open, s_next, s_pending[N];
-	static GLuint      s_q[N];
+	static GLuint      s_q[N], s_qs[N];
 	static GetQueryU64 s_get;
 	int i;
 
@@ -7916,6 +7922,7 @@ static void GR_GpuTimerFrame(int beforeSwap)
 			if (s_get != NULL)
 			{
 				glGenQueries(N, s_q);
+				glGenQueries(N, s_qs);
 				s_ok = 1;
 			}
 		}
@@ -7927,6 +7934,7 @@ static void GR_GpuTimerFrame(int beforeSwap)
 		if (s_open)
 		{
 			glEndQuery(TIME_ELAPSED);
+			glEndQuery(SAMPLES_PASSED);
 			s_pending[s_next] = 1;
 			s_next = (s_next + 1) % N;
 			s_open = 0;
@@ -7945,11 +7953,18 @@ static void GR_GpuTimerFrame(int beforeSwap)
 		s_get(s_q[i], GL_QUERY_RESULT, &ns);
 		s_pending[i] = 0;
 		g_PsyX_GpuMsSum += (double)ns / 1.0e6;
+		glGetQueryObjectuiv(s_qs[i], GL_QUERY_RESULT_AVAILABLE, &avail);
+		if (avail)
+		{
+			s_get(s_qs[i], GL_QUERY_RESULT, &ns);
+			g_PsyX_GpuSamplesSum += (double)ns;
+		}
 		g_PsyX_GpuMsCount++;
 	}
 	if (!s_pending[s_next])
 	{
 		glBeginQuery(TIME_ELAPSED, s_q[s_next]);
+		glBeginQuery(SAMPLES_PASSED, s_qs[s_next]);
 		s_open = 1;
 	}
 }
