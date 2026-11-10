@@ -5554,11 +5554,18 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 	/* mx/my arrive in real window pixels; everything below is in render pixels,
 	 * which differ once render scaling is on. Convert first, or every touch and
 	 * click lands scaled-down toward the top-left. */
-	if (g_surfaceWidth > 0 && g_surfaceHeight > 0 &&
-	    (g_surfaceWidth != g_windowWidth || g_surfaceHeight != g_windowHeight))
+	/* Against the drawable's PIXEL size, which is what mx/my are in on every
+	 * platform. g_surfaceWidth is not that where the window is high-DPI: in a
+	 * phone browser (and on iOS after a resize event) it holds window POINTS,
+	 * half or a third of the pixels, so this took a full-size render for a
+	 * scaled-down one and doubled or tripled every position. Each tap then
+	 * landed outside the picture and no menu could be touched, while a 1x
+	 * desktop, where points and pixels agree, never showed it. */
+	if (g_presentWidth > 0 && g_presentHeight > 0 &&
+	    (g_presentWidth != g_windowWidth || g_presentHeight != g_windowHeight))
 	{
-		mx = (int)((float)mx * (float)g_windowWidth  / (float)g_surfaceWidth  + 0.5f);
-		my = (int)((float)my * (float)g_windowHeight / (float)g_surfaceHeight + 0.5f);
+		mx = (int)((float)mx * (float)g_windowWidth  / (float)g_presentWidth  + 0.5f);
+		my = (int)((float)my * (float)g_windowHeight / (float)g_presentHeight + 0.5f);
 	}
 	/* A wide menu draws full-window even over gameplay (its frame drops Hor+
 	 * for OT2), and the overlay text, preview and pointer map through here
