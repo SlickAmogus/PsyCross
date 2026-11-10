@@ -172,7 +172,7 @@ float g_PsxWorldVCropAnchor = 0.0f;
  * a caller that never assigns it. */
 float g_PsxCrtAspectTrim = 1.0f;
 int   g_PsxAspectRaw = 0;
-static float PsxDisplayPixelAspect(void)
+static float PsxPixelAspectFor(int worldPass)
 {
 	float w, h;
 
@@ -226,8 +226,6 @@ static float PsxDisplayPixelAspect(void)
 		 * thin and running off the bottom, and the inventory item kept a residual
 		 * ~8% stretch. The vfov is right; this mismatch was the bug. Cutscenes are
 		 * cropped by g_PsxCutsceneVScale in the ortho, so mirror that as well. */
-		extern int g_PcHorPlusEnabled;
-		const int   worldPass = (g_PcHorPlusEnabled && !g_PsxUIOrthoPass);
 		const float hs = worldPass ? ((g_PsxWorldHScale > 0.0f) ? g_PsxWorldHScale : 1.0f)
 		                           : 1.0f;
 		float vs;
@@ -239,6 +237,11 @@ static float PsxDisplayPixelAspect(void)
 			vs = (g_PsxWorldVScale > 0.0f) ? g_PsxWorldVScale : 1.0f;
 		return (hs * vs) / target;
 	}
+}
+static float PsxDisplayPixelAspect(void)
+{
+	extern int g_PcHorPlusEnabled;
+	return PsxPixelAspectFor(g_PcHorPlusEnabled && !g_PsxUIOrthoPass);
 }
 #define PSX_NTSC_PIXEL_ASPECT (PsxDisplayPixelAspect())
 
@@ -416,6 +419,47 @@ static int GR_TextureIsNearest(TextureID tex)
 	return 0;
 }
 
+extern "C" {
+	extern unsigned int g_PsxPerfBinds, g_PsxPerfFilterSets, g_PsxPerfCharaVerts, g_PsxPerfFrameId;
+	void PsyX_PerfFrameEnd(void);
+}
+
+/* The filter settings went onto the texture again at EVERY bind: a
+ * glGetTexLevelParameteriv (a round trip that makes a threaded driver catch
+ * up) and up to three glTexParameter calls, hundreds of times a frame once
+ * the batches are broken up. Once a frame per texture is enough: the setting
+ * only changes between frames, and a texture made later in the same frame
+ * carries the parameters its loader gave it. */
+static int GR_FilterAppliedThisFrame(TextureID tex)
+{
+	enum { SLOTS = 512 };
+	static TextureID    ids[SLOTS];
+	static unsigned int stamps[SLOTS];
+	static int          cfgs[SLOTS];
+	const unsigned int  stamp = g_PsxPerfFrameId + 1u;
+	const int           cfg   = (g_cfg_textureFilter << 8) | (g_cfg_anisoLevel & 0xFF);
+	unsigned int        h     = ((unsigned int)tex * 2654435761u) >> 23;
+
+	for (int probe = 0; probe < 8; probe++, h = (h + 1) & (SLOTS - 1))
+	{
+		if (stamps[h] == stamp && ids[h] == tex)
+		{
+			if (cfgs[h] == cfg)
+				return 1;
+			cfgs[h] = cfg;
+			return 0;
+		}
+		if (stamps[h] != stamp)
+		{
+			stamps[h] = stamp;
+			ids[h]    = tex;
+			cfgs[h]   = cfg;
+			return 0;
+		}
+	}
+	return 0;
+}
+
 static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 {
 	GLint minFilter, magFilter;
@@ -426,6 +470,10 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 	/* Its loader asked for point sampling and meant it. */
 	if (GR_TextureIsNearest(tex))
 		return;
+
+	if (GR_FilterAppliedThisFrame(tex))
+		return;
+	g_PsxPerfFilterSets++;
 
 	if (g_cfg_textureFilter <= 0)
 	{
@@ -4473,6 +4521,7 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 
 #if USE_OPENGL
 	glBindTexture(GL_TEXTURE_2D, texture);
+	g_PsxPerfBinds++;
 	GR_ApplyTextureFilter(texture, texFormat);
 #endif
 
@@ -4745,7 +4794,11 @@ extern "C" float PsyX_WideMenuMargin(void)
 	horScale  = winAspect / (psxW / psxH);
 	if (horScale <= 1.0f)
 		return 0.0f;
-	return psxW * (horScale * (float)PSX_NTSC_PIXEL_ASPECT - 1.0f) * 0.5f;
+	/* A wide menu's prims only ever draw in the UI pass, whose PAR never
+	 * carries the world hfov/vfov. Its layout, overlay text and 3D preview
+	 * ask from gameplay frames with Hor+ on, where the live PAR does carry
+	 * them: opened over gameplay, the menu came out wider than the screen. */
+	return psxW * (horScale * PsxPixelAspectFor(0) - 1.0f) * 0.5f;
 }
 
 extern "C" int GR_HorPlusHalfWidths(float* out43, float* outWide)
@@ -5064,10 +5117,13 @@ extern "C" void PsyX_GetDisplayViewport(int* outX, int* outY, int* outW, int* ou
 		if (outH) *outH = vpH;
 		return;
 	}
+	/* A wide menu draws full-window even over gameplay (its frame drops Hor+
+	 * for OT2), and the overlay text, preview and pointer map through here
+	 * after Hor+ is back on, so it is never pillarboxed. */
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcNativeRender && !g_PsxWideMenu &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -5103,10 +5159,13 @@ extern "C" int PsyX_MapWindowToViewport(int mx, int my, float* outFracX, float* 
 			my = (int)((float)(my - dy) * (float)g_windowHeight / (float)dh);
 		}
 	}
+	/* A wide menu draws full-window even over gameplay (its frame drops Hor+
+	 * for OT2), and the overlay text, preview and pointer map through here
+	 * after Hor+ is back on, so it is never pillarboxed. */
 	const bool wantPillarbox =
-		!g_PcNativeRender &&
+		!g_PcNativeRender && !g_PsxWideMenu &&
 		((g_PcHorPlusEnabled && g_PcWidescreenMode == 0) ||
-		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox && !g_PsxWideMenu));
+		 (!g_PcHorPlusEnabled && g_PcMenuPillarbox));
 	if (wantPillarbox && g_windowHeight > 0) {
 		const float psxAspect = 4.0f / 3.0f;
 		const float winAspect = (float)g_windowWidth / (float)g_windowHeight;
@@ -7901,6 +7960,7 @@ void GR_SwapWindow()
 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
 		g_PsxLastFrameVerts = g_PsxFrameVerts;
 		g_PsxFrameVerts     = 0;
+		PsyX_PerfFrameEnd();
 	}
 	GR_DiagGLError("end of frame");
 
@@ -8289,6 +8349,7 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	if (!Pc_ModernMesh_PrepareDraw(mesh_handle, &binding) || binding.vertexCount < 3)
 		return 0;
 	TextureID texture = binding.textureId; int format = binding.texFormat, count = binding.vertexCount;
+	g_PsxPerfCharaVerts += (unsigned int)count;
 	if (format == TF_4_BIT) modern=&g_modern_shader_4;
 	else if (format == TF_8_BIT) modern=&g_modern_shader_8;
 	else if (format == TF_16_BIT) modern=&g_modern_shader_16;
