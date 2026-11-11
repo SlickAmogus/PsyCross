@@ -2596,6 +2596,7 @@ int g_PsxFogToBlack = 0;
 	"	const vec2 c_UVFudge = vec2(0.00025, 0.00025);\n"\
 	"	void main() {\n"\
 	"		v_texcoord = a_texcoord;\n"\
+	"		v_surfaceDepth = vec3(0.0);\n"\
 	"		v_texcoord.xy += a_extra.xy * 0.5;\n"\
 	"		v_color = a_color;\n"\
 	"		v_color.xyz *= a_texcoord.z;\n"\
@@ -2643,6 +2644,12 @@ int g_PsxFogToBlack = 0;
 	 * back to "always treat as 3D" — the legacy behaviour. Anything
 	 * that must hold with PGXP off therefore cannot lean on v_is3d;
 	 * use the frame class (g_PsxDitherSuppressed) instead. */	"		v_is3d = (u_pgxpEnabled > 0) ? ((a_pgxp.z > 0.0) ? 1.0 : 0.0) : 1.0;\n"\
+	/* GL depth is screen-linear even when clip XYZW is multiplied by W.
+	 * Interpolating view Z there makes different tessellations of neighbouring
+	 * planes intersect. Only opted-in surfaces reconstruct view Z as a ratio
+	 * of perspective varyings; the clip-W factor also handles the FarW clamp. */\
+	"		if (u_farMode == 0 && u_pgxpEnabled > 0 && a_pgxp.z > 0.0 && a_extra.w > 2.5)\n"\
+	"			v_surfaceDepth = vec3(gl_Position.w / u_szMax, gl_Position.w / a_pgxp.z, 1.0);\n"\
 	"		v_z = (gl_Position.z - 40.0) * 0.005;\n"\
 	"		v_fogAmount = clamp(a_extra.z / 127.0, 0.0, 1.0);\n"\
 	"		v_viewpos = a_viewpos;\n"\
@@ -2919,9 +2926,14 @@ int g_PsxFogToBlack = 0;
 	"	uniform float u_pixelScale;\n"\
 	litUniforms
 
+#define GPU_SURFACE_FRAGMENT_DEPTH \
+	"		gl_FragDepth = (v_surfaceDepth.z > 0.5 && v_surfaceDepth.y > 0.0)\n"\
+	"			? clamp(v_surfaceDepth.x / v_surfaceDepth.y, 0.0, 1.0) : gl_FragCoord.z;\n"
+
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
 	GPU_FRAGMENT_HEAD(GPU_SAMPLE_TEXTURE_## bit ##BIT_FUNC, GPU_LIT_UNIFORMS)\
 	"	void main() {\n"\
+	GPU_SURFACE_FRAGMENT_DEPTH\
 	"		g_tapCov = 1.0;\n"\
 	"		g_tapWt = 1.0;\n"\
 	GPU_FRAGMENT_FILTERED_SAMPLE\
@@ -2933,6 +2945,7 @@ int g_PsxFogToBlack = 0;
 #define GPU_FRAGMENT_MIX_SHADER \
 	GPU_FRAGMENT_HEAD(GPU_SAMPLE_TEXTURE_MIX_FUNC, "	int u_untextured;\n" GPU_LIT_UNIFORMS_COMMON)\
 	"	void main() {\n"\
+	GPU_SURFACE_FRAGMENT_DEPTH\
 	"		g_tapCov = 1.0;\n"\
 	"		g_tapWt = 1.0;\n"\
 	"		u_untextured = (v_texfmt > 3.5) ? 1 : 0;\n"\
@@ -2982,6 +2995,7 @@ int g_PsxFogToBlack = 0;
 	"	}\n"
 
 const char* gte_shader_4 =
+	"varying vec3 v_surfaceDepth;\n"
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
 	"AFFINE_VARYING vec4 v_page_clut;\n"
@@ -3002,6 +3016,7 @@ const char* gte_shader_4 =
 	"#endif\n";
 
 const char* gte_shader_8 =
+	"varying vec3 v_surfaceDepth;\n"
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
 	"AFFINE_VARYING vec4 v_page_clut;\n"
@@ -3022,6 +3037,7 @@ const char* gte_shader_8 =
 	"#endif\n";
 
 const char* gte_shader_16 =
+	"varying vec3 v_surfaceDepth;\n"
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
 	"AFFINE_VARYING vec4 v_page_clut;\n"
@@ -3042,6 +3058,7 @@ const char* gte_shader_16 =
 	"#endif\n";
 
 const char* gte_shader_mix =
+	"varying vec3 v_surfaceDepth;\n"
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
 	"AFFINE_VARYING vec4 v_page_clut;\n"
@@ -3062,6 +3079,7 @@ const char* gte_shader_mix =
 	"#endif\n";
 
 const char* gte_shader_32_rgba =
+	"varying vec3 v_surfaceDepth;\n"
 	"AFFINE_VARYING vec4 v_texcoord;\n"
 	"varying vec4 v_color;\n"
 	"AFFINE_VARYING vec4 v_page_clut;\n"
@@ -3091,6 +3109,7 @@ const char* gte_shader_32_rgba =
 	"	uniform vec2 u_fbInvSize;\n"\
 	GPU_LIT_UNIFORMS\
 	"	void main() {\n"\
+	GPU_SURFACE_FRAGMENT_DEPTH\
 	/* Framebuffer feedback at render resolution (GR_FeedbackSampleTexture):
 	 * s_texture is a 1:1 capture of the frame a PS1 would read out of VRAM,
 	 * sampled NEAREST. Mode 1 is the prim that copies a display buffer onto the

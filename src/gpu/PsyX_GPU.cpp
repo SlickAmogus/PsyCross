@@ -1047,7 +1047,10 @@ int g_DrawPrimMode = 0;
  * static faces — rugs on floors, paper on desks, distant road/wall panels — stop
  * z-fighting, while still leaving a real depth buffer for actors to LEQUAL-test
  * against. All of it is gated on g_PsxUsePgxp; with PGXP off nothing reads kind. */
-enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 };
+/* SURFACE is an explicit opt-in (g_PsxActorDepth == 2): use the same depth
+ * scale as ACTOR, but reconstruct perspective-correct view Z per fragment.
+ * Existing actors/world and inventory retain their original interpolation. */
+enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3, SZ_KIND_SURFACE = 4 };
 /* ACTOR: a character prim armed with its own per-vertex SZ by the game's
  * skeleton drawers (PsyX_SetNextPrimSzActor while g_PsxActorDepth is set).
  * Unarmed, those drawers reach the capture with the GTE FIFO's SZ, which the
@@ -1249,7 +1252,7 @@ extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, un
 	g_primSzNext[0] = s0; g_primSzNext[1] = s1;
 	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
 	g_primSzNextValid = 1;
-	g_primSzNextKind = SZ_KIND_ACTOR;
+	g_primSzNextKind = (g_PsxActorDepth == 2) ? SZ_KIND_SURFACE : SZ_KIND_ACTOR;
 	g_primSzNextFar = 0;
 }
 
@@ -1547,7 +1550,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 	                      : (sv0 + sv1 + sv2) * (1.0f / 3.0f);
 	if (sz_avg < 1.0f) return;  // 2D/HUD prim — keep bucket depth
 
-	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
+	if ((kind == SZ_KIND_ACTOR || kind == SZ_KIND_SURFACE) && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
 	{
 		const float sv[4] = { sv0, sv1, sv2, sv3 };
 		const int n = isQuad ? 4 : 3;
@@ -1557,7 +1560,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 			if (pgxpWorldPath)
 			{
 				z = PgxpNdcFromViewZ(sv[i]);
-				vertex[i]._p1 = 2;
+				vertex[i]._p1 = (kind == SZ_KIND_SURFACE) ? 3 : 2;
 			}
 			else
 			{
@@ -3077,6 +3080,20 @@ static void PgxpNearClipReproject(GrVertex* v, float ofsX, float ofsY)
  * 6 -> 12 verts (each straddling triangle yields up to 2). */
 static int PgxpNearClipEmit(GrVertex* v, int count)
 {
+	/* A fully tracked polygon wholly behind the clip plane has no visible
+	 * fragment. The straddler-only eligibility test below used to pass it
+	 * through unchanged: MakeVertex had already fallen back to affine, so GTE
+	 * saturated coordinates painted a screen-space quad from behind the eye.
+	 * Keep explicitly affine materials and untracked/UI packets unchanged. */
+	if (g_PsxUsePgxp && g_PsxPgxpNearClip && !s_curPgxpAffine && count > 0)
+	{
+		bool whollyBehind = true;
+		for (int i = 0; i < count; i++)
+			if (v[i].ny < 0.5f || v[i].vsz >= g_PgxpNearZ)
+				whollyBehind = false;
+		if (whollyBehind)
+			return 0;
+	}
 	if (!g_PsxUsePgxp || !PgxpNearClipEligible(v, count))
 		return count;
 
