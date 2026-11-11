@@ -966,6 +966,13 @@ static int    s_sharpW = 0, s_sharpH = 0;
  * chosen resolution used to get lost. */
 int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 
+/* render_scale: the scene is drawn into a target this fraction of the size it
+ * would otherwise have and stretched at present. It is the one setting that
+ * lowers pixel count while keeping the window's shape, so widescreen stays
+ * widescreen -- which Native (PSX), always 4:3, cannot offer. */
+extern "C" { float g_cfg_renderScale = 1.0f; }
+static float s_renderScaleApplied = 1.0f;
+
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
 
@@ -1809,22 +1816,43 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 		g_PcNativeRender = 0;
 	}
 
-	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
-	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
-	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
 	{
-		g_windowWidth  = g_cfgRenderWidth;
-		g_windowHeight = g_cfgRenderHeight;
+		int   w = realW, h = realH;
+		int   wanted = GR_SceneAlwaysOffscreen();
+		float s = g_cfg_renderScale;
 
-		return;
-	}
+		if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
+		    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH))
+		{
+			w = g_cfgRenderWidth;
+			h = g_cfgRenderHeight;
+			wanted = 1;
+		}
 
-	if (GR_SceneAlwaysOffscreen() && GR_SetInternalResolution(realW, realH))
-	{
-		g_windowWidth  = realW;
-		g_windowHeight = realH;
+		if (!(s > 0.0f) || s > 1.0f)
+			s = 1.0f;
+		s_renderScaleApplied = g_cfg_renderScale;
+		if (s < 0.999f)
+		{
+			/* Even sizes keep the halved PSX buffer maths and the 2:1 blits off
+			 * half pixels; the floor is the smallest PSX mode. */
+			int sw = (int)((float)w * s + 0.5f) & ~1;
+			int sh = (int)((float)h * s + 0.5f) & ~1;
 
-		return;
+			if (sw < 256) sw = (w < 256) ? w : 256;
+			if (sh < 192) sh = (h < 192) ? h : 192;
+			w = sw;
+			h = sh;
+			wanted = 1;
+		}
+
+		if (wanted && GR_SetInternalResolution(w, h))
+		{
+			g_windowWidth  = w;
+			g_windowHeight = h;
+
+			return;
+		}
 	}
 
 	GR_DestroyInternalTarget();
@@ -2063,6 +2091,9 @@ void GR_BeginScene()
 	g_lastBoundTexture = 0;
 	GR_InvalidateViewScissorCache();
 	s_lutUnitBound = 0;
+	/* The options slider only writes the value; the target follows here. */
+	if (g_cfg_renderScale != s_renderScaleApplied && g_presentWidth > 0 && g_presentHeight > 0)
+		GR_ApplyPresentSize(g_presentWidth, g_presentHeight);
 	GR_NativeTrack();
 
 #if USE_OPENGL
