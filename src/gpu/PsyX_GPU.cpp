@@ -3617,6 +3617,8 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 //
 static void DrawFarMeshSplit(const GPUDrawSplit& split);
 
+extern void GR_GpuBucket(int bucket);
+
 void DrawAllSplits()
 {
 #ifdef _DEBUG
@@ -3661,6 +3663,7 @@ void DrawAllSplits()
 	if (GR_FlashlightShadowActive())
 	{
 		bool passBegun = false;
+		GR_GpuBucket(0);
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -3673,6 +3676,8 @@ void DrawAllSplits()
 		if (passBegun)
 			GR_ShadowPassEnd();
 	}
+
+	GR_GpuBucket(1);
 
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
@@ -3742,6 +3747,7 @@ void DrawAllSplits()
 		else
 			DrawSplit(g_splits[i]);
 	}
+	GR_GpuBucket(3);
 
 	ClearSplits();
 }

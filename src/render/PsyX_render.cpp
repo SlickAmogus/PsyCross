@@ -7901,72 +7901,105 @@ int    g_PsyX_GpuMsCount;
 double g_PsyX_GpuSamplesSum;
 int    g_PsyX_GpuTimerWanted; /* set by the game while it keeps a log; nothing runs otherwise */
 
+/* The same time and samples split by what was being drawn: 0 the flashlight
+ * shadow map, 1 PSX primitives, 2 replacement meshes (skinned characters and
+ * items), 3 everything else up to the swap. One figure for the frame could
+ * not tell a slow shadow pass from a slow character from a slow world. */
+double g_PsyX_GpuBucketMs[4];
+double g_PsyX_GpuBucketPx[4];
+
+enum { GPUQ_N = 256, GPUQ_TIME_ELAPSED = 0x88BF, GPUQ_SAMPLES_PASSED = 0x8914 };
+typedef void (APIENTRY *GpuGetQueryU64)(GLuint, GLenum, unsigned long long*);
+static int            s_gpuqOk = -1, s_gpuqOpen = -1, s_gpuqHead, s_gpuqTail, s_gpuqBucket = 3;
+static GLuint         s_gpuqT[GPUQ_N], s_gpuqS[GPUQ_N];
+static unsigned char  s_gpuqTag[GPUQ_N], s_gpuqPending[GPUQ_N];
+static GpuGetQueryU64 s_gpuqGet;
+
+static void GR_GpuQueryClose(void)
+{
+	if (s_gpuqOpen < 0)
+		return;
+	glEndQuery(GPUQ_TIME_ELAPSED);
+	glEndQuery(GPUQ_SAMPLES_PASSED);
+	s_gpuqPending[s_gpuqOpen] = 1;
+	s_gpuqOpen = -1;
+}
+
+/* A full ring means results are arriving slower than segments are made; the
+ * segment goes unmeasured rather than waiting on the GPU for an old one. */
+static void GR_GpuQueryOpen(void)
+{
+	if (s_gpuqPending[s_gpuqHead])
+		return;
+	glBeginQuery(GPUQ_TIME_ELAPSED, s_gpuqT[s_gpuqHead]);
+	glBeginQuery(GPUQ_SAMPLES_PASSED, s_gpuqS[s_gpuqHead]);
+	s_gpuqTag[s_gpuqHead] = (unsigned char)s_gpuqBucket;
+	s_gpuqOpen = s_gpuqHead;
+	s_gpuqHead = (s_gpuqHead + 1) % GPUQ_N;
+}
+
+void GR_GpuBucket(int bucket)
+{
+	if (s_gpuqOk <= 0 || !g_PsyX_GpuTimerWanted || bucket == s_gpuqBucket)
+		return;
+	s_gpuqBucket = bucket;
+	if (s_gpuqOpen >= 0)
+	{
+		GR_GpuQueryClose();
+		GR_GpuQueryOpen();
+	}
+}
+
 static void GR_GpuTimerFrame(int beforeSwap)
 {
-	typedef void (APIENTRY *GetQueryU64)(GLuint, GLenum, unsigned long long*);
-	enum { N = 4, TIME_ELAPSED = 0x88BF, SAMPLES_PASSED = 0x8914 };
-	static int         s_ok = -1, s_open, s_next, s_pending[N];
-	static GLuint      s_q[N], s_qs[N];
-	static GetQueryU64 s_get;
-	int i;
-
 	if (!g_PsyX_GpuTimerWanted)
 		return;
-	if (s_ok < 0)
+	if (s_gpuqOk < 0)
 	{
-		s_ok = 0;
+		s_gpuqOk = 0;
 		if (!g_grIsGLES && !PsyX_Angle_Active() && glGenQueries != NULL && glBeginQuery != NULL &&
 		    (SDL_GL_ExtensionSupported("GL_ARB_timer_query") || SDL_GL_ExtensionSupported("GL_EXT_timer_query")))
 		{
-			s_get = (GetQueryU64)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
-			if (s_get != NULL)
+			s_gpuqGet = (GpuGetQueryU64)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
+			if (s_gpuqGet != NULL)
 			{
-				glGenQueries(N, s_q);
-				glGenQueries(N, s_qs);
-				s_ok = 1;
+				glGenQueries(GPUQ_N, s_gpuqT);
+				glGenQueries(GPUQ_N, s_gpuqS);
+				s_gpuqOk = 1;
 			}
 		}
 	}
-	if (!s_ok)
+	if (!s_gpuqOk)
 		return;
 	if (beforeSwap)
 	{
-		if (s_open)
+		if (s_gpuqOpen >= 0)
 		{
-			glEndQuery(TIME_ELAPSED);
-			glEndQuery(SAMPLES_PASSED);
-			s_pending[s_next] = 1;
-			s_next = (s_next + 1) % N;
-			s_open = 0;
+			GR_GpuQueryClose();
+			g_PsyX_GpuMsCount++;
 		}
 		return;
 	}
-	for (i = 0; i < N; i++)
+	while (s_gpuqPending[s_gpuqTail])
 	{
 		GLuint avail = 0;
-		unsigned long long ns = 0;
-		if (!s_pending[i])
-			continue;
-		glGetQueryObjectuiv(s_q[i], GL_QUERY_RESULT_AVAILABLE, &avail);
+		unsigned long long v = 0;
+		const int b = s_gpuqTag[s_gpuqTail] & 3;
+
+		glGetQueryObjectuiv(s_gpuqS[s_gpuqTail], GL_QUERY_RESULT_AVAILABLE, &avail);
 		if (!avail)
-			continue;
-		s_get(s_q[i], GL_QUERY_RESULT, &ns);
-		s_pending[i] = 0;
-		g_PsyX_GpuMsSum += (double)ns / 1.0e6;
-		glGetQueryObjectuiv(s_qs[i], GL_QUERY_RESULT_AVAILABLE, &avail);
-		if (avail)
-		{
-			s_get(s_qs[i], GL_QUERY_RESULT, &ns);
-			g_PsyX_GpuSamplesSum += (double)ns;
-		}
-		g_PsyX_GpuMsCount++;
+			break;
+		s_gpuqGet(s_gpuqT[s_gpuqTail], GL_QUERY_RESULT, &v);
+		g_PsyX_GpuMsSum += (double)v / 1.0e6;
+		g_PsyX_GpuBucketMs[b] += (double)v / 1.0e6;
+		s_gpuqGet(s_gpuqS[s_gpuqTail], GL_QUERY_RESULT, &v);
+		g_PsyX_GpuSamplesSum += (double)v;
+		g_PsyX_GpuBucketPx[b] += (double)v;
+		s_gpuqPending[s_gpuqTail] = 0;
+		s_gpuqTail = (s_gpuqTail + 1) % GPUQ_N;
 	}
-	if (!s_pending[s_next])
-	{
-		glBeginQuery(TIME_ELAPSED, s_q[s_next]);
-		glBeginQuery(SAMPLES_PASSED, s_qs[s_next]);
-		s_open = 1;
-	}
+	s_gpuqBucket = 3;
+	GR_GpuQueryOpen();
 }
 
 void GR_SwapWindow()
@@ -8365,6 +8398,7 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 		return 0;
 	TextureID texture = binding.textureId; int format = binding.texFormat, count = binding.vertexCount;
 	g_PsxPerfCharaVerts += (unsigned int)count;
+	GR_GpuBucket(2);
 	if (format == TF_4_BIT) modern=&g_modern_shader_4;
 	else if (format == TF_8_BIT) modern=&g_modern_shader_8;
 	else if (format == TF_16_BIT) modern=&g_modern_shader_16;
@@ -8419,6 +8453,7 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	g_PreviousShader = (ShaderID)-1; g_lastBoundTexture = (TextureID)-1;
 	g_PreviousBlendMode = g_PreviousDepthMode = g_PreviousStencilMode = -999;
 	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = g_PreviousOffscreenState = -999;
+	GR_GpuBucket(1);
 	return 1;
 }
 
