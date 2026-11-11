@@ -7905,6 +7905,8 @@ int    g_PsyX_GpuTimerWanted; /* set by the game while it keeps a log; nothing r
  * shadow map, 1 PSX primitives, 2 replacement meshes (skinned characters and
  * items), 3 everything else up to the swap. One figure for the frame could
  * not tell a slow shadow pass from a slow character from a slow world. */
+/* Time inside the buffer swap: the wait for the GPU and for vsync. */
+double g_PsyX_CpuSwapMs;
 double g_PsyX_GpuBucketMs[4];
 double g_PsyX_GpuBucketPx[4];
 
@@ -8075,7 +8077,11 @@ void GR_SwapWindow()
 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		GR_GpuTimerFrame(1);
-		SDL_GL_SwapWindow(g_window);
+		{
+			const Uint64 swapT0 = SDL_GetPerformanceCounter();
+			SDL_GL_SwapWindow(g_window);
+			g_PsyX_CpuSwapMs += (double)(SDL_GetPerformanceCounter() - swapT0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+		}
 		GR_GpuTimerFrame(0);
 		if (g_internalFBO)
 			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
