@@ -569,8 +569,12 @@ extern "C" void PsyX_Pad_SetDeviceFilter(int mode, int deviceId)
 	eprintinfo("[PAD] device filter mode %d device %d\n", mode, deviceId);
 }
 
+extern "C" void PsyX_Pad_SteamBypassTick(void);
+
 void PsyX_Pad_InternalPadUpdates()
 {
+	PsyX_Pad_SteamBypassTick();
+
 	PsyXController* controller;
 	LPPADRAW pad;
 	u_short kbInputs;
