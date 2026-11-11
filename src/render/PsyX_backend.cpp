@@ -11,7 +11,7 @@
 #if defined(__APPLE__)
 #include <dlfcn.h>
 #include <unistd.h>
-#include <SDL2/SDL.h>
+#include <SDL.h>
 #endif
 
 /* The EGL bootstrap below is built wherever ANGLE is a shipped option: Windows
