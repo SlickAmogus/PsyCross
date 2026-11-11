@@ -346,6 +346,7 @@ int PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples)
 	 * Steam, so they are switched off through the opt-outs the layers' own
 	 * manifests declare. Steam's overlay is then absent on this backend only.
 	 * A value the user set themselves is left alone. */
+#ifdef _WIN32
 	if (info->anglePlatformType == PSYX_EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE &&
 	    (getenv("SteamAppId") || getenv("SteamGameId") || getenv("STEAM_COMPAT_APP_ID")))
 	{
@@ -362,6 +363,7 @@ int PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples)
 		PsyX_Log_Warning("[Psy-X] ANGLE: launched by Steam, Steam's Vulkan overlay and shader-cache layers disabled for '%s'\n",
 			info->name);
 	}
+#endif
 
 	/* This — not an environment variable — is what actually selects D3D11 vs
 	 * Vulkan vs a CPU rasterizer. */
