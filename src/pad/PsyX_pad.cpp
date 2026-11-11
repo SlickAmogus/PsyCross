@@ -210,11 +210,18 @@ int PsyX_Pad_InitSystem()
 	// init keyboard state
 	g_sdlKeyboardState = SDL_GetKeyboardState(NULL);
 
-	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) < 0)
+	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0)
 	{
-		eprinterr("Failed to initialise SDL GameController subsystem!\n");
+		eprinterr("Failed to initialise SDL GameController subsystem! (%s)\n", SDL_GetError());
 		return 0;
 	}
+
+	/* Its own call, and allowed to fail: SDL shuts down everything a failed
+	 * SDL_InitSubSystem had started, and the Emscripten SDL is built without
+	 * haptics, so asking for both in one call left the web build with no
+	 * controllers at all. */
+	if (SDL_InitSubSystem(SDL_INIT_HAPTIC) < 0)
+		eprintwarn("[PAD] no haptic subsystem (%s)\n", SDL_GetError());
 
 	/* The community controller database, shipped beside the exe from
 	 * pc_port/assets/gamecontrollerdb.txt. SDL's built-in list covers the big
