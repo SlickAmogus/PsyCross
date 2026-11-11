@@ -31,6 +31,7 @@ void PsyX_Pad_SteamBypassTick(void);
 void PsyX_Pad_SteamBypassHold(int hold);
 void PsyX_Pad_StandInFeed(int slot, int present, unsigned buttons, const short* axes, const char* name, unsigned vid, unsigned pid);
 void PsyX_Pad_StandInSetRumble(int (*fn)(int slot, unsigned short low, unsigned short high));
+void PsyX_Pad_StandInSetSource(void (*fn)(void));
 int  PsyX_Pad_StandInRumble(SDL_GameController* gc, unsigned short low, unsigned short high);
 }
 
@@ -64,6 +65,8 @@ static int          s_loaded; /* 0 not tried, 1 ready, -1 unavailable */
 static int          s_hold;
 static Uint32       s_nextScan;
 static int        (*s_fedRumble)(int slot, unsigned short low, unsigned short high);
+/* Called on the game thread at each pad update; it feeds the fed slots. */
+static void       (*s_fedSource)(void);
 
 extern int g_PsyX_PadFilterMode;
 
@@ -148,6 +151,11 @@ void PsyX_Pad_StandInFeed(int slot, int present, unsigned buttons, const short* 
 void PsyX_Pad_StandInSetRumble(int (*fn)(int slot, unsigned short low, unsigned short high))
 {
 	s_fedRumble = fn;
+}
+
+void PsyX_Pad_StandInSetSource(void (*fn)(void))
+{
+	s_fedSource = fn;
 }
 
 /* SDL's own rumble call fails on a virtual controller through sdl2-compat, so
@@ -258,6 +266,9 @@ void PsyX_Pad_SteamBypassTick(void)
 	const Uint32 now  = SDL_GetTicks();
 	const int    scan = (Sint32)(now - s_nextScan) >= 0;
 
+	if (s_fedSource != NULL)
+		s_fedSource();
+
 	if (scan)
 	{
 		s_nextScan = now + 1000;
@@ -304,6 +315,7 @@ void PsyX_Pad_StandInFeed(int slot, int present, unsigned buttons, const short* 
 	(void)slot; (void)present; (void)buttons; (void)axes; (void)name; (void)vid; (void)pid;
 }
 void PsyX_Pad_StandInSetRumble(int (*fn)(int slot, unsigned short low, unsigned short high)) { (void)fn; }
+void PsyX_Pad_StandInSetSource(void (*fn)(void)) { (void)fn; }
 int  PsyX_Pad_StandInRumble(SDL_GameController* gc, unsigned short low, unsigned short high)
 {
 	(void)gc; (void)low; (void)high;
