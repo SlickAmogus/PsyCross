@@ -2169,6 +2169,18 @@ GTEShader g_gte_shader_8;
 GTEShader g_gte_shader_16;
 GTEShader g_gte_shader_32_rgba;
 GTEShader g_gte_shader_mix;
+
+/* The same five programs built with SH_LEAN: no filtered-sampling loop and no
+ * shadow-map taps in the source at all. Direct3D compilers flatten a branch
+ * that holds a sampling loop, so through ANGLE (and so in every Windows
+ * browser) the full programs ran both loops on every pixel with the options
+ * off -- hundreds of fetches where the picture needs two -- and an old
+ * integrated GPU spent 40 ms per screen of fill. Bound whenever neither
+ * feature can affect the split (GR_LeanShaderFor). */
+static GTEShader s_gte_lean_4, s_gte_lean_8, s_gte_lean_16, s_gte_lean_32_rgba, s_gte_lean_mix;
+static int       s_compileLean = 0;
+static int       s_leanShadersOk = 0;
+int              g_PsyX_LeanShaders = 1;
 GTEShader g_modern_shader_4, g_modern_shader_8, g_modern_shader_16, g_modern_shader_32_rgba;
 
 #if USE_OPENGL
@@ -2263,7 +2275,7 @@ int g_PsxFogToBlack = 0;
 #define GPU_DECODE_RG_FUNC\
 	"	vec4 lut(vec2 rg) {\n"\
 	"		vec2 idx = (floor(rg * 255.0 + 0.5) + 0.5) * (1.0 / 256.0);\n"\
-	"		vec4 t = texture2D(s_rgLut, idx);\n"\
+	"		vec4 t = SH_TEX0(s_rgLut, idx);\n"\
 	"		vec3 c = floor(t.rgb * 255.0 + 0.5) * (1.0 / 256.0);\n"\
 	"		return vec4(c, (rg.x + rg.y == 0.0) ? 0.0 : (t.w > 0.25 ? 0.5 : 1.0));\n"\
 	"	}\n"
@@ -2456,6 +2468,7 @@ int g_PsxFogToBlack = 0;
 	 * blending its colour like any other tap drags black into every edge, so
 	 * a transparent tap contributes nothing and only adds to coverage when
 	 * it is opaque. */\
+	"#ifndef SH_LEAN\n"\
 	"	vec4 TapWeighted(vec2 idx, float w, inout float cov) {\n"\
 	/* Clamp the tap to the POLYGON'S own UV bounds. PSX pages pack unrelated
 	 * regions edge to edge, so a tap that steps one texel past a UV seam reads
@@ -2537,7 +2550,8 @@ int g_PsxFogToBlack = 0;
 	"		if (cov <= 0.0) { discard; }\n"\
 	"		g_tapCov = cov;\n"\
 	"		return acc / cov;\n"\
-	"	}\n"
+	"	}\n"\
+	"#endif\n"
 
 #define GPU_NEAREST_SAMPLE_FUNC \
 	"vec4 NearestTextureSample(vec2 P) {\n"\
@@ -2558,11 +2572,11 @@ int g_PsxFogToBlack = 0;
 #if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
 #define GPU_FETCH_VRAM_FUNC\
 		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	vec2 VRAM(vec2 uv) { return floor(SH_TEX0(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #else
 #define GPU_FETCH_VRAM_FUNC\
 		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	vec2 VRAM(vec2 uv) { return floor(SH_TEX0(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #endif
 
 /* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
@@ -2876,6 +2890,7 @@ int g_PsxFogToBlack = 0;
 	"				}\n"\
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
+	"#ifndef SH_LEAN\n"\
 	"				if (u_shadowOn > 0) {\n"\
 	/* Perspective-correct shadow receiver (PR#8): correctness for BOTH styles -- same shadow shapes, just stable under motion. */\
 	"					vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
@@ -2920,6 +2935,7 @@ int g_PsxFogToBlack = 0;
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
+	"#endif\n"\
 	/* v_fade >= 2 marks the player's own body (game side, +2 on his fade). His
 	 * flashlight sits on his chest, so nothing of him behind that point can be in
 	 * its beam; the classic style's pulled-back origin and the wide sized cones
@@ -2988,11 +3004,15 @@ int g_PsxFogToBlack = 0;
 	/* bilinearFilter is the GATE (0 = off, 1 = 3D geometry only, 2 = this whole
 	 * frame); u_anisoTaps chooses HOW to filter once it passes. Keeping the two
 	 * separate is why anisotropic needs no new gate logic. */\
+	"#ifdef SH_LEAN\n"\
+	"		fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	"#else\n"\
 	"		if((bilinearFilter == 1 && v_geom3d > 0.5) || bilinearFilter >= 2)\n"\
 	"			fragColor = (u_anisoTaps > 1.0) ? AnisoTextureSample(v_texcoord.xy)\n"\
 	"			                                : BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
-	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"
+	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	"#endif\n"
 
 #define GPU_FRAGMENT_TAIL \
 	/* Untextured prims bind a 1x1 white placeholder, which decodes through the
@@ -3405,6 +3425,21 @@ ShaderID GR_Shader_Compile(const char* source)
 	}
 
 	{
+		/* The VRAM atlas and the decode table are NEAREST with one level, so an
+		 * explicit level 0 reads the same texel -- and without an implicit
+		 * gradient the sample may sit inside a real branch on Direct3D. */
+#if defined(ES2_SHADERS)
+		const char* tex0 = "#define SH_TEX0(s, uv) texture2D(s, uv)\n";
+#else
+		const char* tex0 = "#define SH_TEX0(s, uv) textureLod(s, uv, 0.0)\n";
+#endif
+		strcat(extra_vs_defines, tex0);
+		strcat(extra_fs_defines, tex0);
+		if (s_compileLean)
+			strcat(extra_fs_defines, "#define SH_LEAN\n");
+	}
+
+	{
 		char affineDef[128];
 		snprintf(affineDef, sizeof(affineDef), "#define AFFINE_VARYING %s%svarying\n",
 			tcNoPerspective, SH_TC_CENTROID);
@@ -3736,6 +3771,25 @@ void GR_InitialisePSXShaders()
 	GR_CompilePSXShader(&g_gte_shader_16, gte_shader_16);
 	GR_CompilePSXShader(&g_gte_shader_32_rgba, gte_shader_32_rgba);
 	GR_CompilePSXShader(&g_gte_shader_mix, gte_shader_mix);
+	if (g_PsyX_LeanShaders)
+	{
+		GTEShader*  lean[5] = { &s_gte_lean_4, &s_gte_lean_8, &s_gte_lean_16, &s_gte_lean_32_rgba, &s_gte_lean_mix };
+		const char* src[5]  = { gte_shader_4, gte_shader_8, gte_shader_16, gte_shader_32_rgba, gte_shader_mix };
+
+		s_compileLean   = 1;
+		s_leanShadersOk = 1;
+		for (int i = 0; i < 5; i++)
+		{
+			GLint linked = GL_FALSE;
+
+			GR_CompilePSXShader(lean[i], src[i]);
+			glGetProgramiv(lean[i]->shader, GL_LINK_STATUS, &linked);
+			if (linked != GL_TRUE)
+				s_leanShadersOk = 0;
+		}
+		s_compileLean = 0;
+		eprintinfo("[SHADER] lean programs %s\n", s_leanShadersOk ? "built" : "failed to build; full programs only");
+	}
 	{
 		extern int g_PsxMixedShaderOk;
 		GLint linked = GL_FALSE;
@@ -4112,8 +4166,37 @@ static void GR_PpLitUniforms(GLuint prog)
 	if (p->loc[9] >= 0) glUniform1i(p->loc[9], b.hero[3] > 0.0f ? 1 : 0);
 }
 
+/* The lean twin of a full program when this split would take neither the
+ * filtered-sampling path nor the shadow map. Both conditions are the ones the
+ * uniform pushes below evaluate, so the two programs draw the same pixels. */
+static GTEShader* GR_LeanShaderFor(GTEShader* shader)
+{
+	int filterGate, shadowOn;
+
+	if (!s_leanShadersOk || !g_PsyX_LeanShaders)
+		return shader;
+	filterGate = g_PsxSplitIsGlyph       ? 0
+	           : g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0)
+	                                   : ((g_cfg_textureFilter > 0) ? 1 : 0);
+	shadowOn   = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
+	              g_PsyX_FlashlightActive && g_shadowDepthTex != 0 && !g_PsxPresentLastFrame);
+	if (shadowOn)
+		return shader;
+	if (shader == &g_gte_shader_32_rgba)
+		return &s_gte_lean_32_rgba;
+	if (filterGate != 0)
+		return shader;
+	if (shader == &g_gte_shader_4)   return &s_gte_lean_4;
+	if (shader == &g_gte_shader_8)   return &s_gte_lean_8;
+	if (shader == &g_gte_shader_16)  return &s_gte_lean_16;
+	if (shader == &g_gte_shader_mix) return &s_gte_lean_mix;
+	return shader;
+}
+
 static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShader* shader)
 {
+	shader = GR_LeanShaderFor(shader);
+
 	switch (texFormat)
 	{
 	case TF_4_BIT:
