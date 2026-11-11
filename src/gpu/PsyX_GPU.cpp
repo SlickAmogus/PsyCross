@@ -3307,6 +3307,30 @@ static int PgxpEmitPoly(GrVertex* v, int count)
 /* Console `mixshader 0|1`. Ok is set at startup only if the program built. */
 extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
 
+/* CPU time of the two halves of a frame's rendering and the reason each draw
+ * call had to start, for the game's [PERF] block. A frame that is slow with an
+ * idle GPU is one of these; which one decides what is worth changing. */
+extern "C" {
+	double	   g_PsyX_CpuParseMs, g_PsyX_CpuDrawMs;
+	unsigned int g_PsxSplitWhy[7];
+}
+static int s_perfParseDepth;
+
+struct PerfCpuScope
+{
+	double* acc;
+	Uint64  t0;
+	bool	draw;
+	PerfCpuScope(double* a, bool d) : acc(a), t0(SDL_GetPerformanceCounter()), draw(d) {}
+	~PerfCpuScope()
+	{
+		const double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+		*acc += ms;
+		if (draw && s_perfParseDepth > 0)
+			g_PsyX_CpuParseMs -= ms;
+	}
+};
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
@@ -3370,6 +3394,25 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		return;
 	}
 
+	{
+		int why = 6;
+		if (curSplit.kind != GPU_SPLIT_LEGACY)
+			why = 0;
+		else if (curSplit.blendMode != blendMode)
+			why = 1;
+		else if (curSplit.texFormat != texFormat || curSplit.textureId != textureId ||
+				 curSplit.normalTextureId != normalTextureId || curSplit.mixed != mixed)
+			why = 2;
+		else if (curSplit.depthMode != depthMode)
+			why = 3;
+		else if (curSplit.drawenv.tw.x != overrideTextureOffsetX || curSplit.drawenv.tw.y != overrideTextureOffsetY)
+			why = 4;
+		else if (curSplit.drawPrimMode != g_DrawPrimMode || curSplit.drawenv.clip.x != activeDrawEnv.clip.x ||
+				 curSplit.drawenv.clip.y != activeDrawEnv.clip.y || curSplit.drawenv.clip.w != activeDrawEnv.clip.w ||
+				 curSplit.drawenv.clip.h != activeDrawEnv.clip.h || curSplit.drawenv.dfe != activeDrawEnv.dfe)
+			why = 5;
+		g_PsxSplitWhy[why]++;
+	}
 	curSplit.numVerts = g_vertexIndex - curSplit.startVertex;
 
 	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
@@ -3634,8 +3677,12 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 //
 static void DrawFarMeshSplit(const GPUDrawSplit& split);
 
+extern void GR_GpuBucket(int bucket);
+
 void DrawAllSplits()
 {
+	PerfCpuScope perfScope(&g_PsyX_CpuDrawMs, true);
+
 #ifdef _DEBUG
 	if (g_dbg_emulatorPaused)
 	{
@@ -3678,6 +3725,7 @@ void DrawAllSplits()
 	if (GR_FlashlightShadowActive())
 	{
 		bool passBegun = false;
+		GR_GpuBucket(0);
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -3690,6 +3738,8 @@ void DrawAllSplits()
 		if (passBegun)
 			GR_ShadowPassEnd();
 	}
+
+	GR_GpuBucket(1);
 
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
@@ -3759,6 +3809,7 @@ void DrawAllSplits()
 		else
 			DrawSplit(g_splits[i]);
 	}
+	GR_GpuBucket(3);
 
 	ClearSplits();
 }
@@ -3771,8 +3822,14 @@ int ParsePrimitive(P_TAG* polyTag);
  * would shift every later bucket's depth seed and the UI-bucket test. */
 extern "C" { uintptr_t g_PsxOtNoBucketLo = 0, g_PsxOtNoBucketHi = 0; }
 
+struct PerfParseDepth { PerfParseDepth() { s_perfParseDepth++; } ~PerfParseDepth() { s_perfParseDepth--; } };
+
 void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 {
+	double perfIgnored = 0.0;
+	PerfCpuScope perfScope(s_perfParseDepth == 0 ? &g_PsyX_CpuParseMs : &perfIgnored, false);
+	PerfParseDepth perfDepth;
+
 	if (!p)
 		return;
 
