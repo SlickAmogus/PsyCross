@@ -570,6 +570,7 @@ extern "C" void PsyX_Pad_SetDeviceFilter(int mode, int deviceId)
 }
 
 extern "C" void PsyX_Pad_SteamBypassTick(void);
+extern "C" int  PsyX_Pad_StandInRumble(SDL_GameController* gc, unsigned short low, unsigned short high);
 
 void PsyX_Pad_InternalPadUpdates()
 {
@@ -1060,7 +1061,8 @@ void PsyX_Pad_Vibrate(int mtap, int slot, unsigned char* table, int len)
 	if (freq_high != 0 && freq_high < 4096)
 		freq_high = 4096;
 
-	SDL_GameControllerRumble(controller->gc, freq_low, freq_high, 200);
+	if (!PsyX_Pad_StandInRumble(controller->gc, freq_low, freq_high))
+		SDL_GameControllerRumble(controller->gc, freq_low, freq_high, 200);
 }
 
 void PsyX_Pad_SetActBuffer(int slot, unsigned char* table, int len)
@@ -1074,7 +1076,7 @@ void PsyX_Pad_SetActBuffer(int slot, unsigned char* table, int len)
 	if (g_actBufLen[slot] == 0)
 	{
 		PsyXController* controller = &g_controllers[slot];
-		if (controller->gc)
+		if (controller->gc && !PsyX_Pad_StandInRumble(controller->gc, 0, 0))
 			SDL_GameControllerRumble(controller->gc, 0, 0, 0);
 	}
 }
