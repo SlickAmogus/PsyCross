@@ -25,6 +25,8 @@ extern "C" {
 	int g_PsyX_FrameInterpLastCount = 0;
 }
 
+#define FG_MAX_ACTORS 8
+
 typedef struct
 {
 	float rot[9];      /* world -> view, row-major */
@@ -33,6 +35,11 @@ typedef struct
 	float ortho[4];    /* L, R, T, B in prim coordinates */
 	float vp[4];       /* x, y, w, h as fractions of the target */
 	int   valid;
+	/* Characters, by a slot id that is stable from tick to tick: world
+	 * position of the root (feet), same units as trans. */
+	int   actCount;
+	int   actId[FG_MAX_ACTORS];
+	float actPos[FG_MAX_ACTORS][3];
 } FgRecord;
 
 static GLuint   s_fgWorldFBO[2] = { 0, 0 };
@@ -50,6 +57,12 @@ static int      s_fgAppliedWant = 0;
 extern FILE*    g_logStream;
 static ShaderID s_fgShader = (ShaderID)-1;
 static GLint    s_fgLoc_t, s_fgLoc_relR, s_fgLoc_relT, s_fgLoc_debug;
+static GLint    s_fgLoc_actCount, s_fgLoc_actRoot, s_fgLoc_actOff, s_fgLoc_actAxis;
+static int      s_fgPendActCount = 0;
+static int      s_fgPendActId[FG_MAX_ACTORS];
+static float    s_fgPendActPos[FG_MAX_ACTORS][3];
+static int      s_fgActCount = 0;
+static float    s_fgActRoot[FG_MAX_ACTORS * 3], s_fgActOff[FG_MAX_ACTORS * 3], s_fgActAxis[3];
 static GLint    s_fgLoc_orthoA, s_fgLoc_orthoB, s_fgLoc_vpA, s_fgLoc_vpB, s_fgLoc_projA, s_fgLoc_projB;
 static float    s_fgRelR[9];   /* column-major, B view -> A view */
 static float    s_fgRelT[3];
@@ -79,14 +92,17 @@ static const char* s_fgShaderSrc =
 	"uniform vec3  u_projA;\n"
 	"uniform vec3  u_projB;\n"
 	"uniform int   u_debug;\n"
+	"uniform int   u_actCount;\n"
+	"uniform vec3  u_actRoot[8];\n"
+	"uniform vec3  u_actOff[8];\n"
+	"uniform vec3  u_actAxis;\n"
 	"const float SZMAX = 262144.0;\n"
 	/* Opaque world depth is written 64 units behind the surface. */
 	"const float FARBIAS = 64.0;\n"
-	"vec3 viewFromB(vec2 uv, float d) {\n"
+	"vec3 viewFromB(vec2 uv, float z) {\n"
 	"	vec2 f = (uv - u_vpB.xy) / u_vpB.zw;\n"
 	"	float sx = mix(u_orthoB.x, u_orthoB.y, f.x);\n"
 	"	float sy = mix(u_orthoB.z, u_orthoB.w, 1.0 - f.y);\n"
-	"	float z = max(d * SZMAX - FARBIAS, 1.0);\n"
 	"	return vec3((sx - u_projB.x) * z / u_projB.z, (sy - u_projB.y) * z / u_projB.z, z);\n"
 	"}\n"
 	"vec2 uvInA(vec3 p) {\n"
@@ -96,9 +112,27 @@ static const char* s_fgShaderSrc =
 	"	              1.0 - (sy - u_orthoA.z) / (u_orthoA.w - u_orthoA.z));\n"
 	"	return u_vpA.xy + f * u_vpA.zw;\n"
 	"}\n"
-	/* xy: how far the surface seen at uv in B moved since A. z: its view Z in A. */
+	/* xy: how far the surface seen at uv in B moved since A. z: its view Z in A.
+	 * A pixel inside a character's bounding cylinder moves with that character
+	 * on top of the camera: there is no per-pixel id to ask, but characters are
+	 * drawn at their true depth, so the position test finds them. Limbs still
+	 * animate at the game's rate; the body as a whole no longer rides the
+	 * world. Units are 256 to the metre. */
 	"vec3 motionAt(vec2 uv) {\n"
-	"	vec3 pa = u_relR * viewFromB(uv, texture2D(s_depB, uv).r) + u_relT;\n"
+	"	float zr = texture2D(s_depB, uv).r * SZMAX;\n"
+	"	vec3 pa = u_relR * viewFromB(uv, max(zr - FARBIAS, 1.0)) + u_relT;\n"
+	"	if (u_actCount > 0) {\n"
+	"		vec3 pr = viewFromB(uv, max(zr, 1.0));\n"
+	"		for (int i = 0; i < 8; i++) {\n"
+	"			if (i >= u_actCount) break;\n"
+	"			vec3 r = pr - u_actRoot[i];\n"
+	"			float h = dot(r, u_actAxis);\n"
+	"			if (h > 10.0 && h < 540.0 && length(r - h * u_actAxis) < 190.0) {\n"
+	"				pa = u_relR * pr + u_relT + u_actOff[i];\n"
+	"				break;\n"
+	"			}\n"
+	"		}\n"
+	"	}\n"
 	"	if (pa.z < 1.0) return vec3(0.0, 0.0, -1.0);\n"
 	"	return vec3(uv - uvInA(pa), pa.z);\n"
 	"}\n"
@@ -199,6 +233,10 @@ static int GR_FgEnsure(void)
 		s_fgLoc_vpB    = glGetUniformLocation(s_fgShader, "u_vpB");
 		s_fgLoc_projA  = glGetUniformLocation(s_fgShader, "u_projA");
 		s_fgLoc_projB  = glGetUniformLocation(s_fgShader, "u_projB");
+		s_fgLoc_actCount = glGetUniformLocation(s_fgShader, "u_actCount");
+		s_fgLoc_actRoot  = glGetUniformLocation(s_fgShader, "u_actRoot");
+		s_fgLoc_actOff   = glGetUniformLocation(s_fgShader, "u_actOff");
+		s_fgLoc_actAxis  = glGetUniformLocation(s_fgShader, "u_actAxis");
 		g_PreviousShader = (ShaderID)-1;
 	}
 
@@ -280,6 +318,27 @@ static void GR_FgBlitFromScene(GLuint dstFBO, GLbitfield mask, GLuint srcFBO)
 		glEnable(GL_SCISSOR_TEST);
 }
 
+/* The characters on screen this tick, given before the world capture.
+ * xyz: root (feet) world positions, three ints each, in the units of the
+ * camera translation. ids: any value stable for one character across ticks. */
+extern "C" void PsyX_FrameInterp_SetActors(const int* xyz, const int* ids, int count)
+{
+	int i;
+
+	if (count > FG_MAX_ACTORS)
+		count = FG_MAX_ACTORS;
+	if (count < 0 || !xyz || !ids)
+		count = 0;
+	for (i = 0; i < count; i++)
+	{
+		s_fgPendActId[i]     = ids[i];
+		s_fgPendActPos[i][0] = (float)xyz[i * 3 + 0];
+		s_fgPendActPos[i][1] = (float)xyz[i * 3 + 1];
+		s_fgPendActPos[i][2] = (float)xyz[i * 3 + 2];
+	}
+	s_fgPendActCount = count;
+}
+
 /* Called by the game once the 3D ordering table has been drawn and before the
  * 2D one: the target holds the world alone, with its depth.
  * rot/trans: the world->view matrix those prims were projected with (Q12
@@ -326,6 +385,10 @@ extern "C" void PsyX_FrameInterp_CaptureWorld(const short* rot, const int* trans
 	r->vp[2] = (float)g_presentVp[2] / (float)s_fgW;
 	r->vp[3] = (float)g_presentVp[3] / (float)s_fgH;
 	r->valid = 1;
+	r->actCount = s_fgPendActCount;
+	memcpy(r->actId, s_fgPendActId, sizeof(r->actId));
+	memcpy(r->actPos, s_fgPendActPos, sizeof(r->actPos));
+	s_fgPendActCount = 0;
 
 	/* Straight from the scene target, not the colour-only resolve mirror: a
 	 * blit from a multisample source resolves depth as well. */
@@ -511,6 +574,38 @@ static int GR_FgPrepare(void)
 		}
 	}
 
+	/* Each character present in both ticks: where its root sits in B's view
+	 * space, and the extra move in A's view space that undoes its own travel
+	 * (-Ra * v). One that jumped more than a metre was repositioned, not moved. */
+	s_fgActCount = 0;
+	for (i = 0; i < b->actCount; i++)
+	{
+		for (j = 0; j < a->actCount; j++)
+			if (a->actId[j] == b->actId[i])
+				break;
+		if (j < a->actCount)
+		{
+			const float vx = b->actPos[i][0] - a->actPos[j][0];
+			const float vy = b->actPos[i][1] - a->actPos[j][1];
+			const float vz = b->actPos[i][2] - a->actPos[j][2];
+			float*      root = &s_fgActRoot[s_fgActCount * 3];
+			float*      off  = &s_fgActOff[s_fgActCount * 3];
+
+			if (vx * vx + vy * vy + vz * vz > 256.0f * 256.0f)
+				continue;
+			for (k = 0; k < 3; k++)
+			{
+				root[k] = b->rot[k * 3 + 0] * b->actPos[i][0] + b->rot[k * 3 + 1] * b->actPos[i][1] +
+				          b->rot[k * 3 + 2] * b->actPos[i][2] + b->trans[k];
+				off[k]  = -(a->rot[k * 3 + 0] * vx + a->rot[k * 3 + 1] * vy + a->rot[k * 3 + 2] * vz);
+			}
+			s_fgActCount++;
+		}
+	}
+	/* World up is -Y. */
+	for (k = 0; k < 3; k++)
+		s_fgActAxis[k] = -b->rot[k * 3 + 1];
+
 	/* A cut, a teleport or a fixed-camera switch: the two frames are different
 	 * shots and there is nothing between them. 384 units is 1.5 m in one tick;
 	 * the trace bound is a 30 degree turn. */
@@ -571,6 +666,13 @@ static void GR_FgDrawIntermediate(int index, int total)
 	glUniform4fv(s_fgLoc_vpB, 1, b->vp);
 	glUniform3fv(s_fgLoc_projA, 1, a->proj);
 	glUniform3fv(s_fgLoc_projB, 1, b->proj);
+	glUniform1i(s_fgLoc_actCount, s_fgActCount);
+	if (s_fgActCount > 0)
+	{
+		glUniform3fv(s_fgLoc_actRoot, s_fgActCount, s_fgActRoot);
+		glUniform3fv(s_fgLoc_actOff, s_fgActCount, s_fgActOff);
+		glUniform3fv(s_fgLoc_actAxis, 1, s_fgActAxis);
+	}
 
 	/* Units 3-7: 0-2 belong to the PSX shaders (VRAM, LUT, shadow map) and
 	 * their bindings are cached. */
@@ -641,6 +743,7 @@ static void GR_FgRestoreComposite(void)
 		glUniform4fv(s_fgLoc_vpB, 1, s_fgRec[s_fgCur].vp);
 		glUniform3fv(s_fgLoc_projA, 1, s_fgRec[s_fgCur].proj);
 		glUniform3fv(s_fgLoc_projB, 1, s_fgRec[s_fgCur].proj);
+		glUniform1i(s_fgLoc_actCount, 0);
 		glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, s_fgCompTex);
 		glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, s_fgCompTex);
 		glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, s_fgDepthTex[s_fgCur]);
@@ -714,6 +817,7 @@ static int s_fgIntermediateSwap = 0;
 static int GR_FgWantsTarget(void) { return 0; }
 static int GR_FgTargetChanged(void) { return 0; }
 extern "C" void PsyX_FrameInterp_CaptureWorld(const short* rot, const int* trans, int worldValid, int tickHz) {}
+extern "C" void PsyX_FrameInterp_SetActors(const int* xyz, const int* ids, int count) {}
 extern "C" void GR_FrameInterp_Present(void) {}
 
 #endif
