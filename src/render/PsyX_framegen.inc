@@ -364,7 +364,15 @@ static int GR_FgPrepare(void)
 	if (s_fgTickHz < 10.0f)
 		return 0;
 
-	count = (int)((float)GR_FgDisplayHz() / s_fgTickHz + 0.5f) - 1;
+	/* Under vsync every present costs a whole refresh, so the frames shown per
+	 * tick must fit inside it: rounding 144/30 up to five stretched each tick
+	 * to 34.7 ms and slowed the game. Without vsync the waits are ours. */
+	{
+		extern int g_cfg_swapInterval;
+		const float ratio = (float)GR_FgDisplayHz() / s_fgTickHz;
+
+		count = (int)(g_cfg_swapInterval ? ratio + 0.02f : ratio + 0.5f) - 1;
+	}
 	if (count > 7)
 		count = 7;
 	if (count < 1)
@@ -402,6 +410,18 @@ static int GR_FgPrepare(void)
 
 	s_fgT0 = SDL_GetPerformanceCounter();
 	g_PsyX_FrameInterpLastCount = count;
+	{
+		/* On a change of rate only: one line per transition, not per frame. */
+		static int s_logged = -1;
+
+		if (count != s_logged && g_logStream)
+		{
+			s_logged = count;
+			fprintf(g_logStream, "[FG] +%d frame(s) per tick: tick %.0f Hz, display %d Hz, H=%.0f ortho=%.1f..%.1f x %.1f..%.1f\n",
+			        count, s_fgTickHz, GR_FgDisplayHz(), b->proj[2], b->ortho[0], b->ortho[1], b->ortho[2], b->ortho[3]);
+			fflush(g_logStream);
+		}
+	}
 	return count;
 }
 
