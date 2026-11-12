@@ -54,6 +54,8 @@ static int      s_fgPrevValid = 0;
 static float    s_fgTickHz = 0.0f;
 static int      s_fgIntermediateSwap = 0;
 static int      s_fgAppliedWant = 0;
+static int      s_fgQueueTotal = 0;
+static int      s_fgQueueNext  = 0;
 extern FILE*    g_logStream;
 static ShaderID s_fgShader = (ShaderID)-1;
 static GLint    s_fgLoc_t, s_fgLoc_relR, s_fgLoc_relT, s_fgLoc_debug;
@@ -362,6 +364,9 @@ extern "C" void PsyX_FrameInterp_CaptureWorld(const short* rot, const int* trans
 	if (!GR_FgEnsure())
 		return;
 
+	/* Any frame of the previous pair not shown yet is too late: its source
+	 * layer is about to be overwritten. */
+	s_fgQueueNext = 0;
 	s_fgCur ^= 1;
 	r = &s_fgRec[s_fgCur];
 
@@ -695,25 +700,6 @@ static void GR_FgDrawIntermediate(int index, int total)
 	g_PreviousScissorState = -999;
 }
 
-/* Holds until the next synthesised frame is due. With vsync the swap has
- * already spent the time and this returns at once. */
-static void GR_FgWait(int index, int total)
-{
-	const Uint64 freq   = SDL_GetPerformanceFrequency();
-	const Uint64 target = s_fgT0 + (Uint64)((double)freq * (double)index / ((double)s_fgTickHz * (double)total));
-	Uint64       now    = SDL_GetPerformanceCounter();
-
-	if (now >= target)
-		return;
-	{
-		const Uint64 remainMs = ((target - now) * 1000) / freq;
-
-		if (remainMs > 2)
-			SDL_Delay((Uint32)(remainMs - 1));
-	}
-	while (SDL_GetPerformanceCounter() < target) {}
-}
-
 static void GR_FgRestoreComposite(void)
 {
 	/* A draw, not a blit: single-sample -> multisample blits are illegal. */
@@ -775,35 +761,80 @@ static void GR_FgRestoreComposite(void)
 	}
 }
 
-/* Shows the synthesised frames for this tick, then leaves the finished frame
- * in the scene target for the normal post-process + present that follows. */
-extern "C" void GR_FrameInterp_Present(void)
+/* The frames of one tick, shown over the tick rather than all at once.
+ *
+ * Showing them back to back inside PsyX_EndScene held the game there for most
+ * of a tick, and with its own update and draw on top the tick overran: 30 fps
+ * became 27. Instead the first one goes out at once and the rest are handed
+ * out by GR_FrameInterp_Pump from the wait the game already sits in between
+ * building a frame and drawing it, so the only time the picture cannot change
+ * is while the game is genuinely busy. Item `total` is the real frame. */
+static void GR_FgShowItem(int index)
 {
 	extern void GR_PostProcess(void);
-	int count, i;
+
+	if (index >= s_fgQueueTotal)
+		GR_FgRestoreComposite();
+	else
+		GR_FgDrawIntermediate(index, s_fgQueueTotal);
+	GR_PostProcess();
+	/* The per-frame counters close once per tick, on the first swap. */
+	s_fgIntermediateSwap = (index != 1);
+	GR_SwapWindow();
+	s_fgIntermediateSwap = 0;
+}
+
+static Uint64 GR_FgDue(int index)
+{
+	return s_fgT0 + (Uint64)((double)SDL_GetPerformanceFrequency() * (double)(index - 1) /
+							 ((double)s_fgTickHz * (double)s_fgQueueTotal));
+}
+
+/* Called from the game's frame-pacing wait. Cheap when nothing is due. */
+extern "C" void GR_FrameInterp_Pump(void)
+{
+	int	due;
+	Uint64 now;
+
+	if (s_fgQueueNext <= 0 || s_fgQueueNext > s_fgQueueTotal || begin_scene_flag)
+		return;
+
+	now = SDL_GetPerformanceCounter();
+	if (now < GR_FgDue(s_fgQueueNext))
+		return;
+
+	/* Late (the game was busy): skip to the newest one that is due. */
+	due = s_fgQueueNext;
+	while (due < s_fgQueueTotal && now >= GR_FgDue(due + 1))
+		due++;
+
+	GR_FgShowItem(due);
+	s_fgQueueNext = due + 1;
+}
+
+/* End of a tick. Returns 1 when it presented the frame itself, 0 when the
+ * caller should post-process and swap as usual. */
+extern "C" int GR_FrameInterp_Present(void)
+{
+	int count;
+
+	s_fgQueueNext = 0;
 
 	if (!g_PsyX_FrameInterp)
 	{
 		if (s_fgWorldFBO[0])
 			GR_FgDestroy();
-		return;
+		return 0;
 	}
 
 	count = GR_FgPrepare();
 	if (count <= 0)
-		return;
+		return 0;
 
-	for (i = 1; i <= count; i++)
-	{
-		GR_FgDrawIntermediate(i, count + 1);
-		GR_PostProcess();
-		s_fgIntermediateSwap = 1;
-		GR_SwapWindow();
-		s_fgIntermediateSwap = 0;
-		GR_FgWait(i, count + 1);
-	}
-
-	GR_FgRestoreComposite();
+	s_fgQueueTotal = count + 1;
+	GR_FgShowItem(1);
+	s_fgQueueNext = 2;
+	return 1;
 }
 
 #else
@@ -818,6 +849,7 @@ static int GR_FgWantsTarget(void) { return 0; }
 static int GR_FgTargetChanged(void) { return 0; }
 extern "C" void PsyX_FrameInterp_CaptureWorld(const short* rot, const int* trans, int worldValid, int tickHz) {}
 extern "C" void PsyX_FrameInterp_SetActors(const int* xyz, const int* ids, int count) {}
-extern "C" void GR_FrameInterp_Present(void) {}
+extern "C" int  GR_FrameInterp_Present(void) { return 0; }
+extern "C" void GR_FrameInterp_Pump(void) {}
 
 #endif

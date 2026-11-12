@@ -1132,7 +1132,8 @@ uint PsyX_CalcFPS();
  * NULL = nothing extra drawn. */
 extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
 
-extern "C" void GR_FrameInterp_Present(void);
+extern "C" int  GR_FrameInterp_Present(void);
+extern "C" void GR_FrameInterp_Pump(void);
 
 void PsyX_EndScene()
 {
@@ -1196,7 +1197,9 @@ void PsyX_EndScene()
 	 * fully composed frame just before presenting. No-op when off. */
 	{
 		extern void GR_PostProcess(void);
-		GR_FrameInterp_Present();
+		/* Frame interpolation presents the tick itself, spread over the tick. */
+		if (GR_FrameInterp_Present())
+			return;
 		GR_PostProcess();
 	}
 
@@ -1459,6 +1462,9 @@ void PsyX_WaitForTimestep(int count)
 			emscripten_sleep(0);
 #endif
 			IntrCpuRelax();
+			/* The game is idle here by definition: the synthesised frames of
+			 * the last tick are shown from this wait. */
+			GR_FrameInterp_Pump();
 			vbl = PsyX_Sys_GetVBlankCount();
 #if defined(__linux__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 			/* IntrCpuRelax is a no-op here, so this loop held a full core. The
