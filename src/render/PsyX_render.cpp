@@ -984,6 +984,8 @@ extern "C" GLuint GR_ScreenFBO(void)
 }
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
+static int GR_FgWantsTarget(void);
+static int GR_FgTargetChanged(void);
 
 /* The scene target as a READ source.
  *
@@ -1818,7 +1820,7 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 
 	{
 		int   w = realW, h = realH;
-		int   wanted = GR_SceneAlwaysOffscreen();
+		int   wanted = GR_SceneAlwaysOffscreen() || GR_FgWantsTarget();
 		float s = g_cfg_renderScale;
 
 		if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
@@ -2092,7 +2094,7 @@ void GR_BeginScene()
 	GR_InvalidateViewScissorCache();
 	s_lutUnitBound = 0;
 	/* The options slider only writes the value; the target follows here. */
-	if (g_cfg_renderScale != s_renderScaleApplied && g_presentWidth > 0 && g_presentHeight > 0)
+	if ((g_cfg_renderScale != s_renderScaleApplied || GR_FgTargetChanged()) && g_presentWidth > 0 && g_presentHeight > 0)
 		GR_ApplyPresentSize(g_presentWidth, g_presentHeight);
 	GR_NativeTrack();
 
@@ -8159,8 +8161,13 @@ static void GR_GpuTimerFrame(int beforeSwap)
 	GR_GpuQueryOpen();
 }
 
+#include "PsyX_framegen.inc"
+
 void GR_SwapWindow()
 {
+	/* A synthesised frame is not a game frame: the per-frame counters
+	 * close on the real one. */
+	if (!s_fgIntermediateSwap)
 	{
 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
 		g_PsxLastFrameVerts = g_PsxFrameVerts;

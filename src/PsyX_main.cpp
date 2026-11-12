@@ -1132,6 +1132,8 @@ uint PsyX_CalcFPS();
  * NULL = nothing extra drawn. */
 extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
 
+extern "C" void GR_FrameInterp_Present(void);
+
 void PsyX_EndScene()
 {
 	if (!begin_scene_flag)
@@ -1194,6 +1196,7 @@ void PsyX_EndScene()
 	 * fully composed frame just before presenting. No-op when off. */
 	{
 		extern void GR_PostProcess(void);
+		GR_FrameInterp_Present();
 		GR_PostProcess();
 	}
 
