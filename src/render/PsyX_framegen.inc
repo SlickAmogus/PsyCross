@@ -464,21 +464,51 @@ static int GR_FgPrepare(void)
 	b = &s_fgRec[s_fgCur];
 	a = &s_fgRec[s_fgCur ^ 1];
 
-	/* Pa = Ra * Rb^T * Pb + (Ta - Ra * Rb^T * Tb) */
-	for (i = 0; i < 3; i++)
-		for (j = 0; j < 3; j++)
-		{
-			float s = 0.0f;
-			for (k = 0; k < 3; k++)
-				s += a->rot[i * 3 + k] * b->rot[j * 3 + k];
-			rel[i * 3 + j] = s;
-		}
-	for (i = 0; i < 3; i++)
+	/* Pa = Ra * Rb^-1 * (Pb - Tb) + Ta.
+	 *
+	 * The true inverse, in doubles, not the transpose: the game's rotation is
+	 * Q12 and its rows come out a hair short of unit length, so Ra * Rb^T is
+	 * 0.9995 * identity for a camera that has not moved. That 0.05% multiplies
+	 * a translation tens of thousands of units long and turned a still camera
+	 * into a 10-unit move -- every synthesised frame drifted and snapped back. */
 	{
-		d[i] = a->trans[i] - (rel[i * 3 + 0] * b->trans[0] + rel[i * 3 + 1] * b->trans[1] + rel[i * 3 + 2] * b->trans[2]);
-		s_fgRelT[i] = d[i];
-		for (j = 0; j < 3; j++)
-			s_fgRelR[j * 3 + i] = rel[i * 3 + j];
+		double B[9], inv[9], relD[9], det;
+
+		for (i = 0; i < 9; i++)
+			B[i] = (double)b->rot[i];
+		inv[0] = B[4] * B[8] - B[5] * B[7];
+		inv[1] = B[2] * B[7] - B[1] * B[8];
+		inv[2] = B[1] * B[5] - B[2] * B[4];
+		inv[3] = B[5] * B[6] - B[3] * B[8];
+		inv[4] = B[0] * B[8] - B[2] * B[6];
+		inv[5] = B[2] * B[3] - B[0] * B[5];
+		inv[6] = B[3] * B[7] - B[4] * B[6];
+		inv[7] = B[1] * B[6] - B[0] * B[7];
+		inv[8] = B[0] * B[4] - B[1] * B[3];
+		det = B[0] * inv[0] + B[1] * inv[3] + B[2] * inv[6];
+		if (det > -1e-6 && det < 1e-6)
+			return 0;
+		for (i = 0; i < 9; i++)
+			inv[i] /= det;
+
+		for (i = 0; i < 3; i++)
+			for (j = 0; j < 3; j++)
+			{
+				double acc = 0.0;
+				for (k = 0; k < 3; k++)
+					acc += (double)a->rot[i * 3 + k] * inv[k * 3 + j];
+				relD[i * 3 + j] = acc;
+				rel[i * 3 + j]  = (float)acc;
+			}
+		for (i = 0; i < 3; i++)
+		{
+			d[i] = (float)((double)a->trans[i] - (relD[i * 3 + 0] * (double)b->trans[0] +
+												  relD[i * 3 + 1] * (double)b->trans[1] +
+												  relD[i * 3 + 2] * (double)b->trans[2]));
+			s_fgRelT[i] = d[i];
+			for (j = 0; j < 3; j++)
+				s_fgRelR[j * 3 + i] = rel[i * 3 + j];
+		}
 	}
 
 	/* A cut, a teleport or a fixed-camera switch: the two frames are different
@@ -489,7 +519,9 @@ static int GR_FgPrepare(void)
 	if (dist2 > 384.0f * 384.0f || tr < 2.732f)
 		return 0;
 
-	if (g_PsyX_FrameInterpCheck > 0)
+	/* Only ticks where the camera moved say anything; the console that arms
+	 * this pauses the game. */
+	if (g_PsyX_FrameInterpCheck > 0 && (dist2 > 0.25f || tr < 2.99999f))
 	{
 		g_PsyX_FrameInterpCheck--;
 		GR_FgSelfCheck(a, b, rel, d);
