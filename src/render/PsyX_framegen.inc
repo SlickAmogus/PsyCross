@@ -333,6 +333,89 @@ extern "C" void PsyX_FrameInterp_CaptureWorld(const short* rot, const int* trans
 	s_fgCaptured = 1;
 }
 
+/* One-shot self-check (console: frameinterp check). For a grid of points it
+ * logs the motion the camera + depth maths predicts next to the motion
+ * actually found by matching a patch of this frame's world layer in the
+ * previous one. Desktop GL only: ES cannot read depth back. */
+extern "C" { int g_PsyX_FrameInterpCheck = 0; }
+
+static void GR_FgSelfCheck(const FgRecord* a, const FgRecord* b, const float* rel, const float* relT)
+{
+	enum { PB = 33, PA = 129, RNG = 48 };
+	static unsigned char pb[PB * PB * 4], pa[PA * PA * 4];
+	int gx, gy;
+
+	if (g_grIsGLES || !g_logStream)
+		return;
+
+	fprintf(g_logStream, "[FGCHK] relR %.5f %.5f %.5f | %.5f %.5f %.5f | %.5f %.5f %.5f  relT %.2f %.2f %.2f" "\n",
+			rel[0], rel[1], rel[2], rel[3], rel[4], rel[5], rel[6], rel[7], rel[8], relT[0], relT[1], relT[2]);
+	fprintf(g_logStream, "[FGCHK] B: T %.1f %.1f %.1f proj %.2f %.2f %.0f ortho %.2f %.2f %.2f %.2f vp %.4f %.4f %.4f %.4f size %dx%d" "\n",
+			b->trans[0], b->trans[1], b->trans[2], b->proj[0], b->proj[1], b->proj[2],
+			b->ortho[0], b->ortho[1], b->ortho[2], b->ortho[3], b->vp[0], b->vp[1], b->vp[2], b->vp[3], s_fgW, s_fgH);
+
+	for (gy = 1; gy <= 3; gy++)
+		for (gx = 1; gx <= 5; gx++)
+		{
+			const int   px = s_fgW * gx / 6, py = s_fgH * gy / 4;
+			const float u = ((float)px + 0.5f) / (float)s_fgW, v = ((float)py + 0.5f) / (float)s_fgH;
+			float	   d = 1.0f, fx, fy, sx, sy, z, P[3], Q[3], sxa, sya, ua, va;
+			int		 x, y, sxs, sys, bestX = 0, bestY = 0;
+			long		best = -1, flat = 0;
+
+			if (px - PA / 2 < 0 || py - PA / 2 < 0 || px + PA / 2 >= s_fgW || py + PA / 2 >= s_fgH)
+				continue;
+
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fgWorldFBO[s_fgCur]);
+			glReadPixels(px, py, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &d);
+			glReadPixels(px - PB / 2, py - PB / 2, PB, PB, GL_RGBA, GL_UNSIGNED_BYTE, pb);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, s_fgWorldFBO[s_fgCur ^ 1]);
+			glReadPixels(px - PA / 2, py - PA / 2, PA, PA, GL_RGBA, GL_UNSIGNED_BYTE, pa);
+
+			fx = (u - b->vp[0]) / b->vp[2];
+			fy = (v - b->vp[1]) / b->vp[3];
+			sx = b->ortho[0] + (b->ortho[1] - b->ortho[0]) * fx;
+			sy = b->ortho[2] + (b->ortho[3] - b->ortho[2]) * (1.0f - fy);
+			z  = d * 262144.0f - 64.0f;
+			if (z < 1.0f) z = 1.0f;
+			P[0] = (sx - b->proj[0]) * z / b->proj[2];
+			P[1] = (sy - b->proj[1]) * z / b->proj[2];
+			P[2] = z;
+			for (x = 0; x < 3; x++)
+				Q[x] = rel[x * 3 + 0] * P[0] + rel[x * 3 + 1] * P[1] + rel[x * 3 + 2] * P[2] + relT[x];
+			sxa = a->proj[0] + Q[0] * a->proj[2] / (Q[2] > 1.0f ? Q[2] : 1.0f);
+			sya = a->proj[1] + Q[1] * a->proj[2] / (Q[2] > 1.0f ? Q[2] : 1.0f);
+			ua  = a->vp[0] + (sxa - a->ortho[0]) / (a->ortho[1] - a->ortho[0]) * a->vp[2];
+			va  = a->vp[1] + (1.0f - (sya - a->ortho[2]) / (a->ortho[3] - a->ortho[2])) * a->vp[3];
+
+			/* Where in A does B's patch sit? (bestX, bestY) = A position - B position. */
+			for (sys = -RNG; sys <= RNG; sys++)
+				for (sxs = -RNG; sxs <= RNG; sxs++)
+				{
+					long e = 0;
+					for (y = 0; y < PB; y += 2)
+						for (x = 0; x < PB; x += 2)
+						{
+							const unsigned char* q = &pb[(y * PB + x) * 4];
+							const unsigned char* r = &pa[((y + RNG + sys) * PA + (x + RNG + sxs)) * 4];
+							e += labs((long)q[0] - r[0]) + labs((long)q[1] - r[1]) + labs((long)q[2] - r[2]);
+						}
+					if (best < 0 || e < best) { best = e; bestX = sxs; bestY = sys; }
+				}
+			for (y = 0; y < PB - 2; y += 2)
+				for (x = 0; x < PB - 2; x += 2)
+					flat += labs((long)pb[(y * PB + x) * 4 + 1] - pb[(y * PB + x + 2) * 4 + 1]) +
+							labs((long)pb[(y * PB + x) * 4 + 1] - pb[((y + 2) * PB + x) * 4 + 1]);
+
+			/* All in pixels, GL orientation (y up), as "position in B minus position in A". */
+			fprintf(g_logStream, "[FGCHK] px %4d,%4d depth %.6f z %.0f | predicted %+.1f,%+.1f | measured %+d,%+d (sad %ld, detail %ld)" "\n",
+					px, py, d, z, (u - ua) * (float)s_fgW, (v - va) * (float)s_fgH, -bestX, -bestY, best, flat);
+		}
+
+	fflush(g_logStream);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
+}
+
 static int GR_FgDisplayHz(void)
 {
 	SDL_DisplayMode mode;
@@ -405,6 +488,12 @@ static int GR_FgPrepare(void)
 	dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
 	if (dist2 > 384.0f * 384.0f || tr < 2.732f)
 		return 0;
+
+	if (g_PsyX_FrameInterpCheck > 0)
+	{
+		g_PsyX_FrameInterpCheck--;
+		GR_FgSelfCheck(a, b, rel, d);
+	}
 
 	GR_FgBlitFromScene(s_fgCompFBO, GL_COLOR_BUFFER_BIT, GR_ScreenReadFBO());
 
