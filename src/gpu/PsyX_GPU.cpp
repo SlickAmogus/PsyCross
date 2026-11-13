@@ -3946,6 +3946,13 @@ void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 					g_otBucketDepth = -1.0f + (float)otBucketIdx * otBucketStep;
 					if (g_otBucketDepth > 1.0f) g_otBucketDepth = 1.0f;
 				}
+				/* Item pass: the depth test is forced on for everything in the
+				 * list, so a flat 2D prim sharing it wrote its bucket depth and
+				 * hid whatever part of the item sat behind that: a square of the
+				 * frozen room over the pickup model. Only prims carrying their
+				 * own depth belong in front of anything here. */
+				if (g_PsyX_ForceItemDepth)
+					g_otBucketDepth = -1.0f;
 				s_otBucketAbs = g_currentOTBucketCount - 1 - otBucketIdx;
 				otBucketIdx++;
 			}
