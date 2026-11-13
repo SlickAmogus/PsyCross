@@ -1059,6 +1059,14 @@ enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 
  * a_extra.w == 2, without the world's far-push so they still win against the
  * floor they stand on), else from the SZ. */
 extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
+/* Set while the item in Harry's hand draws. The weapon models run through
+ * his fist: the PlayStation sorted the whole fist in front of them, while a
+ * true depth test shows the part of the gun that pokes out past the fingers.
+ * Held prims sit this much farther back (view units, 2.55 to the centimetre),
+ * enough for the fist to cover them and far less than the gap to anything
+ * else they could pass behind. The shader carries the same number. */
+extern "C" { int g_PsxActorDepthHeld = 0; }
+#define PSX_HELD_DEPTH_BIAS 16.0f
 /* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
  * bucket shares that one bucket, so painter order cannot sort the distant town
  * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
@@ -1250,7 +1258,7 @@ extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, un
 	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
 	g_primSzNextValid = 1;
 	g_primSzNextKind = SZ_KIND_ACTOR;
-	g_primSzNextFar = 0;
+	g_primSzNextFar = g_PsxActorDepthHeld ? 1 : 0;
 }
 
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
@@ -1549,7 +1557,8 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 
 	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
 	{
-		const float sv[4] = { sv0, sv1, sv2, sv3 };
+		const float held = s_lastLookupFar ? PSX_HELD_DEPTH_BIAS : 0.0f;
+		const float sv[4] = { sv0 + held, sv1 + held, sv2 + held, sv3 + held };
 		const int n = isQuad ? 4 : 3;
 		for (int i = 0; i < n; i++)
 		{
@@ -1557,7 +1566,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 			if (pgxpWorldPath)
 			{
 				z = PgxpNdcFromViewZ(sv[i]);
-				vertex[i]._p1 = 2;
+				vertex[i]._p1 = s_lastLookupFar ? 3 : 2;
 			}
 			else
 			{
