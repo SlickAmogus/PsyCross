@@ -3304,6 +3304,11 @@ extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
  * idle GPU is one of these; which one decides what is worth changing. */
 extern "C" {
 	double	   g_PsyX_CpuParseMs, g_PsyX_CpuDrawMs;
+	/* The replacement meshes' share of the draw half, and how many there were:
+	 * each is a draw call with its own buffers and program, and a skinned
+	 * character is one per material. */
+	double	   g_PsyX_CpuMeshMs;
+	unsigned int g_PsxPerfMeshDraws;
 	unsigned int g_PsxSplitWhy[7];
 }
 static int s_perfParseDepth;
@@ -3792,7 +3797,10 @@ void DrawAllSplits()
 			}
 		}
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
-			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
+		{
+			PerfCpuScope meshScope(&g_PsyX_CpuMeshMs, false);
+			g_PsxPerfMeshDraws += (unsigned int)GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
+		}
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
 			DrawFarMeshSplit(g_splits[i]);
 		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
