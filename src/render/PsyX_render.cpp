@@ -8966,7 +8966,12 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	glUseProgram(0);
 	g_PreviousShader = (ShaderID)-1; g_lastBoundTexture = (TextureID)-1;
 	g_PreviousBlendMode = g_PreviousDepthMode = g_PreviousStencilMode = -999;
-	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = g_PreviousOffscreenState = -999;
+	/* The offscreen tracker stays as it is: nothing here moves the framebuffer
+	 * binding. Forgetting it made the next GR_SetOffscreenState take this for a
+	 * return from an offscreen pass and run that pass's VRAM writeback -- a
+	 * blocking PBO read, a 2 MB copy and a blit, once per mesh. A skinned
+	 * character is a mesh per material: 5-8 for a stock face, 20 for a swap. */
+	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = -999;
 	return 1;
 }
 
