@@ -372,10 +372,11 @@ static float s_glMaxAniso = 0.0f;  /* 0 = extension absent */
  * texture holds palette indices, and interpolating an index yields a colour
  * that is in no neighbouring texel, so those are filtered in the shader instead.
  *
- * Trilinear needs mip levels. Rather than assume, level 1 is queried and the
- * mode falls back to plain linear when there is no mip chain -- asking for
- * MIPMAP_LINEAR on a texture without mips renders it undefined. The query is
- * desktop-only, so GLES takes the same safe fallback. */
+ * Trilinear needs mip levels, and asking for MIPMAP_LINEAR on a texture
+ * without them renders it undefined. A texture's maker says whether it built
+ * a chain (GR_NoteTextureMips); for one whose maker said nothing, level 1 is
+ * queried and the mode falls back to plain linear when it is not there. The
+ * query is desktop-only, so GLES takes the same safe fallback. */
 /* Textures that must never be filtered, whatever the mode.
  *
  * Font atlases paint their glyph cells edge to edge with NO gutter, so a linear
@@ -417,6 +418,53 @@ static int GR_TextureIsNearest(TextureID tex)
 	}
 
 	return 0;
+}
+
+/* What a texture's maker said about its mip chain: 0 nothing, 1 none, 2 a full
+ * one. It saves asking the driver, and asking is a round trip that makes a
+ * threaded driver catch up with everything queued: about 45 us each on an
+ * RTX 5060, once per replacement texture per frame, which came to most of the
+ * CPU time of submitting a frame. GL hands deleted names out again, so what
+ * was said about a name is dropped the moment it is deleted; the wrapper below
+ * sits under every glDeleteTextures in the program for that. */
+#define GR_MIPS_NAMES 65536
+static unsigned char s_texMips[GR_MIPS_NAMES];
+static int           s_texMipsTracked = 0;
+
+extern "C" void GR_NoteTextureMips(TextureID tex, int hasMips)
+{
+	if (tex < GR_MIPS_NAMES)
+		s_texMips[tex] = hasMips ? 2 : 1;
+}
+
+#ifdef USE_GLAD
+static PFNGLDELETETEXTURESPROC s_glDeleteTexturesReal = NULL;
+
+static void APIENTRY GR_DeleteTexturesForget(GLsizei n, const GLuint* textures)
+{
+	for (GLsizei i = 0; textures != NULL && i < n; i++)
+	{
+		if (textures[i] < GR_MIPS_NAMES)
+			s_texMips[textures[i]] = 0;
+	}
+	s_glDeleteTexturesReal(n, textures);
+}
+#endif
+
+/* After the GL entry points are loaded: a new context starts its names over,
+ * and loading puts the driver's own glDeleteTextures back in the table. */
+static void GR_TrackTextureMips(void)
+{
+	memset(s_texMips, 0, sizeof(s_texMips));
+	s_texMipsTracked = 0;
+#ifdef USE_GLAD
+	if (glad_glDeleteTextures != NULL && glad_glDeleteTextures != GR_DeleteTexturesForget)
+	{
+		s_glDeleteTexturesReal = glad_glDeleteTextures;
+		glad_glDeleteTextures  = GR_DeleteTexturesForget;
+		s_texMipsTracked       = 1;
+	}
+#endif
 }
 
 extern "C" {
@@ -486,9 +534,12 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
-			GLint mipW = 0;
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
-			if (mipW > 0)
+			const int said = (s_texMipsTracked && tex < GR_MIPS_NAMES) ? s_texMips[tex] : 0;
+			GLint     mipW = 0;
+
+			if (said == 0)
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
+			if (said == 2 || mipW > 0)
 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
 		}
 	}
@@ -1695,6 +1746,7 @@ int GR_InitialiseGLExt()
 	if (g_grIsGLES)
 		gladLoadGLES2Loader(loader);
 #endif
+	GR_TrackTextureMips();
 
 	const char* rend = (const char*)glGetString(GL_RENDERER);
 	const char* vendor = (const char*)glGetString(GL_VENDOR);
