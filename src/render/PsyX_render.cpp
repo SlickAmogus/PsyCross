@@ -8290,6 +8290,12 @@ void GR_SwapWindow()
 		 * presents nothing (a black window) when an FBO is still bound at
 		 * flushBuffer, even though framebuffer 0 holds the finished frame. */
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+		{
+			extern void PsyX_TimedScreenshots(void);
+			PsyX_TimedScreenshots();
+		}
+#endif
 		GR_GpuTimerFrame(1);
 		{
 			const Uint64 swapT0 = SDL_GetPerformanceCounter();
