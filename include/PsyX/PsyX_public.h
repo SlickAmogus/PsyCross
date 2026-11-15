@@ -305,6 +305,10 @@ extern void PsyX_UpdateMouseConfinement(void);
  * per-frame swap-interval path so the change persists. */
 extern void PsyX_ApplyVsync(int vsync);
 
+/* PC port: the 3D viewport the dither lays its cells over (g_cfg_ditherResolution),
+ * for menus that list the choices. */
+extern void PsyX_GetDitherViewport(int* w, int* h);
+
 /* 1 while Cross (A) or Start is held on any connected game controller.
  * For blocking loops (FMV playback) that run outside the game's pad
  * polling and otherwise only see the keyboard. */
