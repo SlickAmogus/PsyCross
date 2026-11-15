@@ -626,6 +626,17 @@ int g_cfg_affineTextures = 0;
  * primitives that don't request dither at the prim-tag level. */
 int g_cfg_psxDither = 1;
 int g_PsxDitherSuppressed = 0;
+/* How fine the dither pattern is laid out (config: dither_resolution).
+ * 0 = one matrix cell per PSX pixel, on the PSX image's own grid; N > 0 =
+ * square cells, N of them down the 3D viewport; -1 = one cell per rendered
+ * pixel. Anything finer than the render target is the render target. */
+int g_cfg_ditherResolution = 480;
+/* Fragment position -> dither cell: cell = floor(frag.xy * scale + bias).
+ * Taken from the world pass, whose projection the dithered 3D prims use. The
+ * starting values are the old fixed two-pixel cell. */
+static float s_ditherScale[2] = { 0.5f, -0.5f };
+static float s_ditherBias[2]  = { 0.0f, 0.0f };
+static int   s_ditherVp[2]    = { 0, 0 };
 
 /* 1 = this frame draws the 3D world in perspective (set by the game from the
  * same test that decides Hor+ widening: InGame, not the paper map, not one of
@@ -2354,7 +2365,8 @@ typedef struct
 	GLint bilinearFilterLoc;
 	GLint anisoTapsLoc;
 	GLint ditherForceLoc;
-	GLint pixelScaleLoc;
+	GLint ditherScaleLoc;
+	GLint ditherBiasLoc;
 	GLint texelSizeLoc;
 	GLint fbScreenLoc;
 	GLint fbOriginLoc;
@@ -2404,7 +2416,8 @@ GLint u_projection3DLoc;
 GLint u_bilinearFilterLoc;
 GLint u_anisoTapsLoc;
 GLint u_ditherForceLoc;
-GLint u_pixelScaleLoc;
+GLint u_ditherScaleLoc;
+GLint u_ditherBiasLoc;
 GLint u_texelSizeLoc;
 GLint u_fbScreenLoc = -1;
 GLint u_fbOriginLoc = -1;
@@ -2519,7 +2532,7 @@ int g_PsxFogToBlack = 0;
 		"			+2.0,  -2.0,  +3.0,  -1.0,\n"\
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
-		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 4.0) * 4.0);\n"\
+		"		ivec2 dc = ivec2(mod(floor(gl_FragCoord.xy * u_ditherScale + u_ditherBias), 4.0));\n"\
 		"		float dStrength = u_ditherForce * v_is3d;\n"\
 		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * dStrength);\n"\
 		"		if (u_ditherForce > 0.5 && v_is3d > 0.5) {\n"\
@@ -2532,10 +2545,10 @@ int g_PsxFogToBlack = 0;
  * the very last operation on the fragment and the fog mix() can't
  * smooth out the quantization steps that produce the visible noise.
  *
- * 8-pixel cell, native PSX dither strength (1:1 with the original
- * matrix). Earlier resolution-scaling and 1.6x intensity made it
- * look chunkier than PSX; this version sticks closer to the
- * authentic noise level. Gated OFF for additive/subtractive prims (u_fogToBlack==1):
+ * Native PSX dither strength (1:1 with the original matrix): 1.6x
+ * intensity looked chunkier than PSX. The cell size and where the
+ * pattern starts come from dither_resolution (GR_DitherMapUpdate).
+ * Gated OFF for additive/subtractive prims (u_fogToBlack==1):
  * the signed dither offset over-brightened the faint low-cyan anti-aliased rim of the
  * subtractive blood decal, so it subtracted ~nothing over a light floor and leaked the
  * bright floor through as white speckled edges. Opaque geometry (u_fogToBlack==0) keeps
@@ -2556,7 +2569,7 @@ int g_PsxFogToBlack = 0;
 		"			+2.0,  -2.0,  +3.0,  -1.0,\n"\
 		"			-3.0,  +1.0,  -4.0,  +0.0,\n"\
 		"			+3.0,  -1.0,  +2.0,  -2.0) / 255.0;\n"\
-		"		ivec2 dc = ivec2(fract(gl_FragCoord.xy / 8.0) * 4.0);\n"\
+		"		ivec2 dc = ivec2(mod(floor(gl_FragCoord.xy * u_ditherScale + u_ditherBias), 4.0));\n"\
 		/* Untextured additive prims keep the dither: the PSX dithers gouraud
 		 * shading whatever the blend mode, and a faint additive gradient
 		 * quantized without it collapses into one hard 5-bit step (the sewer
@@ -3183,7 +3196,8 @@ int g_PsxFogToBlack = 0;
 	GPU_NEAREST_SAMPLE_FUNC\
 	"	uniform int bilinearFilter;\n"\
 	"	uniform float u_ditherForce;\n"\
-	"	uniform float u_pixelScale;\n"\
+	"	uniform vec2 u_ditherScale;\n"\
+	"	uniform vec2 u_ditherBias;\n"\
 	litUniforms
 
 #define GPU_FRAGMENT_SAMPLE_SHADER(bit) \
@@ -3348,7 +3362,8 @@ const char* gte_shader_32_rgba =
 	"	uniform sampler2D s_texture;\n"\
 	"	uniform int bilinearFilter;\n"\
 	"	uniform float u_ditherForce;\n"\
-	"	uniform float u_pixelScale;\n"\
+	"	uniform vec2 u_ditherScale;\n"\
+	"	uniform vec2 u_ditherBias;\n"\
 	"	uniform vec2 texelSize;\n"\
 	"	uniform vec2 u_texOffset;\n"\
 	"	uniform vec2 u_hiresHalf;\n"\
@@ -3920,7 +3935,8 @@ static void GR_InitialisePSXShader(GTEShader* sh, ShaderID shader)
 	sh->bilinearFilterLoc = glGetUniformLocation(sh->shader, "bilinearFilter");
 	sh->anisoTapsLoc = glGetUniformLocation(sh->shader, "u_anisoTaps");
 	sh->ditherForceLoc = glGetUniformLocation(sh->shader, "u_ditherForce");
-	sh->pixelScaleLoc = glGetUniformLocation(sh->shader, "u_pixelScale");
+	sh->ditherScaleLoc = glGetUniformLocation(sh->shader, "u_ditherScale");
+	sh->ditherBiasLoc = glGetUniformLocation(sh->shader, "u_ditherBias");
 	sh->projectionLoc = glGetUniformLocation(sh->shader, "Projection");
 	sh->texelSizeLoc = glGetUniformLocation(sh->shader, "texelSize");
 	sh->fbScreenLoc = glGetUniformLocation(sh->shader, "u_fbScreen");
@@ -4416,7 +4432,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
 		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
-		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_ditherScaleLoc = shader->ditherScaleLoc;
+		u_ditherBiasLoc = shader->ditherBiasLoc;
 		u_projectionLoc = shader->projectionLoc;
 		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
@@ -4457,7 +4474,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
 		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
-		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_ditherScaleLoc = shader->ditherScaleLoc;
+		u_ditherBiasLoc = shader->ditherBiasLoc;
 		u_projectionLoc = shader->projectionLoc;
 		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
@@ -4498,7 +4516,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
 		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
-		u_pixelScaleLoc = shader->pixelScaleLoc;
+		u_ditherScaleLoc = shader->ditherScaleLoc;
+		u_ditherBiasLoc = shader->ditherBiasLoc;
 		u_projectionLoc = shader->projectionLoc;
 		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = -1;
@@ -4544,7 +4563,8 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
 		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
-		u_pixelScaleLoc = -1;
+		u_ditherScaleLoc = -1;
+		u_ditherBiasLoc = -1;
 		u_projectionLoc = shader->projectionLoc;
 		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = shader->texelSizeLoc;
@@ -4769,16 +4789,10 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		UC_1f(u_ditherForceLoc,
 		            (g_cfg_psxDither && !g_PsxDitherSuppressed) ? 1.0f : 0.0f);
 
-	/* Pixel scale = window width / PSX native (320). Scales the dither
-	 * cell so each PSX-pixel-equivalent on screen gets its own matrix
-	 * lookup, keeping the pattern visually proportional to PSX
-	 * regardless of resolution. */
-	if (u_pixelScaleLoc != -1) {
-		float pixelScale = (g_windowWidth > 0)
-			? ((float)g_windowWidth / 320.0f)
-			: 1.0f;
-		UC_1f(u_pixelScaleLoc, pixelScale);
-	}
+	if (u_ditherScaleLoc != -1)
+		UC_2fv(u_ditherScaleLoc, s_ditherScale);
+	if (u_ditherBiasLoc != -1)
+		UC_2fv(u_ditherBiasLoc, s_ditherBias);
 
 	/* Filtering is a per-FRAME decision (the frame class flips with
 	 * g_PsxDitherSuppressed), so push it on every bind like the two above —
@@ -5617,6 +5631,62 @@ extern "C" void GR_NoteFeedbackSamplerPrim(int semiTrans, int modColour)
 		g_PsxFeedbackStoreAllowed = 2;
 }
 
+/* Native PSX goes back through the world projection to PSX coordinates, so the
+ * 4x4 matrix steps exactly once per PSX pixel wherever widescreen, hfov or vfov
+ * put them. A line count gives square cells. GL rows count up from the bottom,
+ * the PSX's down from the top. */
+static void GR_DitherMapUpdate(int vpX, int vpY, int vpW, int vpH,
+                               float orthoL, float orthoR, float orthoT, float orthoB)
+{
+	const float top = (float)(vpY + vpH);
+
+	if (vpW <= 0 || vpH <= 0)
+		return;
+	if (g_PcHorPlusEnabled)
+	{
+		s_ditherVp[0] = vpW;
+		s_ditherVp[1] = vpH;
+	}
+	if (g_cfg_ditherResolution == 0 && orthoR > orthoL && orthoB > orthoT)
+	{
+		const float sx = (orthoR - orthoL) / (float)vpW;
+		const float sy = (orthoB - orthoT) / (float)vpH;
+
+		s_ditherScale[0] = sx;
+		s_ditherScale[1] = -sy;
+		s_ditherBias[0]  = orthoL - (float)vpX * sx;
+		s_ditherBias[1]  = orthoT + top * sy;
+	}
+	else
+	{
+		const int   lines = (g_cfg_ditherResolution > 0 && g_cfg_ditherResolution < vpH) ? g_cfg_ditherResolution : vpH;
+		const float s     = (float)lines / (float)vpH;
+
+		s_ditherScale[0] = s;
+		s_ditherScale[1] = -s;
+		s_ditherBias[0]  = -(float)vpX * s;
+		s_ditherBias[1]  = top * s;
+	}
+}
+
+/* The 3D viewport the dither lays its cells over, for menus listing the
+ * choices: the last gameplay frame's, else what one would get at this window
+ * size (pillarboxed 4:3 in widescreen mode 0). */
+extern "C" void PsyX_GetDitherViewport(int* w, int* h)
+{
+	if (s_ditherVp[0] > 0 && s_ditherVp[1] > 0)
+	{
+		*w = s_ditherVp[0];
+		*h = s_ditherVp[1];
+		return;
+	}
+	*w = g_windowWidth;
+	*h = g_windowHeight;
+	if (!g_PcNativeRender && g_PcWidescreenMode == 0 && g_windowHeight > 0 &&
+	    g_windowWidth * 3 > g_windowHeight * 4)
+		*w = (int)(g_windowHeight * 4.0f / 3.0f + 0.5f);
+}
+
 void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 {
 	if (enable)
@@ -5821,6 +5891,8 @@ void GR_SetOffscreenState(const RECT16* offscreenRect, int enable)
 				}
 			}
 			GR_SetViewPort(vpX, vpY, vpW, vpH);
+			if (!g_PsxUIOrthoPass)
+				GR_DitherMapUpdate(vpX, vpY, vpW, vpH, fbOrthoL, fbOrthoR, fbOrthoT, fbOrthoB);
 
 			/* Presented sub-rect of the window (pillarbox bars excluded). */
 			g_presentVp[0] = vpX; g_presentVp[1] = vpY;
