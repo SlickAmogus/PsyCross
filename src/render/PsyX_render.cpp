@@ -4436,8 +4436,12 @@ static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShade
 		u_bilinearFilterLoc = shader->bilinearFilterLoc;
 		u_anisoTapsLoc = shader->anisoTapsLoc;
 		u_ditherForceLoc = shader->ditherForceLoc;
-		u_ditherScaleLoc = -1;
-		u_ditherBiasLoc = -1;
+		/* This program dithers like the others. Left without the cell scale it
+		 * kept the zero a uniform starts with, every fragment fell in one cell
+		 * and anything drawn with a replacement texture quantized with no
+		 * pattern at all, beside characters that had one. */
+		u_ditherScaleLoc = shader->ditherScaleLoc;
+		u_ditherBiasLoc = shader->ditherBiasLoc;
 		u_projectionLoc = shader->projectionLoc;
 		u_projection3DLoc = shader->projection3DLoc;
 		u_texelSizeLoc = shader->texelSizeLoc;
