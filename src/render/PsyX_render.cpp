@@ -768,6 +768,12 @@ int   g_PsyX_FlashlightFpsMode      = 0;
  * artificial offset is needed; this is just an optional extra-parallax nudge. */
 float g_PsyX_FlashlightShadowFpsDrop = 0.0f;
 float g_cfg_postProcessIntensity = 1.0f; /* post-process effect mix, 0..1 */
+/* How fine the looks lay out their pixel-sized detail (film grain, the CRT
+ * mask, the sharpen radius), as a fraction of the window's resolution: 0.5
+ * draws them as if the window had half as many pixels each way, so they stay
+ * visible at 4K. The picture under them keeps its resolution. Config key
+ * post_process_scale, console postscale. */
+float g_cfg_postProcessScale = 1.0f;
 float g_cfg_tonemapIntensity     = 1.0f; /* tonemap mix, 0..1 */
 
 /* Image adjustments applied to the final frame ALWAYS (not gated on the
@@ -6157,6 +6163,7 @@ static GLint    g_postLoc_texSize = -1;
 static GLint    g_postLoc_time = -1;
 static GLint    g_postLoc_tonemap = -1;
 static GLint    g_postLoc_postInt = -1;
+static GLint    g_postLoc_fxPixel = -1;
 static GLint    g_postLoc_tmInt = -1;
 static GLint    g_postLoc_bright = -1;
 static GLint    g_postLoc_contrast = -1;
@@ -6212,6 +6219,7 @@ static const char* s_postShaderSrc =
 	"uniform float u_time;\n"
 	"uniform int   u_tonemap;\n"
 	"uniform float u_postIntensity;\n"
+	"uniform float u_fxPixel;\n"
 	"uniform float u_tmIntensity;\n"
 	"uniform float u_brightness;\n"     /* image adjust, 1.0 = neutral */
 	"uniform float u_contrast;\n"
@@ -6246,7 +6254,7 @@ static const char* s_postShaderSrc =
 	 * 2x2 or 3x3 block above, so 4K does not turn it into a fine haze. */
 	"float grain() {\n"
 	"	float cell = max(1.0, floor(0.5 + 1.0 / (u_texSize.y * 1080.0)));\n"
-	"	return grainNoise(floor(gl_FragCoord.xy / cell), u_time) - 0.5;\n"
+	"	return grainNoise(floor(gl_FragCoord.xy / (cell * u_fxPixel)), u_time) - 0.5;\n"
 	"}\n"
 	"vec3 colorGrade(vec3 c) {\n"
 	"	c = (c - 0.5) * 1.12 + 0.5;\n"                       /* contrast */
@@ -6282,7 +6290,7 @@ static const char* s_postShaderSrc =
 	"		if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
 	"		col = texture2D(s_texture, uv).rgb;\n"
 	"		col *= 0.75 + 0.25 * abs(sin(uv.y * 240.0 * 3.14159));\n"
-	"		int m = int(mod(gl_FragCoord.x, 3.0));\n"
+	"		int m = int(mod(floor(gl_FragCoord.x / u_fxPixel), 3.0));\n"
 	"		vec3 mask = m == 0 ? vec3(1.0, 0.72, 0.72) : (m == 1 ? vec3(0.72, 1.0, 0.72) : vec3(0.72, 0.72, 1.0));\n"
 	"		col *= mask * 1.25;\n"
 	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 1.1, 0.0, 1.0);\n"
@@ -6299,10 +6307,11 @@ static const char* s_postShaderSrc =
 	"		col += grain() * 0.10;\n"
 	"	} else if (u_postMode == 6) {\n"                     /* Sharpen */
 	"		vec3 c = texture2D(s_texture, uv).rgb;\n"
-	"		vec3 b = (texture2D(s_texture, uv + vec2(u_texSize.x, 0.0)).rgb\n"
-	"		        + texture2D(s_texture, uv - vec2(u_texSize.x, 0.0)).rgb\n"
-	"		        + texture2D(s_texture, uv + vec2(0.0, u_texSize.y)).rgb\n"
-	"		        + texture2D(s_texture, uv - vec2(0.0, u_texSize.y)).rgb) * 0.25;\n"
+	"		vec2 px = u_texSize * u_fxPixel;\n"
+	"		vec3 b = (texture2D(s_texture, uv + vec2(px.x, 0.0)).rgb\n"
+	"		        + texture2D(s_texture, uv - vec2(px.x, 0.0)).rgb\n"
+	"		        + texture2D(s_texture, uv + vec2(0.0, px.y)).rgb\n"
+	"		        + texture2D(s_texture, uv - vec2(0.0, px.y)).rgb) * 0.25;\n"
 	"		col = c + (c - b) * 0.85;\n"
 	"	} else if (u_postMode == 7) {\n"                     /* PSX retro: downsample + dither + 5-bit */
 	/* 240 lines of square pixels, however wide the window: a fixed 320 across
@@ -6365,6 +6374,7 @@ void GR_InitPostProcess(void)
 	g_postLoc_time    = glGetUniformLocation(g_postShader, "u_time");
 	g_postLoc_tonemap = glGetUniformLocation(g_postShader, "u_tonemap");
 	g_postLoc_postInt = glGetUniformLocation(g_postShader, "u_postIntensity");
+	g_postLoc_fxPixel = glGetUniformLocation(g_postShader, "u_fxPixel");
 	g_postLoc_tmInt   = glGetUniformLocation(g_postShader, "u_tmIntensity");
 	g_postLoc_bright   = glGetUniformLocation(g_postShader, "u_brightness");
 	g_postLoc_contrast = glGetUniformLocation(g_postShader, "u_contrast");
@@ -6428,6 +6438,14 @@ static void GR_DrawFullscreenTexture(TextureID tex, int mode)
 		glUniform1i(g_postLoc_tonemap, g_cfg_tonemap);
 	if (g_postLoc_postInt != -1)
 		glUniform1f(g_postLoc_postInt, g_cfg_postProcessIntensity);
+	if (g_postLoc_fxPixel != -1)
+	{
+		float scale = g_cfg_postProcessScale;
+
+		if (scale < 0.1f) scale = 0.1f;
+		if (scale > 1.0f) scale = 1.0f;
+		glUniform1f(g_postLoc_fxPixel, 1.0f / scale);
+	}
 	if (g_postLoc_tmInt != -1)
 		glUniform1f(g_postLoc_tmInt, g_cfg_tonemapIntensity);
 	/* Out of scope = pass neutral rather than skip the pass, since a look filter
