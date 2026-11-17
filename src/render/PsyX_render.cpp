@@ -6148,17 +6148,29 @@ static const char* s_postShaderSrc =
 	"}\n"
 	/* Film grain. Time seeds the NOISE, it never moves it.
 	 *
-	 * Two ways to get this wrong, and the first version had one and my first fix
-	 * had the other. hash(pixel + time) slides the field diagonally across the
-	 * screen. Offsetting the lookup by a per-frame amount is the same mistake in
-	 * steps: the pattern is spatially coherent, so it visibly jumps around rather
-	 * than re-randomising. Time has to enter the hash as its own dimension, which
-	 * is what this does -- every pixel keeps its position and only its value
-	 * changes, which is what film grain actually looks like. */
+	 * Three ways to get this wrong, and this has had all of them. hash(pixel +
+	 * time) slides the field diagonally across the screen. Offsetting the lookup
+	 * by a per-frame amount is the same mistake in steps. And giving time its own
+	 * dimension is not enough if the hash is fract() of products: on whole pixel
+	 * and frame numbers each input is a sawtooth, the result is a smooth function
+	 * of three sawtooths, and stepping the time one turns every pixel's value by
+	 * an amount that varies evenly across the screen. That reads as bands rolling
+	 * through the grain (reported). An integer hash (PCG3D) has no such
+	 * structure: every pixel keeps its position and gets an unrelated value each
+	 * frame, which is what film grain looks like. */
 	"float grainNoise(vec2 p, float t) {\n"
-	"	vec3 q = fract(vec3(p.xy, t) * vec3(443.897, 441.423, 437.195));\n"
-	"	q += dot(q, q.yzx + 19.19);\n"
-	"	return fract((q.x + q.y) * q.z);\n"
+	"	uvec3 v = uvec3(uint(p.x), uint(p.y), uint(t));\n"
+	"	v = v * 1664525u + 1013904223u;\n"
+	"	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+	"	v ^= v >> 16u;\n"
+	"	v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+	"	return float(v.x >> 8u) * (1.0 / 16777216.0);\n"
+	"}\n"
+	/* Grain in -0.5..0.5. One value per window pixel up to 1620 lines and per
+	 * 2x2 or 3x3 block above, so 4K does not turn it into a fine haze. */
+	"float grain() {\n"
+	"	float cell = max(1.0, floor(0.5 + 1.0 / (u_texSize.y * 1080.0)));\n"
+	"	return grainNoise(floor(gl_FragCoord.xy / cell), u_time) - 0.5;\n"
 	"}\n"
 	"vec3 colorGrade(vec3 c) {\n"
 	"	c = (c - 0.5) * 1.12 + 0.5;\n"                       /* contrast */
@@ -6208,8 +6220,7 @@ static const char* s_postShaderSrc =
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"	} else if (u_postMode == 5) {\n"                     /* Film grain */
 	"		col = texture2D(s_texture, uv).rgb;\n"
-	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
-	"		col += (n - 0.5) * 0.10;\n"
+	"		col += grain() * 0.10;\n"
 	"	} else if (u_postMode == 6) {\n"                     /* Sharpen */
 	"		vec3 c = texture2D(s_texture, uv).rgb;\n"
 	"		vec3 b = (texture2D(s_texture, uv + vec2(u_texSize.x, 0.0)).rgb\n"
@@ -6218,18 +6229,22 @@ static const char* s_postShaderSrc =
 	"		        + texture2D(s_texture, uv - vec2(0.0, u_texSize.y)).rgb) * 0.25;\n"
 	"		col = c + (c - b) * 0.85;\n"
 	"	} else if (u_postMode == 7) {\n"                     /* PSX retro: downsample + dither + 5-bit */
-	"		vec2 grid = vec2(320.0, 240.0);\n"
-	"		vec2 quv = (floor(uv * grid) + 0.5) / grid;\n"
+	/* 240 lines of square pixels, however wide the window: a fixed 320 across
+	 * stretched them sideways in widescreen. The dither matrix steps once per
+	 * one of those pixels, as on the console; stepping per window pixel laid a
+	 * much finer pattern over the blocks than the blocks themselves. */
+	"		vec2 grid = vec2(floor(240.0 * u_texSize.y / u_texSize.x + 0.5), 240.0);\n"
+	"		vec2 cell = floor(uv * grid);\n"
+	"		vec2 quv = (cell + 0.5) / grid;\n"
 	"		col = texture2D(s_texture, quv).rgb;\n"
 	"		mat4 dith = mat4(-4.0, 0.0, -3.0, 1.0, 2.0, -2.0, 3.0, -1.0, -3.0, 1.0, -4.0, 0.0, 3.0, -1.0, 2.0, -2.0) / 255.0;\n"
-	"		ivec2 dc = ivec2(mod(gl_FragCoord.xy, 4.0));\n"
+	"		ivec2 dc = ivec2(mod(cell, 4.0));\n"
 	"		col += vec3(dith[dc.x][dc.y]);\n"
 	"		col = floor(col * 32.0 + 0.5) / 32.0;\n"
 	"	} else if (u_postMode == 8) {\n"                     /* Cinematic: grade + vignette + grain */
 	"		col = colorGrade(texture2D(s_texture, uv).rgb);\n"
 	"		vec2 d = uv - 0.5; col *= clamp(1.0 - dot(d, d) * 0.9, 0.0, 1.0);\n"
-	"		float n = grainNoise(gl_FragCoord.xy, u_time);\n"
-	"		col += (n - 0.5) * 0.045;\n"
+	"		col += grain() * 0.045;\n"
 	"	} else {\n"                                          /* passthrough */
 	"		col = texture2D(s_texture, uv).rgb;\n"
 	"	}\n"
