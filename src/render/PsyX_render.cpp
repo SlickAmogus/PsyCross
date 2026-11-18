@@ -1419,6 +1419,13 @@ static void GR_ResolveBackend(void)
 		requested = PSYX_BACKEND_GL;
 	}
 
+#if defined(PSYX_UWP)
+	/* An app container has no WGL, so Direct3D 11 through the packaged ANGLE
+	 * is the only device there is. SDL's own WinRT ES path is not used: it
+	 * passes display attributes only Microsoft's 2017 ANGLE fork accepts. */
+	requested = PSYX_BACKEND_D3D11;
+#endif
+
 	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
 	{
 		eprintwarn("Render backend '%s' needs ANGLE (libEGL + libGLESv2) next to the game; falling back to native OpenGL\n",
@@ -1557,7 +1564,13 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
 	{
 		void* nativeWindow = NULL;
-#if defined(_WIN32)
+#if defined(PSYX_UWP)
+		/* The CoreWindow, as the IInspectable ANGLE's WinRT surface takes. */
+		SDL_SysWMinfo wmInfo;
+		SDL_VERSION(&wmInfo.version);
+		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
+			nativeWindow = (void*)wmInfo.info.winrt.window;
+#elif defined(_WIN32)
 		SDL_SysWMinfo wmInfo;
 		SDL_VERSION(&wmInfo.version);
 		if (SDL_GetWindowWMInfo(g_window, &wmInfo))

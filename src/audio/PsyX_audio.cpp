@@ -135,7 +135,7 @@ public:
 		std::vector<PsyXAudioDeviceInfo> found;
 		PsyXAudioResult result = PSYX_AUDIO_ERROR_BACKEND;
 
-#ifdef _WIN32
+#ifdef PSYX_HAVE_WASAPI
 		if (backend == PSYX_AUDIO_BACKEND_AUTO || backend == PSYX_AUDIO_BACKEND_WASAPI)
 			result = enumerateWasapiDevices(found);
 		else
@@ -235,7 +235,7 @@ private:
 			config_.backend == PSYX_AUDIO_BACKEND_AUTO ||
 			config_.backend == PSYX_AUDIO_BACKEND_WASAPI;
 
-#ifdef _WIN32
+#ifdef PSYX_HAVE_WASAPI
 		if (wantsWasapi)
 		{
 			if (attempt.mode == PSYX_AUDIO_MODE_AUTO)
@@ -267,7 +267,7 @@ private:
 
 		const bool requestedSdl =
 			config_.backend == PSYX_AUDIO_BACKEND_SDL
-#ifndef _WIN32
+#ifndef PSYX_HAVE_WASAPI
 			|| config_.backend == PSYX_AUDIO_BACKEND_AUTO
 #endif
 			;

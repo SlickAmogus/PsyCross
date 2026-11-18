@@ -1207,6 +1207,12 @@ int format(char* path)
  * so the only in-scope declaration is stdio's. Game callers pass
  * char* which converts implicitly to const char*; we never write
  * to the input strings here so const is correct semantically too. */
+#if defined(PSYX_UWP)
+/* lld-link refuses an image that defines a name the CRT also exports once
+ * anything in it (Lua's os.rename) imports the real one; GNU ld lets the local
+ * definition win. The one PSX caller is pointed at this name instead. */
+#define rename PsyX_McRename
+#endif
 int rename(const char* oldpath, const char* newpath)
 {
 	if (!oldpath || !newpath) return 0;

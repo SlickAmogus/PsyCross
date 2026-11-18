@@ -174,7 +174,18 @@ int PsyX_Backend_IsTranslated(int backend)
  * platform: libEGL(.dll/.dylib) holds EGL, libGLESv2 holds GL. */
 #ifdef _WIN32
 typedef HMODULE PsyXLib;
+#if defined(PSYX_UWP)
+/* The only loader an app container has; it resolves inside the package. */
+static PsyXLib	Lib_Open(const char* path)
+{
+	wchar_t wide[MAX_PATH];
+	if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide, MAX_PATH) == 0)
+		return NULL;
+	return LoadPackagedLibrary(wide, 0);
+}
+#else
 static PsyXLib	Lib_Open(const char* path)             { return LoadLibraryA(path); }
+#endif
 static void*	Lib_Sym(PsyXLib lib, const char* name) { return (void*)GetProcAddress(lib, name); }
 static void		Lib_Close(PsyXLib lib)                 { FreeLibrary(lib); }
 #else
@@ -377,7 +388,7 @@ int PsyX_Angle_Create(void* nativeWindow, int backend, int msaaSamples)
 	/* The native display handle. Windows ANGLE accepts -1 here (its legacy
 	 * EGL_SOFTWARE_DISPLAY_ANGLE value) and has always been called that way; on
 	 * Apple platforms anything but EGL_DEFAULT_DISPLAY (0) is rejected. */
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PSYX_UWP)
 	void* nativeDisplay = (void*)(-1);
 #else
 	void* nativeDisplay = NULL;
@@ -624,7 +635,9 @@ static int Angle_ProbeDir(const char* dir)
 
 int PsyX_Backend_AngleAvailable(void)
 {
-#ifdef _WIN32
+#if defined(PSYX_UWP)
+	return 1;	/* part of the package */
+#elif defined(_WIN32)
 	static int s_cached = -1;
 	if (s_cached >= 0)
 		return s_cached;

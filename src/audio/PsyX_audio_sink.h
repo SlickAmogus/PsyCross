@@ -33,7 +33,13 @@ public:
 std::unique_ptr<AudioSink> createSdlSink();
 PsyXAudioResult enumerateSdlDevices(std::vector<PsyXAudioDeviceInfo>& devices);
 
-#ifdef _WIN32
+/* An app container has no IMMDeviceEnumerator; SDL's own WASAPI path activates
+ * the device the way a packaged app is allowed to. */
+#if defined(_WIN32) && !defined(PSYX_UWP)
+#define PSYX_HAVE_WASAPI 1
+#endif
+
+#ifdef PSYX_HAVE_WASAPI
 std::unique_ptr<AudioSink> createWasapiSink();
 PsyXAudioResult enumerateWasapiDevices(std::vector<PsyXAudioDeviceInfo>& devices);
 #endif

@@ -1,7 +1,7 @@
 #include "../PsyX_audio_internal.h"
 #include "../PsyX_audio_sink.h"
 
-#ifdef _WIN32
+#ifdef PSYX_HAVE_WASAPI
 
 #ifndef NOMINMAX
 #define NOMINMAX

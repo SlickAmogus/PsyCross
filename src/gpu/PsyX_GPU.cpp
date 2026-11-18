@@ -431,7 +431,11 @@ static Uint64 s_wmFrameStart = 0;
 /* The rate is calibrated against SDL each probe frame, so any monotonic
  * counter serves where there is no TSC (arm64 macOS). */
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
 #include <x86intrin.h>
+#endif
 #define WM_TICKS() __rdtsc()
 #else
 #define WM_TICKS() SDL_GetPerformanceCounter()

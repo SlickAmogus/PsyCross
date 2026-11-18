@@ -76,7 +76,7 @@ if(OPENAL_INCLUDE_DIR)
     target_include_directories(psycross_static PRIVATE ${OPENAL_INCLUDE_DIR})
 endif()
 
-if(WIN32)
+if(WIN32 AND NOT SH_UWP)
     target_link_libraries(psycross_static ole32 ksguid avrt propsys)
 endif()
 
