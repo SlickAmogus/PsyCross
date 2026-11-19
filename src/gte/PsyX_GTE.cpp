@@ -336,6 +336,17 @@ extern "C" void PGXP_StoreAddr(void* addr, int slot)
 		              s_vsFifoOfx[slot], s_vsFifoOfy[slot], s_vsFifoH[slot]);
 }
 
+/* The same record for a lone gte_stsxy, which has no hook of its own: `addr`
+ * was just stored from SXY2. Position only. The callers are sprites built
+ * around one projected point (Shadow_SpriteCorners), and a view-space entry on
+ * one corner out of three would hand the per-pixel flashlight a surface that
+ * is not there. */
+extern "C" void PGXP_StoreXy(void* addr)
+{
+	if (g_PsxUsePgxp)
+		Shadow_Store(addr, s_pgxpFifoX[2], s_pgxpFifoY[2], s_pgxpFifoW[2], *(unsigned*)addr);
+}
+
 /* ===================== Exact-transform PGXP twins ==========================
  * Unquantized camera / model / vertex transforms captured at the GTE macro
  * layer BEFORE the Q12->Q8 truncation. RTPS (below) re-projects a coherent

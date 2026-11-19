@@ -265,6 +265,43 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
 	}
 }
 
+/* A sprite hung off one projected point. The game stores the GTE's screen word
+ * in corner 0 (`anchor`, recorded with PGXP_StoreXy) and builds the other two
+ * corners from that integer plus a constant (snow: x1 = x0, y1 = y0 + n).
+ * DuckStation's PGXP carries a precise value through moves only, so an add
+ * drops it: it draws corner 0 where the GTE put it, the built corners on the
+ * pixel grid, and nothing perspective-correct. That sub-pixel corner is what
+ * tilts every snow flake a little differently with PGXP on, and it is the look
+ * this reproduces (reference: DuckStation 4x, PGXP on).
+ *
+ * Here a primitive with untracked vertices goes to the integer path whole
+ * (MakeVertexTriangle), which is right for world geometry and loses exactly
+ * that. So give the built corners entries of their own: the integer position
+ * they already have, and corner 0's W, which being the same on all three
+ * leaves the interpolation affine.
+ *
+ * nativeScale: the scene target has about one pixel per PSX pixel. DuckStation
+ * moves every vertex half a pixel there (vertex_offset, gpu_hw_shadergen.cpp)
+ * so that pixel centres sample what the PSX samples at pixel corners. The
+ * renderer here has no such rule, so the sprite carries it itself; with the
+ * precise corner it leaves the one to three pixels per flake of DuckStation's
+ * 1x PGXP picture.
+ *
+ * Returns 0 and changes nothing when PGXP is off or corner 0 is untracked. */
+extern "C" int Shadow_SpriteCorners(void* anchor, void* c1, void* c2, int nativeScale) {
+	if (!g_PsxUsePgxp) return 0;
+	const ShadowEntry* e = Shadow_Get(anchor);
+	if (!e || e->value != *(const unsigned*)anchor || e->w <= 0.0f) return 0;
+	const float h = nativeScale ? 0.5f : 0.0f;
+	const float x = e->x, y = e->y, w = e->w;
+	const short* p1 = (const short*)c1;
+	const short* p2 = (const short*)c2;
+	if (nativeScale) Shadow_Put(anchor, x + h, y + h, w, *(const unsigned*)anchor);
+	Shadow_Put(c1, (float)p1[0] + h, (float)p1[1] + h, w, *(const unsigned*)c1);
+	Shadow_Put(c2, (float)p2[0] + h, (float)p2[1] + h, w, *(const unsigned*)c2);
+	return 1;
+}
+
 /* Max |precise screen coord| (PSX units) PGXP will use before clamping the POSITION
  * for GPU guard-band safety (W is kept either way, so the vertex stays perspective).
  * Higher = less texture compression at the extreme screen edge (more visible in 16:9
@@ -584,13 +621,28 @@ extern "C" void PGXP_FrameReset(void) { /* shadow is gen-stamped; no reset neede
  * view-space shadow so its surface would be flashlight-lit, but under PGXP the
  * bright reflection albedo blows out white; opting it out makes it match the
  * Classic (no per-pixel) look at all times. Both flags PGXP-on only. */
-struct AffineEntry { uintptr_t key; unsigned gen; unsigned char affine; unsigned char noFl; };
+/* nofilter: draw the texels as they are (PsyX_SetPrimUnfiltered). Unlike the two
+ * above it is honoured with PGXP off as well, which is why it lives in this
+ * table: the SZ table is wiped before the parse on that path. */
+struct AffineEntry { uintptr_t key; unsigned gen; unsigned char affine; unsigned char noFl; unsigned char nofilter; };
 #define AFFINE_BITS 15
 #define AFFINE_SIZE (1u << AFFINE_BITS)
 #define AFFINE_MASK (AFFINE_SIZE - 1u)
 static AffineEntry s_affine[AFFINE_SIZE];
 static int g_primPgxpForceAffine = 0;
 static int g_primNoFlashlight = 0;
+/* A sprite a few texels across that a world-pass polygon carries (snow flakes)
+ * is a pixel pattern, not a surface: filtering only melts the pattern, and on
+ * a primitive that small the coverage fade for additive texels dims what is
+ * left. Named by address rather than armed blind, and dropped at the next
+ * capture whichever prim that is, so a sprite that is built and then not
+ * linked cannot hand the mark to a stranger. */
+static const void* g_primUnfilteredNext = nullptr;
+
+extern "C" void PsyX_SetPrimUnfiltered(const void* prim)
+{
+	g_primUnfilteredNext = prim;
+}
 
 extern "C" void PsyX_SetNextPrimAffine(void)
 {
@@ -604,16 +656,17 @@ extern "C" void PsyX_SetNextPrimNoFlashlight(void)
 	g_primNoFlashlight = 1;
 }
 
-static void AffineStore(const void* prim, unsigned char affine, unsigned char noFl) {
+static void AffineStore(const void* prim, unsigned char affine, unsigned char noFl, unsigned char nofilter) {
 	uintptr_t key = (uintptr_t)prim;
 	unsigned s = (unsigned)((key >> 2) * 2654435761u) & AFFINE_MASK;
 	for (int i = 0; i < 16; i++) {
 		AffineEntry* e = &s_affine[(s + i) & AFFINE_MASK];
 		if (e->key == key || e->key == 0 || e->gen != s_pgxpGen) {
-			e->key = key; e->gen = s_pgxpGen; e->affine = affine; e->noFl = noFl; return;
+			e->key = key; e->gen = s_pgxpGen; e->affine = affine; e->noFl = noFl; e->nofilter = nofilter; return;
 		}
 	}
 	s_affine[s].key = key; s_affine[s].gen = s_pgxpGen; s_affine[s].affine = affine; s_affine[s].noFl = noFl;
+	s_affine[s].nofilter = nofilter;
 }
 
 static const AffineEntry* AffineFind(const void* prim) {
@@ -1299,8 +1352,10 @@ extern "C" void PsyX_CaptureGteDepths(void* prim)
 {
 	/* PGXP: if the next prim was flagged screen-space (billboards), record it so
 	 * the draw side forces affine. Per-prim, then cleared. */
-	if (g_primPgxpForceAffine || g_primNoFlashlight) {
-		AffineStore(prim, (unsigned char)g_primPgxpForceAffine, (unsigned char)g_primNoFlashlight);
+	const unsigned char unfiltered = (g_primUnfilteredNext != nullptr && g_primUnfilteredNext == prim) ? 1 : 0;
+	g_primUnfilteredNext = nullptr;
+	if (g_primPgxpForceAffine || g_primNoFlashlight || unfiltered) {
+		AffineStore(prim, (unsigned char)g_primPgxpForceAffine, (unsigned char)g_primNoFlashlight, unfiltered);
 		g_primPgxpForceAffine = 0;
 		g_primNoFlashlight = 0;
 	}
@@ -1434,6 +1489,7 @@ extern "C" void PsyX_ClearGteDepthTable(void)
 	s_curPgxpAffine = false;
 	g_primNoFlashlight = 0;
 	s_curNoFlashlight = false;
+	g_primUnfilteredNext = nullptr;
 }
 
 static unsigned char PsyX_LookupGteAlpha(const void* prim)
@@ -4279,6 +4335,14 @@ static int ProcessFlatPoly(P_TAG* polyTag)
 
 			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+			{
+				/* geom3d is what switches texture filtering on per primitive.
+				 * Looked up here for this prim type alone: the game's only
+				 * unfiltered sprites are flat textured triangles. */
+				const AffineEntry* fe = AffineFind(polyTag);
+				if (fe && fe->nofilter)
+					firstVertex[0].geom3d = firstVertex[1].geom3d = firstVertex[2].geom3d = 0.0f;
+			}
 			ApplyGtePerVertexDepth(firstVertex, polyTag, false);
 			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
