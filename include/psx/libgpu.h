@@ -268,6 +268,22 @@ extern void PGXP_StoreAddr(void* addr, int slot);
  * GPU resolves the prim-field address at draw. Replaces PsyX_SetNextPrimPgxp.
  * No-op when PGXP is off or src is untracked. */
 extern void Shadow_Copy(void* dst, const void* src);
+/* PGXP: record the precise projection of the word a lone gte_stsxy just stored
+ * at `addr` (the three-vertex store macros do this themselves). Position only.
+ * No-op when PGXP is off. */
+extern void PGXP_StoreXy(void* addr);
+/* PGXP: a sprite whose corner 0 (`anchor`) was stored by the GTE and recorded
+ * with PGXP_StoreXy, and whose other two corners were built from that integer
+ * plus a constant. Call once all three vertex words are final. Keeps corner 0
+ * at its precise position and the built corners on the pixel grid, as
+ * DuckStation's PGXP draws them. nativeScale: the scene is drawn at about one
+ * target pixel per PSX pixel. Returns 0, having done nothing, when PGXP is off
+ * or the anchor is untracked. */
+extern int Shadow_SpriteCorners(void* anchor, void* c1, void* c2, int nativeScale);
+/* Draw `prim` without texture filtering whatever the filter setting, provided
+ * it is the next primitive linked into an ordering table. For sprites a few
+ * texels across that live in the 3D world. */
+extern void PsyX_SetPrimUnfiltered(const void* prim);
 #ifdef __cplusplus
 }
 #endif
