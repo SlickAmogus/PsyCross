@@ -217,6 +217,7 @@ extern "C" {
 #endif
 void Shadow_Store(void* addr, float x, float y, float w, unsigned value);
 void Shadow_Copy(void* dst, const void* src);
+int  Shadow_SpriteCorners(void* anchor, void* c1, void* c2, int nativeScale);
 void PGXP_FrameReset(void);
 void PGXP_CoverageTick(void); /* per-frame; dumps [PGXP] det/miss when on */
 float PGXP_GetSzMax(void);    /* prev-frame max SZ for shader depth normalize */
