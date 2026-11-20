@@ -70,6 +70,9 @@ static void PsyX_Pad_AdoptDevice(Sint32 deviceId);
  * actually used (button or stick). Rumble goes ONLY to this one, so a second
  * idle controller never buzzes. */
 static int g_activeControllerSlot = 0;
+/* Which the player used last, for prompts that name a button: 1 a pad, 0 the
+ * keyboard (or a mouse button bound to the pad). */
+static int g_lastInputPad = 0;
 
 /* The Steam Controller can be plugged in and still invisible to SDL: when the
  * Steam client is running it holds the device for its own desktop
@@ -584,6 +587,8 @@ void PsyX_Pad_InternalPadUpdates()
 		return;
 
 	kbInputs = PsyX_Pad_UpdateKeyboardInput();
+	if (kbInputs != 0xffff)
+		g_lastInputPad = 0;
 
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
 	{
@@ -747,6 +752,11 @@ extern "C" const char* PsyX_Pad_ConnectedControllerName(void)
 			return SDL_GameControllerName(gc);
 	}
 	return NULL;
+}
+
+extern "C" int PsyX_Pad_LastInputWasPad(void)
+{
+	return g_lastInputPad;
 }
 
 extern "C" int PsyX_Pad_ConnectedControllerType(void)
@@ -935,7 +945,10 @@ static int PsyX_Pad_MergeAllControllers(LPPADRAW pad)
 		 * this pad active; an idle pad leaves the current choice alone. */
 		if (ret != 0xFFFF ||
 		    abs(lx) > 12000 || abs(ly) > 12000 || abs(rx) > 12000 || abs(ry) > 12000)
+		{
 			g_activeControllerSlot = i;
+			g_lastInputPad = 1;
+		}
 	}
 
 	if (!any)
