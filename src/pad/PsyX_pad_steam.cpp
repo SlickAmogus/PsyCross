@@ -33,6 +33,7 @@ void PsyX_Pad_StandInFeed(int slot, int present, unsigned buttons, const short* 
 void PsyX_Pad_StandInSetRumble(int (*fn)(int slot, unsigned short low, unsigned short high));
 void PsyX_Pad_StandInSetSource(void (*fn)(void));
 int  PsyX_Pad_StandInRumble(SDL_GameController* gc, unsigned short low, unsigned short high);
+int  PsyX_Pad_SplitXInputStandIn(void);
 }
 
 #if defined(_WIN32) && SDL_VERSION_ATLEAST(2, 24, 0)
@@ -67,6 +68,8 @@ static Uint32       s_nextScan;
 static int        (*s_fedRumble)(int slot, unsigned short low, unsigned short high);
 /* Called on the game thread at each pad update; it feeds the fed slots. */
 static void       (*s_fedSource)(void);
+/* Player 2's window of a split: the XInput slot it reads as its own pad. */
+static int          s_splitSlot = -1;
 
 extern int g_PsyX_PadFilterMode;
 
@@ -278,7 +281,8 @@ void PsyX_Pad_SteamBypassTick(void)
 		if (s_hold || g_PsyX_PadFilterMode != 0)
 		{
 			for (int slot = 0; slot < SH_XI_SLOTS; slot++)
-				StandIn_Remove(slot, s_hold ? "Steam Input has it" : "split screen");
+				if (slot != s_splitSlot)
+					StandIn_Remove(slot, s_hold ? "Steam Input has it" : "split screen");
 		}
 		/* Only a process Steam has loaded its overlay into can have hidden pads. */
 		else if ((s_loaded != 0 || GetModuleHandleA("gameoverlayrenderer64.dll") != NULL ||
@@ -306,6 +310,34 @@ void PsyX_Pad_SteamBypassTick(void)
 			SteamBypass_Read(slot);
 }
 
+/* Player 2's window of a split never starts Steam, but Steam's overlay can
+ * still come along from Player 1's process and hide the pads here as it does
+ * there. Player 1 reads no pad at all while Steam hides them during a split
+ * (see PsyX_Pad_StandInFeed), so the first XInput pad is Player 2's: read
+ * through the private copy, as a stand-in the split keeps. Returns its SDL
+ * device index, -1 when there is no overlay here or no XInput pad. */
+int PsyX_Pad_SplitXInputStandIn(void)
+{
+	if (GetModuleHandleA("gameoverlayrenderer64.dll") == NULL && GetModuleHandleA("gameoverlayrenderer.dll") == NULL)
+		return -1;
+	if (!SteamBypass_Load())
+		return -1;
+	for (int slot = 0; slot < SH_XI_SLOTS; slot++)
+	{
+		ShXiState st;
+
+		if (s_ownGet((DWORD)slot, &st) != SH_XI_OK)
+			continue;
+		if (s_standIn[slot].index == 0 && !StandIn_Add(slot, "Xbox Controller", 0x045e, 0x028e))
+			return -1;
+		s_splitSlot = slot;
+		eprintinfo("[PAD] Steam's overlay hides the pads in this window too; XInput slot %d is read directly as Player 2's pad\n", slot);
+		return s_standIn[slot].index - 1;
+	}
+	eprintwarn("[PAD] Steam's overlay hides the pads in this window and no XInput pad is connected\n");
+	return -1;
+}
+
 #else
 
 void PsyX_Pad_SteamBypassTick(void) {}
@@ -321,5 +353,6 @@ int  PsyX_Pad_StandInRumble(SDL_GameController* gc, unsigned short low, unsigned
 	(void)gc; (void)low; (void)high;
 	return 0;
 }
+int  PsyX_Pad_SplitXInputStandIn(void) { return -1; }
 
 #endif
