@@ -75,6 +75,9 @@ static void PsyX_Pad_Reconcile(SDL_JoystickID gone);
  * actually used (button or stick). Rumble goes ONLY to this one, so a second
  * idle controller never buzzes. */
 static int g_activeControllerSlot = 0;
+/* Which the player used last, for prompts that name a button: 1 a pad, 0 the
+ * keyboard (or a mouse button bound to the pad). */
+static int g_lastInputPad = 0;
 
 /* Touch controls live in the port (pc_touch.c), which knows about game state;
  * declared rather than included so PsyCross keeps no pc_port include path. */
@@ -840,6 +843,8 @@ void PsyX_Pad_InternalPadUpdates()
 		return;
 
 	kbInputs = PsyX_Pad_UpdateKeyboardInput();
+	if (kbInputs != 0xffff)
+		g_lastInputPad = 0;
 
 	/* Let the touch layer stand aside for real hardware. Both facts are needed:
 	 * an opened GameController covers the normal case, and the key word covers
@@ -1125,6 +1130,11 @@ extern "C" const char* PsyX_Pad_ConnectedControllerName(void)
 	return NULL;
 }
 
+extern "C" int PsyX_Pad_LastInputWasPad(void)
+{
+	return g_lastInputPad;
+}
+
 extern "C" int PsyX_Pad_ConnectedControllerType(void)
 {
 	for (int i = 0; i < MAX_CONTROLLERS; i++)
@@ -1375,7 +1385,10 @@ static int PsyX_Pad_MergeAllControllers(LPPADRAW pad)
 		 * this pad active; an idle pad leaves the current choice alone. */
 		if (ret != 0xFFFF ||
 		    abs(lx) > 12000 || abs(ly) > 12000 || abs(rx) > 12000 || abs(ry) > 12000)
+		{
 			g_activeControllerSlot = i;
+			g_lastInputPad = 1;
+		}
 	}
 
 	if (!any)
