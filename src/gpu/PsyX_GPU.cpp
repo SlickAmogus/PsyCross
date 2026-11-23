@@ -1147,6 +1147,14 @@ enum { SZ_KIND_NONE = 0, SZ_KIND_FLAT = 1, SZ_KIND_EXACT = 2, SZ_KIND_ACTOR = 3 
  * a_extra.w == 2, without the world's far-push so they still win against the
  * floor they stand on), else from the SZ. */
 extern "C" { int g_PsxActorDepth = 0; int g_PsxPgxpActorDepth = 1; }
+/* Set while the item in Harry's hand draws. The weapon models run through
+ * his fist: the PlayStation sorted the whole fist in front of them, while a
+ * true depth test shows the part of the gun that pokes out past the fingers.
+ * Held prims sit this much farther back (view units, 2.55 to the centimetre),
+ * enough for the fist to cover them and far less than the gap to anything
+ * else they could pass behind. The shader carries the same number. */
+extern "C" { int g_PsxActorDepthHeld = 0; }
+#define PSX_HELD_DEPTH_BIAS 16.0f
 /* WORLD_FAR: whole-map far-band world geometry. Every poly past the last OT
  * bucket shares that one bucket, so painter order cannot sort the distant town
  * (blocks and trees composite in submission order); those prims draw GL_LEQUAL
@@ -1338,7 +1346,7 @@ extern "C" void PsyX_SetNextPrimSzActor(unsigned short s0, unsigned short s1, un
 	g_primSzNext[2] = s2; g_primSzNext[3] = s3;
 	g_primSzNextValid = 1;
 	g_primSzNextKind = SZ_KIND_ACTOR;
-	g_primSzNextFar = 0;
+	g_primSzNextFar = g_PsxActorDepthHeld ? 1 : 0;
 }
 
 extern "C" void PsyX_SetNextPrimSzExact(unsigned short s0, unsigned short s1, unsigned short s2, unsigned short s3)
@@ -1640,7 +1648,8 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 
 	if (kind == SZ_KIND_ACTOR && g_PsxPgxpActorDepth && !g_PsyX_ForceItemDepth)
 	{
-		const float sv[4] = { sv0, sv1, sv2, sv3 };
+		const float held = s_lastLookupFar ? PSX_HELD_DEPTH_BIAS : 0.0f;
+		const float sv[4] = { sv0 + held, sv1 + held, sv2 + held, sv3 + held };
 		const int n = isQuad ? 4 : 3;
 		for (int i = 0; i < n; i++)
 		{
@@ -1648,7 +1657,7 @@ static void ApplyGtePerVertexDepthImpl(GrVertex* vertex, const P_TAG* polyTag, b
 			if (pgxpWorldPath)
 			{
 				z = PgxpNdcFromViewZ(sv[i]);
-				vertex[i]._p1 = 2;
+				vertex[i]._p1 = s_lastLookupFar ? 3 : 2;
 			}
 			else
 			{
@@ -3381,6 +3390,35 @@ static int PgxpEmitPoly(GrVertex* v, int count)
 /* Console `mixshader 0|1`. Ok is set at startup only if the program built. */
 extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
 
+/* CPU time of the two halves of a frame's rendering and the reason each draw
+ * call had to start, for the game's [PERF] block. A frame that is slow with an
+ * idle GPU is one of these; which one decides what is worth changing. */
+extern "C" {
+	double	   g_PsyX_CpuParseMs, g_PsyX_CpuDrawMs;
+	/* The replacement meshes' share of the draw half, and how many there were:
+	 * each is a draw call with its own buffers and program, and a skinned
+	 * character is one per material. */
+	double	   g_PsyX_CpuMeshMs;
+	unsigned int g_PsxPerfMeshDraws;
+	unsigned int g_PsxSplitWhy[7];
+}
+static int s_perfParseDepth;
+
+struct PerfCpuScope
+{
+	double* acc;
+	Uint64  t0;
+	bool	draw;
+	PerfCpuScope(double* a, bool d) : acc(a), t0(SDL_GetPerformanceCounter()), draw(d) {}
+	~PerfCpuScope()
+	{
+		const double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+		*acc += ms;
+		if (draw && s_perfParseDepth > 0)
+			g_PsyX_CpuParseMs -= ms;
+	}
+};
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
@@ -3444,6 +3482,25 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 		return;
 	}
 
+	{
+		int why = 6;
+		if (curSplit.kind != GPU_SPLIT_LEGACY)
+			why = 0;
+		else if (curSplit.blendMode != blendMode)
+			why = 1;
+		else if (curSplit.texFormat != texFormat || curSplit.textureId != textureId ||
+				 curSplit.normalTextureId != normalTextureId || curSplit.mixed != mixed)
+			why = 2;
+		else if (curSplit.depthMode != depthMode)
+			why = 3;
+		else if (curSplit.drawenv.tw.x != overrideTextureOffsetX || curSplit.drawenv.tw.y != overrideTextureOffsetY)
+			why = 4;
+		else if (curSplit.drawPrimMode != g_DrawPrimMode || curSplit.drawenv.clip.x != activeDrawEnv.clip.x ||
+				 curSplit.drawenv.clip.y != activeDrawEnv.clip.y || curSplit.drawenv.clip.w != activeDrawEnv.clip.w ||
+				 curSplit.drawenv.clip.h != activeDrawEnv.clip.h || curSplit.drawenv.dfe != activeDrawEnv.dfe)
+			why = 5;
+		g_PsxSplitWhy[why]++;
+	}
 	curSplit.numVerts = g_vertexIndex - curSplit.startVertex;
 
 	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
@@ -3722,8 +3779,12 @@ static void DrawShadowCasters(const GPUDrawSplit& split, bool& passBegun)
 //
 static void DrawFarMeshSplit(const GPUDrawSplit& split);
 
+extern void GR_GpuBucket(int bucket);
+
 void DrawAllSplits()
 {
+	PerfCpuScope perfScope(&g_PsyX_CpuDrawMs, true);
+
 #ifdef _DEBUG
 	if (g_dbg_emulatorPaused)
 	{
@@ -3775,6 +3836,7 @@ void DrawAllSplits()
 	if (GR_FlashlightShadowActive())
 	{
 		bool passBegun = false;
+		GR_GpuBucket(0);
 		for (int i = 1; i <= g_splitIndex; i++)
 		{
 			const GPUDrawSplit& s = g_splits[i];
@@ -3787,6 +3849,8 @@ void DrawAllSplits()
 		if (passBegun)
 			GR_ShadowPassEnd();
 	}
+
+	GR_GpuBucket(1);
 
 	if (g_PsxUsePgxp && g_splitIndex > s_dbgSplitHighWater)
 		s_dbgSplitHighWater = g_splitIndex;
@@ -3847,7 +3911,10 @@ void DrawAllSplits()
 			}
 		}
 		if (g_splits[i].kind == GPU_SPLIT_MODERN)
-			GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
+		{
+			PerfCpuScope meshScope(&g_PsyX_CpuMeshMs, false);
+			g_PsxPerfMeshDraws += (unsigned int)GR_DrawModernMesh(g_splits[i].modernHandle, &g_splits[i].drawenv);
+		}
 		else if (g_splits[i].kind == GPU_SPLIT_FARMESH)
 			DrawFarMeshSplit(g_splits[i]);
 		else if (g_splits[i].kind == GPU_SPLIT_FBCAPTURE)
@@ -3856,6 +3923,7 @@ void DrawAllSplits()
 		else
 			DrawSplit(g_splits[i]);
 	}
+	GR_GpuBucket(3);
 
 	ClearSplits();
 }
@@ -3868,8 +3936,14 @@ int ParsePrimitive(P_TAG* polyTag);
  * would shift every later bucket's depth seed and the UI-bucket test. */
 extern "C" { uintptr_t g_PsxOtNoBucketLo = 0, g_PsxOtNoBucketHi = 0; }
 
+struct PerfParseDepth { PerfParseDepth() { s_perfParseDepth++; } ~PerfParseDepth() { s_perfParseDepth--; } };
+
 void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 {
+	double perfIgnored = 0.0;
+	PerfCpuScope perfScope(s_perfParseDepth == 0 ? &g_PsyX_CpuParseMs : &perfIgnored, false);
+	PerfParseDepth perfDepth;
+
 	if (!p)
 		return;
 
