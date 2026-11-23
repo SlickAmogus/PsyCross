@@ -450,10 +450,11 @@ static float s_glMaxAniso = 0.0f;  /* 0 = extension absent */
  * texture holds palette indices, and interpolating an index yields a colour
  * that is in no neighbouring texel, so those are filtered in the shader instead.
  *
- * Trilinear needs mip levels. Rather than assume, level 1 is queried and the
- * mode falls back to plain linear when there is no mip chain -- asking for
- * MIPMAP_LINEAR on a texture without mips renders it undefined. The query is
- * desktop-only, so GLES takes the same safe fallback. */
+ * Trilinear needs mip levels, and asking for MIPMAP_LINEAR on a texture
+ * without them renders it undefined. A texture's maker says whether it built
+ * a chain (GR_NoteTextureMips); for one whose maker said nothing, level 1 is
+ * queried and the mode falls back to plain linear when it is not there. The
+ * query is desktop-only, so GLES takes the same safe fallback. */
 /* Textures that must never be filtered, whatever the mode.
  *
  * Font atlases paint their glyph cells edge to edge with NO gutter, so a linear
@@ -495,6 +496,53 @@ static int GR_TextureIsNearest(TextureID tex)
 	}
 
 	return 0;
+}
+
+/* What a texture's maker said about its mip chain: 0 nothing, 1 none, 2 a full
+ * one. It saves asking the driver, and asking is a round trip that makes a
+ * threaded driver catch up with everything queued: about 45 us each on an
+ * RTX 5060, once per replacement texture per frame, which came to most of the
+ * CPU time of submitting a frame. GL hands deleted names out again, so what
+ * was said about a name is dropped the moment it is deleted; the wrapper below
+ * sits under every glDeleteTextures in the program for that. */
+#define GR_MIPS_NAMES 65536
+static unsigned char s_texMips[GR_MIPS_NAMES];
+static int           s_texMipsTracked = 0;
+
+extern "C" void GR_NoteTextureMips(TextureID tex, int hasMips)
+{
+	if (tex < GR_MIPS_NAMES)
+		s_texMips[tex] = hasMips ? 2 : 1;
+}
+
+#ifdef USE_GLAD
+static PFNGLDELETETEXTURESPROC s_glDeleteTexturesReal = NULL;
+
+static void APIENTRY GR_DeleteTexturesForget(GLsizei n, const GLuint* textures)
+{
+	for (GLsizei i = 0; textures != NULL && i < n; i++)
+	{
+		if (textures[i] < GR_MIPS_NAMES)
+			s_texMips[textures[i]] = 0;
+	}
+	s_glDeleteTexturesReal(n, textures);
+}
+#endif
+
+/* After the GL entry points are loaded: a new context starts its names over,
+ * and loading puts the driver's own glDeleteTextures back in the table. */
+static void GR_TrackTextureMips(void)
+{
+	memset(s_texMips, 0, sizeof(s_texMips));
+	s_texMipsTracked = 0;
+#ifdef USE_GLAD
+	if (glad_glDeleteTextures != NULL && glad_glDeleteTextures != GR_DeleteTexturesForget)
+	{
+		s_glDeleteTexturesReal = glad_glDeleteTextures;
+		glad_glDeleteTextures  = GR_DeleteTexturesForget;
+		s_texMipsTracked       = 1;
+	}
+#endif
 }
 
 extern "C" {
@@ -577,9 +625,12 @@ static void GR_ApplyTextureFilter(TextureID tex, TexFormat texFormat)
 #if !defined(RENDERER_OGLES)
 		if (g_cfg_textureFilter >= 2 && g_grCaps.texLevelParam)
 		{
-			GLint mipW = 0;
-			glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
-			if (mipW > 0)
+			const int said = (s_texMipsTracked && tex < GR_MIPS_NAMES) ? s_texMips[tex] : 0;
+			GLint     mipW = 0;
+
+			if (said == 0)
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &mipW);
+			if (said == 2 || mipW > 0)
 				minFilter = GL_LINEAR_MIPMAP_LINEAR;
 		}
 #endif
@@ -1118,6 +1169,13 @@ static int    s_sharpW = 0, s_sharpH = 0;
  * chosen resolution used to get lost. */
 int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
 
+/* render_scale: the scene is drawn into a target this fraction of the size it
+ * would otherwise have and stretched at present. It is the one setting that
+ * lowers pixel count while keeping the window's shape, so widescreen stays
+ * widescreen -- which Native (PSX), always 4:3, cannot offer. */
+extern "C" { float g_cfg_renderScale = 1.0f; }
+static float s_renderScaleApplied = 1.0f;
+
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
 static int    s_suppressWindowMsaa = 0;
 
@@ -1139,6 +1197,8 @@ extern "C" GLuint GR_ScreenFBO(void)
 }
 
 extern "C" void GR_ApplyPresentSize(int realW, int realH);
+static int GR_FgWantsTarget(void);
+static int GR_FgTargetChanged(void);
 
 /* The scene target as a READ source.
  *
@@ -1510,7 +1570,7 @@ static void GR_ResolveBackend(void)
 
 	if (PsyX_Backend_IsTranslated(requested) && !PsyX_Backend_AngleAvailable())
 	{
-		eprintwarn("Render backend '%s' needs ANGLE (libEGL.dll + libGLESv2.dll) next to the game; falling back to native OpenGL\n",
+		eprintwarn("Render backend '%s' needs ANGLE (libEGL + libGLESv2) next to the game; falling back to native OpenGL\n",
 			PsyX_Backend_GetName(requested));
 		requested = PSYX_BACKEND_GL;
 	}
@@ -1543,6 +1603,13 @@ static void GR_ResolveBackend(void)
 }
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
+
+#if defined(__APPLE__)
+/* ANGLE's Metal backend draws into a CAMetalLayer. SDL owns one through a Metal
+ * view on the window; its layer is what eglCreateWindowSurface is handed. */
+static SDL_MetalView s_metalView = NULL;
+#endif
+
 int GR_InitialiseGLContext(char* windowName, int fullscreen)
 {
 	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
@@ -1553,7 +1620,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 	 * from our own EGL display instead, and ANGLE wants a plain window to make
 	 * its swapchain against, so the flag is dropped there. */
 	if (PsyX_Backend_IsTranslated(g_grActiveBackend))
+	{
 		windowFlags &= ~SDL_WINDOW_OPENGL;
+#if defined(__APPLE__)
+		windowFlags |= SDL_WINDOW_METAL;
+#endif
+	}
 #endif
 
 #if defined(__ANDROID__)
@@ -1660,6 +1732,12 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 		SDL_VERSION(&wmInfo.version);
 		if (SDL_GetWindowWMInfo(g_window, &wmInfo))
 			nativeWindow = (void*)wmInfo.info.win.window;
+#elif defined(__APPLE__)
+		s_metalView = SDL_Metal_CreateView(g_window);
+		if (s_metalView)
+			nativeWindow = SDL_Metal_GetLayer(s_metalView);
+		else
+			eprintwarn("SDL_Metal_CreateView failed: %s\n", SDL_GetError());
 #endif
 
 		if (!PsyX_Angle_Create(nativeWindow, g_grActiveBackend, g_cfg_msaaSamples))
@@ -1667,6 +1745,15 @@ int GR_InitialiseGLContext(char* windowName, int fullscreen)
 			eprintwarn("Backend '%s' could not be initialised through ANGLE; falling back to native OpenGL\n",
 				PsyX_Backend_GetName(g_grActiveBackend));
 
+#if defined(__APPLE__)
+			if (s_metalView)
+			{
+				SDL_Metal_DestroyView(s_metalView);
+				s_metalView = NULL;
+			}
+			/* SDL refuses a window flagged for both Metal and OpenGL. */
+			windowFlags &= ~SDL_WINDOW_METAL;
+#endif
 			SDL_DestroyWindow(g_window);
 			g_window = NULL;
 
@@ -1881,6 +1968,7 @@ int GR_InitialiseGLExt()
 	if (g_grIsGLES)
 		gladLoadGLES2Loader(loader);
 #endif
+	GR_TrackTextureMips();
 
 #if defined(PSYX_IOS)
 	/* SDL's UIKit backend has its CAEAGLLayer framebuffer bound at this point.
@@ -2030,31 +2118,48 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 		g_PcNativeRender = 0;
 	}
 
-	/* Never on iOS. The internal target exists so borderless can render at a
-	 * chosen resolution and stretch to the desktop; a phone has no window mode
-	 * and no resolution to choose, and g_windowWidth/Height there are the
-	 * panel's real drawable, published back into the config at startup. Letting
-	 * a hand-edited config.cfg set fullscreen = 2 would point the scene at a
-	 * 640x480 target and stretch it, for no gain -- and the row that would let
-	 * anyone pick that is already compiled out of the iOS options menu. */
-#if !defined(PSYX_IOS)
-	if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
-	    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH) &&
-	    GR_SetInternalResolution(g_cfgRenderWidth, g_cfgRenderHeight))
 	{
-		g_windowWidth  = g_cfgRenderWidth;
-		g_windowHeight = g_cfgRenderHeight;
+		int   w = realW, h = realH;
+		int   wanted = GR_SceneAlwaysOffscreen() || GR_FgWantsTarget();
+		float s = g_cfg_renderScale;
 
-		return;
-	}
+		/* Never on iOS: a phone has no window mode and no resolution to choose,
+		 * and g_windowWidth/Height there are the panel's real drawable. A
+		 * hand-edited fullscreen = 2 would only stretch a smaller target. */
+#if !defined(PSYX_IOS)
+		if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
+		    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH))
+		{
+			w = g_cfgRenderWidth;
+			h = g_cfgRenderHeight;
+			wanted = 1;
+		}
 #endif
 
-	if (GR_SceneAlwaysOffscreen() && GR_SetInternalResolution(realW, realH))
-	{
-		g_windowWidth  = realW;
-		g_windowHeight = realH;
+		if (!(s > 0.0f) || s > 1.0f)
+			s = 1.0f;
+		s_renderScaleApplied = g_cfg_renderScale;
+		if (s < 0.999f)
+		{
+			/* Even sizes keep the halved PSX buffer maths and the 2:1 blits off
+			 * half pixels; the floor is the smallest PSX mode. */
+			int sw = (int)((float)w * s + 0.5f) & ~1;
+			int sh = (int)((float)h * s + 0.5f) & ~1;
 
-		return;
+			if (sw < 256) sw = (w < 256) ? w : 256;
+			if (sh < 192) sh = (h < 192) ? h : 192;
+			w = sw;
+			h = sh;
+			wanted = 1;
+		}
+
+		if (wanted && GR_SetInternalResolution(w, h))
+		{
+			g_windowWidth  = w;
+			g_windowHeight = h;
+
+			return;
+		}
 	}
 
 	GR_DestroyInternalTarget();
@@ -2202,6 +2307,15 @@ void GR_Shutdown()
 	/* After the GL objects above: destroying the EGL context first would make
 	 * every one of those deletes a call with nothing current. */
 	PsyX_Angle_Destroy();
+
+#if defined(__APPLE__) && (defined(RENDERER_OGL) || defined(RENDERER_OGLES))
+	/* The EGL surface held the layer; only now can the view go. */
+	if (s_metalView)
+	{
+		SDL_Metal_DestroyView(s_metalView);
+		s_metalView = NULL;
+	}
+#endif
 }
 
 void GR_UpdateSwapIntervalState(int swapInterval)
@@ -2286,6 +2400,9 @@ void GR_BeginScene()
 	g_lastBoundTexture = 0;
 	GR_InvalidateViewScissorCache();
 	s_lutUnitBound = 0;
+	/* The options slider only writes the value; the target follows here. */
+	if ((g_cfg_renderScale != s_renderScaleApplied || GR_FgTargetChanged()) && g_presentWidth > 0 && g_presentHeight > 0)
+		GR_ApplyPresentSize(g_presentWidth, g_presentHeight);
 	GR_NativeTrack();
 
 #if USE_OPENGL
@@ -2393,6 +2510,18 @@ GTEShader g_gte_shader_8;
 GTEShader g_gte_shader_16;
 GTEShader g_gte_shader_32_rgba;
 GTEShader g_gte_shader_mix;
+
+/* The same five programs built with SH_LEAN: no filtered-sampling loop and no
+ * shadow-map taps in the source at all. Direct3D compilers flatten a branch
+ * that holds a sampling loop, so through ANGLE (and so in every Windows
+ * browser) the full programs ran both loops on every pixel with the options
+ * off -- hundreds of fetches where the picture needs two -- and an old
+ * integrated GPU spent 40 ms per screen of fill. Bound whenever neither
+ * feature can affect the split (GR_LeanShaderFor). */
+static GTEShader s_gte_lean_4, s_gte_lean_8, s_gte_lean_16, s_gte_lean_32_rgba, s_gte_lean_mix;
+static int       s_compileLean = 0;
+static int       s_leanShadersOk = 0;
+int              g_PsyX_LeanShaders = 1;
 GTEShader g_modern_shader_4, g_modern_shader_8, g_modern_shader_16, g_modern_shader_32_rgba;
 
 #if USE_OPENGL
@@ -2488,7 +2617,7 @@ int g_PsxFogToBlack = 0;
 #define GPU_DECODE_RG_FUNC\
 	"	vec4 lut(vec2 rg) {\n"\
 	"		vec2 idx = (floor(rg * 255.0 + 0.5) + 0.5) * (1.0 / 256.0);\n"\
-	"		vec4 t = texture2D(s_rgLut, idx);\n"\
+	"		vec4 t = SH_TEX0(s_rgLut, idx);\n"\
 	"		vec3 c = floor(t.rgb * 255.0 + 0.5) * (1.0 / 256.0);\n"\
 	"		return vec4(c, (rg.x + rg.y == 0.0) ? 0.0 : (t.w > 0.25 ? 0.5 : 1.0));\n"\
 	"	}\n"
@@ -2694,6 +2823,7 @@ int g_PsxFogToBlack = 0;
 	 * blending its colour like any other tap drags black into every edge, so
 	 * a transparent tap contributes nothing and only adds to coverage when
 	 * it is opaque. */\
+	"#ifndef SH_LEAN\n"\
 	"	vec4 TapWeighted(vec2 idx, float w, inout float cov) {\n"\
 	/* Clamp the tap to the POLYGON'S own UV bounds. PSX pages pack unrelated
 	 * regions edge to edge, so a tap that steps one texel past a UV seam reads
@@ -2775,7 +2905,8 @@ int g_PsxFogToBlack = 0;
 	"		if (cov <= 0.0) { discard; }\n"\
 	"		g_tapCov = cov;\n"\
 	"		return acc / cov;\n"\
-	"	}\n"
+	"	}\n"\
+	"#endif\n"
 
 #define GPU_NEAREST_SAMPLE_FUNC \
 	"vec4 NearestTextureSample(vec2 P) {\n"\
@@ -2796,11 +2927,11 @@ int g_PsxFogToBlack = 0;
 #if (VRAM_FORMAT == GL_LUMINANCE_ALPHA)
 #define GPU_FETCH_VRAM_FUNC\
 		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	vec2 VRAM(vec2 uv) { return floor(SH_TEX0(s_texture, uv).ra * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #else
 #define GPU_FETCH_VRAM_FUNC\
 		"	uniform sampler2D s_texture;\n"\
-		"	vec2 VRAM(vec2 uv) { return floor(texture2D(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
+		"	vec2 VRAM(vec2 uv) { return floor(SH_TEX0(s_texture, uv).rg * 255.0 + 0.5) * (1.0 / 255.0); }\n"
 #endif
 
 /* PGXP path (only when u_pgxpEnabled AND this vertex has a precise W>0):
@@ -2830,7 +2961,7 @@ int g_PsxFogToBlack = 0;
 		 * distant grazing gaps flat-average depth leaves. a_extra.w == 2
 		 * marks ACTOR verts: the same depth, minus the world's far-push. */\
 		"		if (a_extra.w > 0.5) {\n"\
-		"			float dvz = min(a_pgxp.z + (a_extra.w > 1.5 ? 0.0 : u_worldFarBias), u_szMax);\n"\
+		"			float dvz = min(a_pgxp.z + (a_extra.w > 2.5 ? 16.0 : a_extra.w > 1.5 ? 0.0 : u_worldFarBias), u_szMax);\n"\
 		"			b.z = (2.0 * dvz / u_szMax - 1.0) * b.w;\n"\
 		"		}\n"\
 		"		gl_Position = vec4(b.xyz * W, b.w * W);\n"\
@@ -3114,6 +3245,7 @@ int g_PsxFogToBlack = 0;
 	"				}\n"\
 	/* Bilinearly interpolated 3x3 PCF avoids kernel jumps as the projected receiver crosses shadow texels. */\
 	"				float shadow = 1.0;\n"\
+	"#ifndef SH_LEAN\n"\
 	"				if (u_shadowOn > 0) {\n"\
 	/* Perspective-correct shadow receiver (PR#8): correctness for BOTH styles -- same shadow shapes, just stable under motion. */\
 	"					vec3 flShadowP = v_shadowViewPos.xyz / max(v_shadowViewPos.w, 1e-9);\n"\
@@ -3158,6 +3290,7 @@ int g_PsxFogToBlack = 0;
 	"						}\n"\
 	"					}\n"\
 	"				}\n"\
+	"#endif\n"\
 	/* v_fade >= 2 marks the player's own body (game side, +2 on his fade). His
 	 * flashlight sits on his chest, so nothing of him behind that point can be in
 	 * its beam; the classic style's pulled-back origin and the wide sized cones
@@ -3227,11 +3360,15 @@ int g_PsxFogToBlack = 0;
 	/* bilinearFilter is the GATE (0 = off, 1 = 3D geometry only, 2 = this whole
 	 * frame); u_anisoTaps chooses HOW to filter once it passes. Keeping the two
 	 * separate is why anisotropic needs no new gate logic. */\
+	"#ifdef SH_LEAN\n"\
+	"		fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	"#else\n"\
 	"		if((bilinearFilter == 1 && v_geom3d > 0.5) || bilinearFilter >= 2)\n"\
 	"			fragColor = (u_anisoTaps > 1.0) ? AnisoTextureSample(v_texcoord.xy)\n"\
 	"			                                : BilinearTextureSample(v_texcoord.xy);\n"\
 	"		else\n"\
-	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"
+	"			fragColor = NearestTextureSample(v_texcoord.xy);\n"\
+	"#endif\n"
 
 #define GPU_FRAGMENT_TAIL \
 	/* Untextured prims bind a 1x1 white placeholder, which decodes through the
@@ -3687,6 +3824,21 @@ ShaderID GR_Shader_Compile(const char* source)
 #endif
 
 	{
+		/* The VRAM atlas and the decode table are NEAREST with one level, so an
+		 * explicit level 0 reads the same texel -- and without an implicit
+		 * gradient the sample may sit inside a real branch on Direct3D. */
+#if defined(ES2_SHADERS)
+		const char* tex0 = "#define SH_TEX0(s, uv) texture2D(s, uv)\n";
+#else
+		const char* tex0 = "#define SH_TEX0(s, uv) textureLod(s, uv, 0.0)\n";
+#endif
+		strcat(extra_vs_defines, tex0);
+		strcat(extra_fs_defines, tex0);
+		if (s_compileLean)
+			strcat(extra_fs_defines, "#define SH_LEAN\n");
+	}
+
+	{
 		char affineDef[128];
 		snprintf(affineDef, sizeof(affineDef), "#define AFFINE_VARYING %s%svarying\n",
 			tcNoPerspective, SH_TC_CENTROID);
@@ -4019,6 +4171,25 @@ void GR_InitialisePSXShaders()
 	GR_CompilePSXShader(&g_gte_shader_16, gte_shader_16);
 	GR_CompilePSXShader(&g_gte_shader_32_rgba, gte_shader_32_rgba);
 	GR_CompilePSXShader(&g_gte_shader_mix, gte_shader_mix);
+	if (g_PsyX_LeanShaders)
+	{
+		GTEShader*  lean[5] = { &s_gte_lean_4, &s_gte_lean_8, &s_gte_lean_16, &s_gte_lean_32_rgba, &s_gte_lean_mix };
+		const char* src[5]  = { gte_shader_4, gte_shader_8, gte_shader_16, gte_shader_32_rgba, gte_shader_mix };
+
+		s_compileLean   = 1;
+		s_leanShadersOk = 1;
+		for (int i = 0; i < 5; i++)
+		{
+			GLint linked = GL_FALSE;
+
+			GR_CompilePSXShader(lean[i], src[i]);
+			glGetProgramiv(lean[i]->shader, GL_LINK_STATUS, &linked);
+			if (linked != GL_TRUE)
+				s_leanShadersOk = 0;
+		}
+		s_compileLean = 0;
+		eprintinfo("[SHADER] lean programs %s\n", s_leanShadersOk ? "built" : "failed to build; full programs only");
+	}
 	{
 		extern int g_PsxMixedShaderOk;
 		GLint linked = GL_FALSE;
@@ -4421,8 +4592,37 @@ static void GR_PpLitUniforms(GLuint prog)
 	if (p->loc[9] >= 0) glUniform1i(p->loc[9], b.hero[3] > 0.0f ? 1 : 0);
 }
 
+/* The lean twin of a full program when this split would take neither the
+ * filtered-sampling path nor the shadow map. Both conditions are the ones the
+ * uniform pushes below evaluate, so the two programs draw the same pixels. */
+static GTEShader* GR_LeanShaderFor(GTEShader* shader)
+{
+	int filterGate, shadowOn;
+
+	if (!s_leanShadersOk || !g_PsyX_LeanShaders)
+		return shader;
+	filterGate = g_PsxSplitIsGlyph       ? 0
+	           : g_PsxDitherSuppressed ? (g_cfg_menuFilter ? 2 : 0)
+	                                   : ((g_cfg_textureFilter > 0) ? 1 : 0);
+	shadowOn   = (g_PsyX_UseFlashlightShadows && g_PsyX_UsePerPixelFlashlight &&
+	              g_PsyX_FlashlightActive && g_shadowDepthTex != 0 && !g_PsxPresentLastFrame);
+	if (shadowOn)
+		return shader;
+	if (shader == &g_gte_shader_32_rgba)
+		return &s_gte_lean_32_rgba;
+	if (filterGate != 0)
+		return shader;
+	if (shader == &g_gte_shader_4)   return &s_gte_lean_4;
+	if (shader == &g_gte_shader_8)   return &s_gte_lean_8;
+	if (shader == &g_gte_shader_16)  return &s_gte_lean_16;
+	if (shader == &g_gte_shader_mix) return &s_gte_lean_mix;
+	return shader;
+}
+
 static void GR_SetTextureShader(TextureID texture, TexFormat texFormat, GTEShader* shader)
 {
+	shader = GR_LeanShaderFor(shader);
+
 	switch (texFormat)
 	{
 	case TF_4_BIT:
@@ -8512,76 +8712,137 @@ void GR_DiagGLError(const char* where)
  * GLES builds keep the globals the game writes and compile the body out. */
 double g_PsyX_GpuMsSum;
 int    g_PsyX_GpuMsCount;
+/* Samples that passed the depth test, swap to swap, on the same ring. The
+ * game's cover figure is bounding boxes on paper; this is what the card was
+ * really made to shade, which is the only way to tell a frame that is slow
+ * because it paints the screen fifty times from one that is slow for another
+ * reason. */
+double g_PsyX_GpuSamplesSum;
 int    g_PsyX_GpuTimerWanted; /* set by the game while it keeps a log; nothing runs otherwise */
 
+/* The same time and samples split by what was being drawn: 0 the flashlight
+ * shadow map, 1 PSX primitives, 2 replacement meshes (skinned characters and
+ * items), 3 everything else up to the swap. One figure for the frame could
+ * not tell a slow shadow pass from a slow character from a slow world. */
+/* Time inside the buffer swap: the wait for the GPU and for vsync. */
+double g_PsyX_CpuSwapMs;
+double g_PsyX_GpuBucketMs[4];
+double g_PsyX_GpuBucketPx[4];
+
 #if defined(__EMSCRIPTEN__) || defined(__ANDROID__) || defined(PSYX_IOS)
+/* The GLES builds keep the globals the game writes and compile the queries out. */
+void GR_GpuBucket(int bucket)
+{
+	(void)bucket;
+}
+
 static void GR_GpuTimerFrame(int beforeSwap)
 {
 	(void)beforeSwap;
 }
 #else
+enum { GPUQ_N = 256, GPUQ_TIME_ELAPSED = 0x88BF, GPUQ_SAMPLES_PASSED = 0x8914 };
+typedef void (APIENTRY *GpuGetQueryU64)(GLuint, GLenum, unsigned long long*);
+static int            s_gpuqOk = -1, s_gpuqOpen = -1, s_gpuqHead, s_gpuqTail, s_gpuqBucket = 3;
+static GLuint         s_gpuqT[GPUQ_N], s_gpuqS[GPUQ_N];
+static unsigned char  s_gpuqTag[GPUQ_N], s_gpuqPending[GPUQ_N];
+static GpuGetQueryU64 s_gpuqGet;
+
+static void GR_GpuQueryClose(void)
+{
+	if (s_gpuqOpen < 0)
+		return;
+	glEndQuery(GPUQ_TIME_ELAPSED);
+	glEndQuery(GPUQ_SAMPLES_PASSED);
+	s_gpuqPending[s_gpuqOpen] = 1;
+	s_gpuqOpen = -1;
+}
+
+/* A full ring means results are arriving slower than segments are made; the
+ * segment goes unmeasured rather than waiting on the GPU for an old one. */
+static void GR_GpuQueryOpen(void)
+{
+	if (s_gpuqPending[s_gpuqHead])
+		return;
+	glBeginQuery(GPUQ_TIME_ELAPSED, s_gpuqT[s_gpuqHead]);
+	glBeginQuery(GPUQ_SAMPLES_PASSED, s_gpuqS[s_gpuqHead]);
+	s_gpuqTag[s_gpuqHead] = (unsigned char)s_gpuqBucket;
+	s_gpuqOpen = s_gpuqHead;
+	s_gpuqHead = (s_gpuqHead + 1) % GPUQ_N;
+}
+
+void GR_GpuBucket(int bucket)
+{
+	if (s_gpuqOk <= 0 || !g_PsyX_GpuTimerWanted || bucket == s_gpuqBucket)
+		return;
+	s_gpuqBucket = bucket;
+	if (s_gpuqOpen >= 0)
+	{
+		GR_GpuQueryClose();
+		GR_GpuQueryOpen();
+	}
+}
+
 static void GR_GpuTimerFrame(int beforeSwap)
 {
-	typedef void (APIENTRY *GetQueryU64)(GLuint, GLenum, unsigned long long*);
-	enum { N = 4, TIME_ELAPSED = 0x88BF };
-	static int         s_ok = -1, s_open, s_next, s_pending[N];
-	static GLuint      s_q[N];
-	static GetQueryU64 s_get;
-	int i;
-
 	if (!g_PsyX_GpuTimerWanted)
 		return;
-	if (s_ok < 0)
+	if (s_gpuqOk < 0)
 	{
-		s_ok = 0;
+		s_gpuqOk = 0;
 		if (!g_grIsGLES && !PsyX_Angle_Active() && glGenQueries != NULL && glBeginQuery != NULL &&
 		    (SDL_GL_ExtensionSupported("GL_ARB_timer_query") || SDL_GL_ExtensionSupported("GL_EXT_timer_query")))
 		{
-			s_get = (GetQueryU64)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
-			if (s_get != NULL)
+			s_gpuqGet = (GpuGetQueryU64)SDL_GL_GetProcAddress("glGetQueryObjectui64v");
+			if (s_gpuqGet != NULL)
 			{
-				glGenQueries(N, s_q);
-				s_ok = 1;
+				glGenQueries(GPUQ_N, s_gpuqT);
+				glGenQueries(GPUQ_N, s_gpuqS);
+				s_gpuqOk = 1;
 			}
 		}
 	}
-	if (!s_ok)
+	if (!s_gpuqOk)
 		return;
 	if (beforeSwap)
 	{
-		if (s_open)
+		if (s_gpuqOpen >= 0)
 		{
-			glEndQuery(TIME_ELAPSED);
-			s_pending[s_next] = 1;
-			s_next = (s_next + 1) % N;
-			s_open = 0;
+			GR_GpuQueryClose();
+			g_PsyX_GpuMsCount++;
 		}
 		return;
 	}
-	for (i = 0; i < N; i++)
+	while (s_gpuqPending[s_gpuqTail])
 	{
 		GLuint avail = 0;
-		unsigned long long ns = 0;
-		if (!s_pending[i])
-			continue;
-		glGetQueryObjectuiv(s_q[i], GL_QUERY_RESULT_AVAILABLE, &avail);
+		unsigned long long v = 0;
+		const int b = s_gpuqTag[s_gpuqTail] & 3;
+
+		glGetQueryObjectuiv(s_gpuqS[s_gpuqTail], GL_QUERY_RESULT_AVAILABLE, &avail);
 		if (!avail)
-			continue;
-		s_get(s_q[i], GL_QUERY_RESULT, &ns);
-		s_pending[i] = 0;
-		g_PsyX_GpuMsSum += (double)ns / 1.0e6;
-		g_PsyX_GpuMsCount++;
+			break;
+		s_gpuqGet(s_gpuqT[s_gpuqTail], GL_QUERY_RESULT, &v);
+		g_PsyX_GpuMsSum += (double)v / 1.0e6;
+		g_PsyX_GpuBucketMs[b] += (double)v / 1.0e6;
+		s_gpuqGet(s_gpuqS[s_gpuqTail], GL_QUERY_RESULT, &v);
+		g_PsyX_GpuSamplesSum += (double)v;
+		g_PsyX_GpuBucketPx[b] += (double)v;
+		s_gpuqPending[s_gpuqTail] = 0;
+		s_gpuqTail = (s_gpuqTail + 1) % GPUQ_N;
 	}
-	if (!s_pending[s_next])
-	{
-		glBeginQuery(TIME_ELAPSED, s_q[s_next]);
-		s_open = 1;
-	}
+	s_gpuqBucket = 3;
+	GR_GpuQueryOpen();
 }
 #endif
 
+#include "PsyX_framegen.inc"
+
 void GR_SwapWindow()
 {
+	/* A synthesised frame is not a game frame: the per-frame counters
+	 * close on the real one. */
+	if (!s_fgIntermediateSwap)
 	{
 		extern int g_PsxFrameVerts, g_PsxLastFrameVerts;
 		g_PsxLastFrameVerts = g_PsxFrameVerts;
@@ -8696,8 +8957,18 @@ void GR_SwapWindow()
 		 * flushBuffer, even though the window framebuffer holds the finished
 		 * frame. PSYX_DEFAULT_FBO, not 0: on iOS 0 is not the screen. */
 		glBindFramebuffer(GL_FRAMEBUFFER, PSYX_DEFAULT_FBO);
+#if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
+		{
+			extern void PsyX_TimedScreenshots(void);
+			PsyX_TimedScreenshots();
+		}
+#endif
 		GR_GpuTimerFrame(1);
-		SDL_GL_SwapWindow(g_window);
+		{
+			const Uint64 swapT0 = SDL_GetPerformanceCounter();
+			SDL_GL_SwapWindow(g_window);
+			g_PsyX_CpuSwapMs += (double)(SDL_GetPerformanceCounter() - swapT0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+		}
 		GR_GpuTimerFrame(0);
 		if (g_internalFBO)
 			glBindFramebuffer(GL_FRAMEBUFFER, g_internalFBO);
@@ -9035,6 +9306,7 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 		return 0;
 	TextureID texture = binding.textureId; int format = binding.texFormat, count = binding.vertexCount;
 	g_PsxPerfCharaVerts += (unsigned int)count;
+	GR_GpuBucket(2);
 	if (format == TF_4_BIT) modern=&g_modern_shader_4;
 	else if (format == TF_8_BIT) modern=&g_modern_shader_8;
 	else if (format == TF_16_BIT) modern=&g_modern_shader_16;
@@ -9094,6 +9366,7 @@ int GR_DrawModernMesh(unsigned int mesh_handle, const DRAWENV* env)
 	 * blocking PBO read, a 2 MB copy and a blit, once per mesh. A skinned
 	 * character is a mesh per material: 5-8 for a stock face, 20 for a swap. */
 	g_PreviousDepthFuncAlways = 0; g_PreviousScissorState = -999;
+	GR_GpuBucket(1);
 	return 1;
 }
 

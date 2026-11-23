@@ -538,6 +538,17 @@ int CdRead(int sectors, u_long* buf, int mode)
 	int ret;
 
 	ret = 0;
+
+	/* A read of nothing completes at once. Queued, its count started at zero,
+	 * the decrement in CdReadSync took it negative and it never reached the
+	 * "done" test, so each poll copied another sector past the caller's
+	 * buffer for as long as the caller kept polling. */
+	if (sectors <= 0)
+	{
+		eprintwarn("CdRead: %d sectors requested, nothing read\n", sectors);
+		return 1;
+	}
+
 	g_PsxCdHeadLba += sectors;
 	g_PsxCdHeadEpoch++;
 
@@ -572,6 +583,13 @@ int CdReadSync(int mode, u_char* result)
 	{
 		if (g_cdComQueue[i].processed == 0)
 		{
+			/* Never copy for a read with nothing left, however it got queued. */
+			if (g_cdComQueue[i].count <= 0)
+			{
+				g_cdComQueue[i].processed = 1;
+				return 0;
+			}
+
 			do
 			{
 				/* Restore THIS read's cursor — no-op when nothing moved it,
