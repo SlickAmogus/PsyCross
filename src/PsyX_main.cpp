@@ -1329,6 +1329,9 @@ uint PsyX_CalcFPS();
  * NULL = nothing extra drawn. */
 extern "C" void (*g_PsyX_PostCaptureHook)(void) = NULL;
 
+extern "C" int  GR_FrameInterp_Present(void);
+extern "C" void GR_FrameInterp_Pump(void);
+
 void PsyX_EndScene()
 {
 	if (!begin_scene_flag)
@@ -1391,6 +1394,9 @@ void PsyX_EndScene()
 	 * fully composed frame just before presenting. No-op when off. */
 	{
 		extern void GR_PostProcess(void);
+		/* Frame interpolation presents the tick itself, spread over the tick. */
+		if (GR_FrameInterp_Present())
+			return;
 		GR_PostProcess();
 	}
 
@@ -1399,22 +1405,65 @@ void PsyX_EndScene()
 }
 
 #if !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
-void PsyX_TakeScreenshot()
+static void PsyX_SaveScreenshot(const char* path, int width, int height)
 {
-	u_char* pixels = (u_char*)malloc(g_windowWidth * g_windowHeight * 4);
+	u_char* pixels = (u_char*)malloc(width * height * 4);
 	
 #if defined(RENDERER_OGL)
-	glReadPixels(0, 0, g_windowWidth, g_windowHeight, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+	glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
 #elif defined(RENDERER_OGLES)
-	glReadPixels(0, 0, g_windowWidth, g_windowHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels);	// FIXME: is that correct format?
+	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);	// FIXME: is that correct format?
 #endif
 
-	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(pixels, g_windowWidth, g_windowHeight, 8 * 4, g_windowWidth * 4, 0, 0, 0, 0);
+	SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(pixels, width, height, 8 * 4, width * 4, 0, 0, 0, 0);
 
-	SDL_SaveBMP(surface, "SCREENSHOT.BMP");
+	SDL_SaveBMP(surface, path);
 	SDL_FreeSurface(surface);
 
 	free(pixels);
+}
+
+void PsyX_TakeScreenshot()
+{
+	PsyX_SaveScreenshot("SCREENSHOT.BMP", g_windowWidth, g_windowHeight);
+}
+
+/* PSYX_SHOT_AT=20,35.5,50 saves shot_20000.bmp, shot_35500.bmp and so on (the
+ * name is in milliseconds) that many seconds after start, rows bottom-up as
+ * F12 writes them. For runs nobody is watching: a capture taken from outside
+ * the process comes back black once the display has gone to sleep, and nothing
+ * may press F12 for us. Called with the finished frame in the window's
+ * framebuffer, just before it is swapped. */
+void PsyX_TimedScreenshots(void)
+{
+	static const char* next = NULL;
+	static int         asked = 0;
+	char*              end;
+	double             at;
+	char               path[64];
+
+	if (!asked)
+	{
+		asked = 1;
+		next = getenv("PSYX_SHOT_AT");
+	}
+	if (next == NULL || *next == '\0')
+		return;
+	at = strtod(next, &end);
+	if (end == next)
+	{
+		next = NULL;
+		return;
+	}
+	if ((double)SDL_GetTicks() < at * 1000.0)
+		return;
+	next = (*end == ',') ? end + 1 : end;
+	snprintf(path, sizeof(path), "shot_%ld.bmp", (long)(at * 1000.0 + 0.5));
+	/* The window's own size: the game's can be a smaller internal one. */
+	if (g_presentWidth > 0 && g_presentHeight > 0)
+		PsyX_SaveScreenshot(path, g_presentWidth, g_presentHeight);
+	else
+		PsyX_SaveScreenshot(path, g_windowWidth, g_windowHeight);
 }
 #endif
 
@@ -1665,6 +1714,9 @@ void PsyX_WaitForTimestep(int count)
 			}
 
 			IntrCpuRelax();
+			/* The game is idle here by definition: the synthesised frames of
+			 * the last tick are shown from this wait. */
+			GR_FrameInterp_Pump();
 			vbl = PsyX_Sys_GetVBlankCount();
 #if defined(__linux__) && !defined(__EMSCRIPTEN__) && !defined(__ANDROID__)
 			/* IntrCpuRelax is a no-op here, so this loop held a full core. The
