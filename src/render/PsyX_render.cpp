@@ -1173,7 +1173,7 @@ int g_cfgRenderWidth = 0, g_cfgRenderHeight = 0, g_cfgFullscreenMode = 0;
  * would otherwise have and stretched at present. It is the one setting that
  * lowers pixel count while keeping the window's shape, so widescreen stays
  * widescreen -- which Native (PSX), always 4:3, cannot offer. */
-extern "C" { float g_cfg_renderScale = 1.0f; }
+/* g_cfg_renderScale is defined above, with the platforms' own render scaling. */
 static float s_renderScaleApplied = 1.0f;
 
 static GLuint s_resolveFBO = 0, s_resolveTex = 0;
