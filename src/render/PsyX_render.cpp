@@ -2431,18 +2431,13 @@ int g_PsxFogToBlack = 0;
  * bright floor through as white speckled edges. Opaque geometry (u_fogToBlack==0) keeps
  * full dither.
  *
- * Fog does not take the dither away: on the PlayStation fog is only the colour a
- * polygon is given, and the pattern goes over it like any other (in DuckStation the
- * darkest, most fogged walls are as crosshatched as the floor at Harry's feet).
- * The void behind the world is dithered too. The game draws it as a full-screen
- * gouraud quad in the fog colour (bodyprog_80055028.c), which the console dithers
- * like any gouraud polygon; here it is that quad averaged with a clear of the same
- * colour, so half the pattern's strength. A fully fogged object has to come out as
- * that exact pixel or it shows as a shape against the fog (reported twice: as a
- * crosshatched outline when only the object was dithered, and it would be a flat
- * one now that only the void is). So over the last few percent before FULL fog a
- * fragment moves from its own dithered, quantized colour to the void's. fogAmt
- * comes from GPU_LIT_TAIL just above. */
+ * The pattern and the 5-bit quantize fade out with the fog amount, and the void
+ * behind the world is left flat. Deep fog has no crosshatch in DuckStation; for a
+ * while (2026-11-16) the pattern was carried through the whole fog and onto the
+ * void at a player's request, which turned out not to match. Fading both also
+ * makes a fully fogged fragment resolve to exactly the fog colour, the void's, so
+ * a far object does not stand out against it as an outline. fogAmt comes from
+ * GPU_LIT_TAIL just above. */
 #	define GPU_DITHERING_NO_VCOLOR\
 		"		mat4 dither = mat4(\n"\
 		"			-4.0,  +0.0,  -3.0,  +1.0,\n"\
@@ -2456,21 +2451,17 @@ int g_PsxFogToBlack = 0;
 		 * water octagon read as two flat rings). The blood-decal leak above
 		 * was a textured subtractive prim, which stays excluded. */\
 		"		float addDither = (u_untextured > 0) ? 1.0 : (1.0 - float(u_fogToBlack));\n"\
-		/* The fog backdrop is a flat-coloured gouraud quad with no 3D position,
-		 * so PGXP does not mark it 3D; without PGXP everything in the frame
-		 * counts as 3D and it was dithered. It is dithered either way now. */\
-		"		float dGate = (u_untextured > 0 && u_fogToBlack == 0) ? 1.0 : v_is3d;\n"\
-		"		float fogEnd = smoothstep(0.96, 1.0, fogAmt);\n"\
-		"		vec3 dOfs = vec3(dither[dc.x][dc.y] * u_ditherForce * dGate * addDither);\n"\
+		/* The fog backdrop is a full-screen gouraud quad in the fog colour. With
+		 * PGXP it has no 3D position and is not dithered; without PGXP the whole
+		 * frame counts as 3D, so it is told apart by its colour and left flat
+		 * there too. */\
+		"		float isVoid = (u_untextured > 0 && u_fogToBlack == 0 &&\n"\
+		"		                all(lessThan(abs(fragColor.xyz - u_fogColor), vec3(0.006)))) ? 1.0 : 0.0;\n"\
+		"		float dGate = v_is3d * (1.0 - isVoid);\n"\
+		"		fragColor.xyz += vec3(dither[dc.x][dc.y] * u_ditherForce * dGate * addDither * (1.0 - fogAmt));\n"\
 		"		if (u_ditherForce > 0.5 && dGate > 0.5) {\n"\
-		"		    vec3 qcol = floor((fragColor.xyz + dOfs) * 32.0 + 0.5) / 32.0;\n"\
-		/* What the backdrop shows at this pixel: the fog colour, dithered and
-		 * quantized like any other fragment, averaged with the clear behind it
-		 * (the quad is drawn semi-transparent). Additive and subtractive prims
-		 * fade to nothing instead, as before. */\
-		"		    vec3 vcol = (u_fogToBlack > 0) ? fragColor.xyz\n"\
-		"		              : 0.5 * (u_fogColor + floor((u_fogColor + dOfs) * 32.0 + 0.5) / 32.0);\n"\
-		"		    fragColor.xyz = mix(qcol, vcol, fogEnd);\n"\
+		"		    vec3 qcol = floor(fragColor.xyz * 32.0 + 0.5) / 32.0;\n"\
+		"		    fragColor.xyz = mix(qcol, fragColor.xyz, fogAmt);\n"\
 		"		}\n"
 
 #	define GPU_ARRAY_FUNC\
