@@ -2496,7 +2496,7 @@ int g_PsxFogToBlack = 0;
  * 5-to-8-bit replication, word 0 a hole, every other texel opaque, point
  * sampled), so moving a prim here changes no pixel. */
 #define GPU_POOL_SAMPLE_FUNC\
-	"#ifdef SH_POOL_ARRAY\n"\
+	"\n#ifdef SH_POOL_ARRAY\n"\
 	"	uniform highp sampler2DArray s_poolArray;\n"\
 	"	vec2 samplePool(vec2 tc) {\n"\
 	"		return floor(textureLod(s_poolArray, vec3((tc + vec2(0.00025)) * (1.0 / 256.0), v_page_clut.x), 0.0).rg * 255.0 + 0.5) * (1.0 / 255.0);\n"\
