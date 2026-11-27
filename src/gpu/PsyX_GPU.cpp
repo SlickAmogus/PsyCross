@@ -288,8 +288,12 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
  * 1x PGXP picture.
  *
  * Returns 0 and changes nothing when PGXP is off or corner 0 is untracked. */
+/* 0: snow and the beam tip are drawn as with PGXP off (their whole-pixel
+ * triangle, or the whole box at native resolution) while PGXP stays on for
+ * everything else. */
+extern "C" { int g_PsyX_PgxpSnow = 1; }
 extern "C" int Shadow_SpriteCorners(void* anchor, void* c1, void* c2, int nativeScale) {
-	if (!g_PsxUsePgxp) return 0;
+	if (!g_PsxUsePgxp || !g_PsyX_PgxpSnow) return 0;
 	const ShadowEntry* e = Shadow_Get(anchor);
 	if (!e || e->value != *(const unsigned*)anchor || e->w <= 0.0f) return 0;
 	const float h = nativeScale ? 0.5f : 0.0f;
@@ -3381,6 +3385,8 @@ static int PgxpEmitPoly(GrVertex* v, int count)
 /* Console `mixshader 0|1`. Ok is set at startup only if the program built. */
 extern "C" { int g_PsxMixedShader = 1; int g_PsxMixedShaderOk = 0; }
 
+extern "C" { int g_PsxWorldDepthAlways = 1; }
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
@@ -3389,6 +3395,12 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
 	if (s_curPrimIsScratch && !semiTrans && g_PsxFeedbackDampBlend < 1.0f)
 		blendMode = BM_CONSTANT_ALPHA;
+
+	/* Keyed on what DrawSplit does with it: only an opaque WORLD split draws
+	 * GL_ALWAYS. WORLD_FAR and every blended split draw as DISABLED does, and
+	 * keeping them apart cost an Xbox One a hundred draw calls a frame. */
+	if (depthMode != SPLIT_DEPTH_WORLD || blendMode != BM_NONE || !g_PsxWorldDepthAlways)
+		depthMode = SPLIT_DEPTH_DISABLED;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
 
@@ -3542,8 +3554,8 @@ static void AddFbCaptureSplit(int x, int y, int w, int h)
  * whose GTE depth straddles an OT bucket boundary swap which one paints last as
  * the camera moves, and the surface flickers between them. That is the road
  * flicker in central Silent Hill, and it stops with PGXP off because the off
- * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. */
-int g_PsxWorldDepthAlways = 1;
+ * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. Defined above
+ * AddSplit, which keys batches on it. */
 
 int g_PsxDbgAddMode = 1;
 
