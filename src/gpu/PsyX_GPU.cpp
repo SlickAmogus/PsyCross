@@ -996,6 +996,11 @@ extern "C" int g_PsxMixedShader, g_PsxMixedShaderOk;
  * so a prim built without a lookup can never inherit it. */
 static int            s_primPoolLayer = -1;
 static unsigned short s_primPoolTpage = 0, s_primPoolClut = 0;
+/* The row's own texture and its sizes, which the array stands in for. The
+ * distant-world meshes draw through a program that has no array, and take
+ * these instead. */
+static unsigned int   s_primPoolTex = 0;
+static int            s_primPoolDims[6] = { 0, 0, 0, 0, 0, 0 };
 
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
@@ -1031,6 +1036,10 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 		s_primPoolLayer = g_PsxPoolLayerOut;
 		s_primPoolTpage = (unsigned short)tpage;
 		s_primPoolClut  = (unsigned short)clut;
+		s_primPoolTex   = hi;
+		s_primPoolDims[0] = nW;   s_primPoolDims[1] = nH;
+		s_primPoolDims[2] = offX; s_primPoolDims[3] = offY;
+		s_primPoolDims[4] = hiW;  s_primPoolDims[5] = hiH;
 		hi = 0;
 	}
 	if (hi != 0) {
@@ -4984,6 +4993,9 @@ struct FarTexMemo
 	TextureID tex;
 	int       w, h, ox, oy, hw, hh;
 	int       poolLayer; /* texture pool array layer, -1 = none */
+	/* With a layer: the row's own texture, for a draw that cannot use the array. */
+	TextureID rowTex;
+	int       rowDims[6];
 };
 #define FAR_TEX_MEMO_SIZE 2048
 static FarTexMemo s_farTexMemo[FAR_TEX_MEMO_SIZE];
@@ -5112,6 +5124,8 @@ static const FarTexMemo* FarTexLookup(unsigned short tpage, unsigned short clut)
 			m->hw  = overrideTextureHiresW;
 			m->hh  = overrideTextureHiresH;
 			m->poolLayer = s_primPoolLayer;
+			m->rowTex    = (s_primPoolLayer >= 0) ? (TextureID)s_primPoolTex : (TextureID)0;
+			memcpy(m->rowDims, s_primPoolDims, sizeof(m->rowDims));
 			return m;
 		}
 	}
@@ -5356,16 +5370,28 @@ static void DrawFarMeshSplit(const GPUDrawSplit& split)
 		{
 			TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 			TextureID textureId = g_vramTexture;
-			if (m->tex != 0)
+			int w = m->w, h = m->h, ox = m->ox, oy = m->oy, hw = m->hw, hh = m->hh;
+			/* A row the texture pool array took has no override texture any
+			 * more (the legacy splits read its layer). These meshes have no
+			 * array to read: without the row's own texture they sampled VRAM
+			 * through a clut that names no palette, and a distant block drew
+			 * empty or wrong until the near path took it over. */
+			TextureID tex = (m->tex != 0) ? m->tex : ((m->poolLayer >= 0) ? m->rowTex : (TextureID)0);
+			if (m->tex == 0 && tex != 0)
+			{
+				w = m->rowDims[0]; h = m->rowDims[1]; ox = m->rowDims[2]; oy = m->rowDims[3];
+				hw = m->rowDims[4]; hh = m->rowDims[5];
+			}
+			if (tex != 0)
 			{
 				texFormat = TF_32_BIT_RGBA;
-				textureId = m->tex;
+				textureId = tex;
 			}
 			GR_SetStencilMode(split.drawPrimMode);
 			g_PsxSplitIsGlyph = m->glyph;
 			GR_SetTexture(textureId, texFormat);
 			if (texFormat == TF_32_BIT_RGBA)
-				GR_SetOverrideTextureSize(m->w, m->h, m->ox, m->oy, m->hw, m->hh);
+				GR_SetOverrideTextureSize(w, h, ox, oy, hw, hh);
 			GR_SetupClipMode(&split.drawenv.clip, split.drawenv.dfe);
 			GR_SetOffscreenState(&split.drawenv.clip, !split.drawenv.dfe);
 			GR_SetBlendMode(BM_NONE);
