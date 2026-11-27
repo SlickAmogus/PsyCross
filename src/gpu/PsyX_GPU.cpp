@@ -982,6 +982,17 @@ extern "C" float g_PsxFeedbackDampBlend;
  * 127/128, and 127 is a PS1 decay frame for its copy loop). */
 static int s_curPrimR0 = 128;
 
+/* Texture pool array layer of the pool row the host's lookup served, or -1
+ * (hires_override.c sets it; it stays -1 unless the array is on). */
+extern "C" { int g_PsxPoolLayerOut = -1; }
+extern "C" int g_PsxMixedShader, g_PsxMixedShaderOk;
+
+/* The array layer ApplyHiresOverride chose, and the tpage/clut it chose it for.
+ * MakeTexcoord* writes the layer into the vertex page only for that same pair,
+ * so a prim built without a lookup can never inherit it. */
+static int            s_primPoolLayer = -1;
+static unsigned short s_primPoolTpage = 0, s_primPoolClut = 0;
+
 static inline void ApplyHiresOverride(int tpage, int clut)
 {
 	int nW = 0, nH = 0, offX = 0, offY = 0, hiW = 0, hiH = 0;
@@ -1006,7 +1017,18 @@ static inline void ApplyHiresOverride(int tpage, int clut)
 		s_curPrimIsScratch = 1;
 	}
 
+	g_PsxPoolLayerOut = -1;
 	unsigned int hi = HiresOverride_LookupByTpageClut(tpage, clut, &nW, &nH, &offX, &offY, &hiW, &hiH);
+	s_primPoolLayer = -1;
+	/* A pool row that lives in the texture array draws through the all-format
+	 * program like a VRAM texture, so it no longer ends the batch it sits in. */
+	if (hi != 0 && g_PsxPoolLayerOut >= 0 && drPsyxTexOverride == 0 && g_PsxMixedShader && g_PsxMixedShaderOk)
+	{
+		s_primPoolLayer = g_PsxPoolLayerOut;
+		s_primPoolTpage = (unsigned short)tpage;
+		s_primPoolClut  = (unsigned short)clut;
+		hi = 0;
+	}
 	if (hi != 0) {
 		overrideTexture        = (TextureID)hi;
 		overrideTextureWidth   = nW;
@@ -2599,6 +2621,15 @@ static inline short TexcoordPage(int tpage)
 	return (short)((tpage & 0x1F) | (((tpage >> 7) & 0x3) << 5));
 }
 
+/* 16384 + layer for a prim whose texture is in the pool array (see the vertex
+ * shader); a prim the last lookup was not for keeps its VRAM page. */
+static inline short TexcoordPageFor(int tpage, int clut)
+{
+	if (s_primPoolLayer >= 0 && (unsigned short)tpage == s_primPoolTpage && (unsigned short)clut == s_primPoolClut)
+		return (short)(0x4000 + s_primPoolLayer);
+	return TexcoordPage(tpage);
+}
+
 void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, unsigned char* uv2, unsigned char* uv3, short page, short clut, unsigned char dither)
 {
 	assert(uv0);
@@ -2607,7 +2638,7 @@ void MakeTexcoordQuad(GrVertex* vertex, unsigned char* uv0, unsigned char* uv1, 
 	assert(uv3);
 
 	const unsigned char bright = 2;
-	short pageCoord = TexcoordPage(page);
+	short pageCoord = TexcoordPageFor(page, clut);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -2662,7 +2693,7 @@ void MakeTexcoordTriangle(GrVertex* vertex, unsigned char* uv0, unsigned char* u
 	assert(uv2);
 
 	const unsigned char bright = 2;
-	short pageCoord = TexcoordPage(page);
+	short pageCoord = TexcoordPageFor(page, clut);
 
 	vertex[0].u = uv0[0];
 	vertex[0].v = uv0[1];
@@ -2732,7 +2763,7 @@ void MakeTexcoordRect(GrVertex* vertex, unsigned char* uv, short page, short clu
 
 	const unsigned char bright = 2;
 	const unsigned char dither = 0;
-	short pageCoord = TexcoordPage(page);
+	short pageCoord = TexcoordPageFor(page, clut);
 
 	vertex[0].u = uv[0];
 	vertex[0].v = uv[1];
@@ -3715,6 +3746,10 @@ void DrawAllSplits()
 
 	// next code ideally should be called before EndScene
 	GR_UpdateVertexBuffer(g_vertexBuffer, g_vertexIndex);
+	{
+		extern void GR_BindPoolArray(void);
+		GR_BindPoolArray();
+	}
 
 	/* Flashlight shadow map: depth pre-pass from the light POV, into the shadow
 	 * FBO, while the frame VAO is still bound. The depth shader samples each
@@ -4870,6 +4905,7 @@ struct FarTexMemo
 	unsigned char drop, glyph, special, _pad;
 	TextureID tex;
 	int       w, h, ox, oy, hw, hh;
+	int       poolLayer; /* texture pool array layer, -1 = none */
 };
 #define FAR_TEX_MEMO_SIZE 2048
 static FarTexMemo s_farTexMemo[FAR_TEX_MEMO_SIZE];
@@ -4997,6 +5033,7 @@ static const FarTexMemo* FarTexLookup(unsigned short tpage, unsigned short clut)
 			m->oy  = overrideTextureOffsetY;
 			m->hw  = overrideTextureHiresW;
 			m->hh  = overrideTextureHiresH;
+			m->poolLayer = s_primPoolLayer;
 			return m;
 		}
 	}
@@ -5022,6 +5059,7 @@ static void EmitFarChain(int first)
 	const int depthMode = g_PsxPgxpWorldDepth ? SPLIT_DEPTH_WORLD : SPLIT_DEPTH_DISABLED;
 	const float farBias = (float)g_PsxPgxpWorldFarBias;
 	unsigned lastKey = 0xFFFFFFFFu;
+	short poolPage = -1;
 
 	s_curPrimSemiTrans = 0;
 	s_primAlphaPending = 255;
@@ -5058,6 +5096,7 @@ static void EmitFarChain(int first)
 			overrideTextureHiresW  = m->hw;
 			overrideTextureHiresH  = m->hh;
 			overrideFeedbackScreen = 0;
+			poolPage = (m->poolLayer >= 0) ? (short)(0x4000 + m->poolLayer) : (short)-1;
 			activeDrawEnv.tpage = q->tpage;
 			if (g_PsxWholeMapProbe == 1)
 			{
@@ -5101,7 +5140,7 @@ static void EmitFarChain(int first)
 			if (iy < -1024) iy = -1024; else if (iy > 1023) iy = 1023;
 			v.x = (short)(ix + ofsXi);
 			v.y = (short)(iy + ofsYi);
-			v.page = page;
+			v.page = (poolPage >= 0) ? poolPage : page;
 			v.clut = (short)q->clut;
 			v.z = z;
 			v.u = q->uv[k][0];
