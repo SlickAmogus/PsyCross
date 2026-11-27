@@ -3054,6 +3054,8 @@ int g_PsxFogToBlack = 0;
 	"			}\n"\
 	"			float ir = clamp(dot(row, N) / 4096.0, 0.0, 32767.0);\n"\
 	"			rgb = floor(clamp(bk + u_ppLC * ir / 65536.0, 0.0, 255.0)) / 255.0 * bright;\n"\
+	/* A character the game is fading out (a Larval Stalker vanishing) darkens by v_fade: the game dims its light for that one draw, which the uniforms, one set a frame, cannot carry. Above 1.5 is Harry's beam marker, not a fade. */\
+	"			if (v_fade <= 1.5) rgb *= 1.0 - clamp(v_fade, 0.0, 1.0);\n"\
 	"		}\n"\
 	"		if (u_ppHeroOn > 0) rgb = PpHero(rgb, -N / 4064.0);\n"\
 	"		return vec4(rgb, v_color.a);\n"\
