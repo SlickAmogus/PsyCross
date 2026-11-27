@@ -3462,6 +3462,10 @@ void GR_BindPoolArray(void)
 ShaderID GR_Shader_Compile(const char* source)
 {
 #if defined(ES2_SHADERS)
+	/* No sampler2DArray in GLSL ES 1.00; the host would otherwise still fill the
+	 * array and stamp prims with layers no shader here can read. */
+	g_PsxPoolArray = 0;
+
 	const char* GLSL_HEADER_VERT =
 		"#version 100\n"
 		"precision highp int;\n"
