@@ -1904,8 +1904,17 @@ extern "C" void GR_ApplyPresentSize(int realW, int realH)
 		int   w = realW, h = realH;
 		int   wanted = GR_SceneAlwaysOffscreen() || GR_FgWantsTarget();
 		float s = g_cfg_renderScale;
+		/* Borderless keeps the screen-sized window and renders at the chosen
+		 * size. An Xbox app's window is the whole screen whatever the mode, so
+		 * there the chosen size is always the render size; otherwise only 1080p
+		 * and native could ever be had there. */
+#if defined(PSYX_UWP)
+		const int sizeIsRender = g_cfgFullscreenMode == 2 || SDL_WinRTGetDeviceFamily() == SDL_WINRT_DEVICEFAMILY_XBOX;
+#else
+		const int sizeIsRender = g_cfgFullscreenMode == 2;
+#endif
 
-		if (g_cfgFullscreenMode == 2 && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
+		if (sizeIsRender && g_cfgRenderWidth > 0 && g_cfgRenderHeight > 0 &&
 		    (g_cfgRenderWidth != realW || g_cfgRenderHeight != realH))
 		{
 			w = g_cfgRenderWidth;
