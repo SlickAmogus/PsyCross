@@ -2762,7 +2762,29 @@ int g_PsxFogToBlack = 0;
 /* One program for every VRAM format: the tpage format rides in each vertex
  * (v_texfmt), so a format change in OT order no longer ends the batch. It is
  * constant across a prim, so the branch is coherent. */
+/* Texture pool array (g_PsxPoolArray): the pool's native-resolution rows held
+ * as the 16-bit words VRAM would hold, one 256x256 layer each, so they sample
+ * through the same decode as VRAM and batch with it. PoolTextureSample decodes
+ * exactly as the 32-bit pool path does (bgr555_to_rgba in hires_override.c:
+ * 5-to-8-bit replication, word 0 a hole, every other texel opaque, point
+ * sampled), so moving a prim here changes no pixel. */
+#define GPU_POOL_SAMPLE_FUNC\
+	"#ifdef SH_POOL_ARRAY\n"\
+	"	uniform highp sampler2DArray s_poolArray;\n"\
+	"	vec2 samplePool(vec2 tc) {\n"\
+	"		return floor(textureLod(s_poolArray, vec3((tc + vec2(0.00025)) * (1.0 / 256.0), v_page_clut.x), 0.0).rg * 255.0 + 0.5) * (1.0 / 255.0);\n"\
+	"	}\n"\
+	"	vec4 PoolTextureSample(vec2 P) {\n"\
+	"		vec2 rg = samplePool(P);\n"\
+	"		float w = floor(rg.x * 255.0 + 0.5) + floor(rg.y * 255.0 + 0.5) * 256.0;\n"\
+	"		if (w == 0.0) discard;\n"\
+	"		vec3 c = mod(floor(vec3(w) / vec3(1.0, 32.0, 1024.0)), 32.0);\n"\
+	"		return vec4((c * 8.0 + floor(c / 4.0)) / 255.0, 1.0);\n"\
+	"	}\n"\
+	"#endif\n"
+
 #define GPU_SAMPLE_TEXTURE_MIX_FUNC\
+	GPU_POOL_SAMPLE_FUNC\
 	"	vec2 samplePSX4(vec2 tc){\n"\
 	GPU_SAMPLE_4BIT_BODY\
 	"	}\n"\
@@ -2773,6 +2795,9 @@ int g_PsxFogToBlack = 0;
 	GPU_SAMPLE_16BIT_BODY\
 	"	}\n"\
 	"	vec2 samplePSX(vec2 tc){\n"\
+	"#ifdef SH_POOL_ARRAY\n"\
+	"		if (v_texfmt > 2.5 && v_texfmt < 3.5) return samplePool(tc);\n"\
+	"#endif\n"\
 	"		if (v_texfmt < 0.5) return samplePSX4(tc);\n"\
 	"		if (v_texfmt < 1.5) return samplePSX8(tc);\n"\
 	"		return samplePSX16(tc);\n"\
@@ -3005,6 +3030,11 @@ int g_PsxFogToBlack = 0;
 	"		v_page_clut.w = floor(a_position.w / 64.0) / 512.0;\n"\
 	"		v_page_clut.xy += c_UVFudge;\n"\
 	"		v_page_clut.zw += c_UVFudge;\n"\
+	/* A page of 16384 + n is layer n of the texture pool array (MakeTexcoord*),
+	 * read as the reserved tpage format 3, which no VRAM prim in this program has. */\
+	"#ifdef SH_POOL_ARRAY\n"\
+	"		if (a_position.z >= 16384.0) { v_texfmt = 3.0; v_page_clut.x = a_position.z - 16384.0; }\n"\
+	"#endif\n"\
 	"		float farFog = 0.0;\n"\
 	"		if (u_farMode > 0) {\n"\
 	"			vec3 fv = vec3(dot(u_farR0, a_pgxp), dot(u_farR1, a_pgxp), dot(u_farR2, a_pgxp)) + u_farBase;\n"\
@@ -3344,6 +3374,15 @@ int g_PsxFogToBlack = 0;
 	"		u_untextured = (v_texfmt > 3.5) ? 1 : 0;\n"\
 	"		if (u_untextured > 0)\n"\
 	"			fragColor = lut(vec2(1.0));\n"\
+	"#ifdef SH_POOL_ARRAY\n"\
+	"		else if (v_texfmt > 2.5) {\n"\
+	"			fragColor = PoolTextureSample(v_texcoord.xy);\n"\
+	/* The 32-bit program scales alpha by v_color.a before the tail scales it
+	 * again, and leaves an additive prim at 1.0 where the tail below maps 0.5
+	 * there. */\
+	"			fragColor.a = (u_fogToBlack > 0) ? 0.5 : v_color.a;\n"\
+	"		}\n"\
+	"#endif\n"\
 	"		else {\n"\
 	GPU_FRAGMENT_FILTERED_SAMPLE\
 	"		}\n"\
@@ -3619,6 +3658,23 @@ int GR_Shader_CheckProgramStatus(GLuint program)
 	return 0;
 }
 
+/* Texture pool array. g_PsxPoolArray is set by the host before the shaders are
+ * built; g_PsxPoolArrayTex is the GL_TEXTURE_2D_ARRAY it fills (hires_override.c).
+ * Units 3-5 belong to the replacement character meshes. */
+#define PSYX_POOL_ARRAY_UNIT 6
+extern "C" { int g_PsxPoolArray = 0; unsigned int g_PsxPoolArrayTex = 0; }
+
+void GR_BindPoolArray(void)
+{
+#if defined(GL_TEXTURE_2D_ARRAY) && !defined(ES2_SHADERS)
+	if (g_PsxPoolArrayTex == 0)
+		return;
+	glActiveTexture(GL_TEXTURE0 + PSYX_POOL_ARRAY_UNIT);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, g_PsxPoolArrayTex);
+	glActiveTexture(GL_TEXTURE0);
+#endif
+}
+
 ShaderID GR_Shader_Compile(const char* source)
 {
 #if defined(ES2_SHADERS)
@@ -3829,6 +3885,13 @@ ShaderID GR_Shader_Compile(const char* source)
 		strcat(extra_fs_defines, tex0);
 		if (s_compileLean)
 			strcat(extra_fs_defines, "#define SH_LEAN\n");
+#if !defined(ES2_SHADERS)
+		if (g_PsxPoolArray)
+		{
+			strcat(extra_vs_defines, "#define SH_POOL_ARRAY\n");
+			strcat(extra_fs_defines, "#define SH_POOL_ARRAY\n");
+		}
+#endif
 	}
 
 	{
@@ -3890,10 +3953,12 @@ ShaderID GR_Shader_Compile(const char* source)
 
 	GLint sampler = 0;
 	GLint lutSampler = 2;
+	GLint poolSampler = PSYX_POOL_ARRAY_UNIT;
 	glUseProgram(program);
 	glUniform1iv(glGetUniformLocation(program, "s_texture"), 1, &sampler);
 	/* Shaders without the decode table return location -1, where this is a no-op. */
 	glUniform1iv(glGetUniformLocation(program, "s_rgLut"), 1, &lutSampler);
+	glUniform1iv(glGetUniformLocation(program, "s_poolArray"), 1, &poolSampler);
 	glUseProgram(0);
 	g_PreviousShader = (ShaderID)-1;
 
@@ -6686,6 +6751,9 @@ static const char* s_shadowDepthShaderSrc =
 	"	v_page_clut.y = floor(pageXY / 16.0) * 256.0 + 0.00025;\n"
 	"	v_page_clut.z = fract(a_position.w / 64.0) + 0.00025;\n"
 	"	v_page_clut.w = floor(a_position.w / 64.0) / 512.0 + 0.00025;\n"
+	"#ifdef SH_POOL_ARRAY\n"
+	"	if (u_smode == 1 && a_position.z >= 16384.0) { v_untex = 0.0; v_texfmt = 3.0; v_page_clut.x = a_position.z - 16384.0; }\n"
+	"#endif\n"
 	"}\n"
 	"#else\n"
 	GPU_FETCH_VRAM_FUNC
@@ -6704,7 +6772,12 @@ static const char* s_shadowDepthShaderSrc =
 	"	} else {\n"
 	"		vec2 rg = samplePSX(v_texcoord.xy);\n"
 	"		if (rg.x + rg.y == 0.0) discard;\n"
+	/* A pool texel casts like the 32-bit path's, where every texel is opaque. */
+	"#ifdef SH_POOL_ARRAY\n"
+	"		if (u_semi > 0 && rg.y * 255.0 > 127.5 && !(v_texfmt > 2.5 && v_texfmt < 3.5)) discard;\n"
+	"#else\n"
 	"		if (u_semi > 0 && rg.y * 255.0 > 127.5) discard;\n"
+	"#endif\n"
 	"	}\n"
 	"	fragColor = vec4(0.0);\n"
 	"}\n"
