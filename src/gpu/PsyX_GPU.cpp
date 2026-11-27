@@ -3384,6 +3384,8 @@ struct PerfCpuScope
 	}
 };
 
+extern "C" { int g_PsxWorldDepthAlways = 1; }
+
 static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_DISABLED)
 {
 	int tpage = activeDrawEnv.tpage;
@@ -3392,6 +3394,12 @@ static void AddSplit(bool semiTrans, bool textured, int depthMode = SPLIT_DEPTH_
 	BlendMode blendMode = semiTrans ? GET_TPAGE_BLEND(tpage) : BM_NONE;
 	if (s_curPrimIsScratch && !semiTrans && g_PsxFeedbackDampBlend < 1.0f)
 		blendMode = BM_CONSTANT_ALPHA;
+
+	/* Keyed on what DrawSplit does with it: only an opaque WORLD split draws
+	 * GL_ALWAYS. WORLD_FAR and every blended split draw as DISABLED does, and
+	 * keeping them apart cost an Xbox One a hundred draw calls a frame. */
+	if (depthMode != SPLIT_DEPTH_WORLD || blendMode != BM_NONE || !g_PsxWorldDepthAlways)
+		depthMode = SPLIT_DEPTH_DISABLED;
 	TexFormat texFormat = GET_TPAGE_FORMAT(tpage);
 	TextureID textureId = textured ? g_vramTexture : g_whiteTexture;
 
@@ -3564,8 +3572,8 @@ static void AddFbCaptureSplit(int x, int y, int w, int h)
  * whose GTE depth straddles an OT bucket boundary swap which one paints last as
  * the camera moves, and the surface flickers between them. That is the road
  * flicker in central Silent Hill, and it stops with PGXP off because the off
- * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. */
-int g_PsxWorldDepthAlways = 1;
+ * path still has LEQUAL arbitrating. Console: `worlddepth 0|1`. Defined above
+ * AddSplit, which keys batches on it. */
 
 int g_PsxDbgAddMode = 1;
 
