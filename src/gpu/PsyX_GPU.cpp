@@ -288,8 +288,12 @@ extern "C" void Shadow_Copy(void* dst, const void* src) {
  * 1x PGXP picture.
  *
  * Returns 0 and changes nothing when PGXP is off or corner 0 is untracked. */
+/* 0: snow and the beam tip are drawn as with PGXP off (their whole-pixel
+ * triangle, or the whole box at native resolution) while PGXP stays on for
+ * everything else. */
+extern "C" { int g_PsyX_PgxpSnow = 1; }
 extern "C" int Shadow_SpriteCorners(void* anchor, void* c1, void* c2, int nativeScale) {
-	if (!g_PsxUsePgxp) return 0;
+	if (!g_PsxUsePgxp || !g_PsyX_PgxpSnow) return 0;
 	const ShadowEntry* e = Shadow_Get(anchor);
 	if (!e || e->value != *(const unsigned*)anchor || e->w <= 0.0f) return 0;
 	const float h = nativeScale ? 0.5f : 0.0f;
