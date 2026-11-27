@@ -1051,6 +1051,13 @@ void PsyX_Sys_DoPollEvent()
 	}
 }
 
+/* For a screen that runs its own loop before the game's first frame: the pads
+ * are opened from these events, so it cannot poll SDL itself. */
+extern "C" void PsyX_PumpEvents(void)
+{
+	PsyX_Sys_DoPollEvent();
+}
+
 char begin_scene_flag = 0;
 
 char PsyX_BeginScene()

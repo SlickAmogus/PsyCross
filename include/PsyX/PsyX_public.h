@@ -297,6 +297,7 @@ extern void PsyX_SetSwapInterval(int interval);
 /* PC port: apply window mode + resolution at runtime.
  * fullscreen: 0 = windowed, 1 = exclusive fullscreen, 2 = borderless desktop. */
 extern void PsyX_ApplyWindowState(int width, int height, int fullscreen);
+extern void PsyX_PumpEvents(void);
 
 /* PC port: re-evaluate mouse confinement (see g_cfg_confineCursor). Idempotent;
  * call after anything that changes window mode or focus. */
